@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clampwise"
+version = "1.0.0"
+description = "Analysis for slice electrophysiology: whole-cell patch clamp and field recordings from Clampex and WinLTP"
+requires-python = ">=3.12"
+readme = "README.md"
+authors = [{ name = "Daniel Mercado" }]
+license = { text = "GPL-3.0-only" }
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pandas>=2.0",
+    "pyabf>=2.3.8",
+    "pyqtgraph>=0.13",
+    "PyQt5>=5.15",
+    "matplotlib>=3.8",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+# Mixed-effects models only (B23); everything else works without it.
+stats = ["statsmodels>=0.14"]
+
+[project.urls]
+Homepage = "https://github.com/Du5ty0311/Clampwise"
+Issues = "https://github.com/Du5ty0311/Clampwise/issues"
+
+[project.scripts]
+clampwise = "clampwise.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,19 @@
+# The build env (envs\clampwise-build): every package from PyPI wheels, pinned to
+# the versions in envs\synaptoscope so the frozen app computes what the tests check.
+# conda's numpy/scipy are left out on purpose: conda-forge scipy crashed frozen here.
+numpy==2.5.3
+scipy==1.18.1
+pandas==2.3.3
+pyabf==2.3.8
+pyqtgraph==0.14.0
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.2
+openpyxl==3.1.5
+# the figure builder (matplotlib draws and exports, Pillow reads pictures to digitize and writes TIFF)
+# and the mixed models of its statistics (statsmodels, optional in development)
+matplotlib==3.11.2
+pillow==12.3.0
+statsmodels==0.15.0
+patsy==1.0.3
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.7
