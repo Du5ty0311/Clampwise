@@ -37,7 +37,8 @@ if (-not (Test-Path $BuildPython)) {
 
 # Conda's python keeps DLLs it needs itself (libffi, ...) in Library\bin;
 # PyInstaller finds dependencies on PATH, which calling python.exe by path leaves out.
-$env:PATH = (@($BuildEnv, "$BuildEnv\Library\bin", "$BuildEnv\DLLs", "$BuildEnv\Scripts") -join ";") + ";$env:PATH"
+$UserPath = $env:PATH                                 # the built program is checked as a user runs it
+$env:PATH =(@($BuildEnv, "$BuildEnv\Library\bin", "$BuildEnv\DLLs", "$BuildEnv\Scripts") -join ";") + ";$env:PATH"
 
 if (-not $SkipTests) {
     Write-Host "==> Tests" -ForegroundColor Cyan
@@ -71,6 +72,8 @@ Copy-Item (Join-Path $Project "LICENSE") (Join-Path $Project "dist\Clampwise\LIC
 
 Write-Host "==> Self-test of the built program" -ForegroundColor Cyan
 # Windowed: no console, so the report is read from the file it writes.
+# with the user's PATH, not the build env's: the program checked as it is run
+$env:PATH = $UserPath
 $proc = Start-Process -FilePath $Exe -ArgumentList "--self-test" -Wait -PassThru
 Get-Content (Join-Path $env:LOCALAPPDATA "Clampwise\self-test.txt")
 if ($proc.ExitCode -ne 0) { throw "The built program failed its self-test (exit $($proc.ExitCode))." }
@@ -84,9 +87,11 @@ while ($app.MainWindowHandle -eq 0 -and $watch.Elapsed.TotalSeconds -lt 60 -and 
 }
 $seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
 if ($app.MainWindowHandle -eq 0) { throw "No window within $seconds s." }
-# closed as a user closes it; asked again until it has (a close sent the moment the window appears can come before
-# the program listens: a 1.2.0 build left its copy open), and ended only if it never does
+# closed as a user closes it, asked again until it has, and ended only if it never does. Qt makes the main window
+# again early in start-up, so the handle is read anew each time: closes sent to the first one were lost (the 1.2.0
+# and 1.3.0 builds left their copy open)
 for ($i = 0; $i -lt 20 -and -not $app.HasExited; $i++) {
+    $app.Refresh()                                   # the window is made again early in start-up: its handle now
     $app.CloseMainWindow() | Out-Null
     $app.WaitForExit(1000) | Out-Null
 }
