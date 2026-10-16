@@ -237,7 +237,11 @@ class AdjustDialog(QtWidgets.QDialog):
         self.clipped.toggled.connect(lambda on: panel.set_correction(show_clipped=on))
         self.cross = QtWidgets.QCheckBox("Crosshair")
         self.cross.toggled.connect(panel.set_crosshair)
-        for w in (self.lut, self.clipped, self.cross):
+        self.compass = QtWidgets.QCheckBox("Compass")
+        self.compass.setToolTip("The slice's rostral, caudal, medial and lateral over the picture (its orientation "
+                                "below)")
+        self.compass.toggled.connect(lambda *_: panel._orientation_changed())
+        for w in (self.lut, self.clipped, self.cross, self.compass):
             disp.addWidget(w)
         disp.addStretch(1)
         lay.addLayout(disp)
@@ -250,6 +254,30 @@ class AdjustDialog(QtWidgets.QDialog):
         self.hist_curve = self.hist.plot([], [], stepMode="center", fillLevel=0,
                                          brush=theme.series(panel.window.palette)[0])
         lay.addWidget(self.hist)
+        lay.addWidget(label("Orientation of the slice", "section"))
+        orient = box("h", "s")
+        orient.addWidget(label("Rostral points", "muted"))
+        self.rostral = QtWidgets.QSpinBox()
+        self.rostral.setRange(0, 359)
+        self.rostral.setSingleStep(15)
+        self.rostral.setWrapping(True)
+        self.rostral.setSuffix(" deg")
+        self.rostral.setToolTip("Where rostral is on the screen: degrees clockwise from up (0 up, 90 right, 180 down, "
+                                "270 left)")
+        orient.addWidget(self.rostral)
+        orient.addWidget(widgets.button("Turn left", lambda: self.rostral.setValue((self.rostral.value() - 90) % 360),
+                                        "Rostral a quarter turn anticlockwise", quiet=True))
+        orient.addWidget(widgets.button("Turn right", lambda: self.rostral.setValue((self.rostral.value() + 90) % 360),
+                                        "Rostral a quarter turn clockwise", quiet=True))
+        self.medial = QtWidgets.QComboBox()
+        self.medial.addItems(["Medial to the right of rostral", "Medial to the left of rostral"])
+        self.medial.setToolTip("As one faces rostral: which side is medial (the other hemisphere's slice, or a picture "
+                               "mirrored, has it on the other side)")
+        orient.addWidget(self.medial)
+        orient.addStretch(1)
+        lay.addLayout(orient)
+        self.rostral.valueChanged.connect(lambda *_: panel._orientation_changed())
+        self.medial.currentIndexChanged.connect(lambda *_: panel._orientation_changed())
         lay.addWidget(label("Length calibration", "section"))
         cal = box("h", "s")
         self.um = QtWidgets.QDoubleSpinBox()             # the calibration of the objective chosen on the panel
@@ -376,6 +404,16 @@ class CameraPanel(QtWidgets.QWidget):
         self.bar_text = pg.TextItem("", color="w", anchor=(1, 1))
         for item in (self.bar_line, self.bar_text):
             self.box.addItem(item)
+        # the slice's orientation: a cross of its four directions, rostral the stronger arm (rig.picture.compass)
+        self.compass_lines = {name: pg.PlotCurveItem(pen=pg.mkPen("w", width=4 if name == "Rostral" else 2))
+                              for name in ("Rostral", "Caudal", "Medial", "Lateral")}
+        self.compass_text = {name: pg.TextItem(name, color="w", anchor=(0.5, 0.5), fill=pg.mkBrush(0, 0, 0, 120))
+                             for name in self.compass_lines}
+        for name in self.compass_lines:
+            self.box.addItem(self.compass_lines[name])
+            self.box.addItem(self.compass_text[name])
+            self.compass_lines[name].setVisible(False)
+            self.compass_text[name].setVisible(False)
         self.cross = [pg.InfiniteLine(angle=a, pen=pg.mkPen("y", width=1)) for a in (0, 90)]
         for line in self.cross:
             line.setVisible(False)
@@ -717,7 +755,31 @@ class CameraPanel(QtWidgets.QWidget):
         self._measured()
         self.save_settings()
 
+    def orientation(self) -> tuple[int, bool]:
+        """(rostral, degrees clockwise from up on the screen; medial to the right of rostral)."""
+        return self.dialog.rostral.value(), self.dialog.medial.currentIndex() == 0
+
+    def _orientation_changed(self) -> None:
+        self._place_compass()
+        self.save_settings()
+
+    def _place_compass(self) -> None:
+        h, w = (self.last.rgb.shape[:2] if self.last is not None else (0, 0))
+        show = bool(w and self.dialog.compass.isChecked())
+        for name in self.compass_lines:
+            self.compass_lines[name].setVisible(show)
+            self.compass_text[name].setVisible(show)
+        if not show:
+            return
+        deg, right = self.orientation()
+        arm = 0.08 * min(w, h)                              # in the picture's top-left corner, clear of its edge
+        cx, cy = 0.04 * w + 1.6 * arm, 0.05 * h + 1.6 * arm
+        for name, (dx, dy) in picture.compass(deg, right).items():
+            self.compass_lines[name].setData([cx, cx + arm * dx], [cy, cy + arm * dy])
+            self.compass_text[name].setPos(cx + 1.45 * arm * dx, cy + 1.45 * arm * dy)
+
     def _place_bar(self) -> None:
+        self._place_compass()
         um = self.scale()[0]
         h, w = (self.last.rgb.shape[:2] if self.last is not None else (0, 0))
         show = bool(um and w and self.dialog.bar.isChecked())
@@ -751,6 +813,8 @@ class CameraPanel(QtWidgets.QWidget):
         um = um or None
         info = {"camera_serial": f.serial, "exposure_ms": f.exposure_ms, "gain": f.gain, "averaged": f.averaged,
                 "objective": f"{self.magnification:g}x", "um_per_px": um, "scale": how,
+                "orientation": "rostral {} deg clockwise from up, medial to its {}".format(
+                    self.orientation()[0], "right" if self.orientation()[1] else "left"),
                 "shown_with": self.adjust.changed(), "corrections_shown": self.corrections.active(),
                 "saved_by": "Clampwise", "taken": time.strftime("%Y-%m-%d %H:%M:%S")}
         label_ = " ".join(x for x in (f"{self.magnification:g}x", self.dialog.presets.currentText()
@@ -793,6 +857,13 @@ class CameraPanel(QtWidgets.QWidget):
         self.dialog.adapter.blockSignals(True)
         self.dialog.pixel_um.setValue(float(s.value("camera/pixel_um", 0.0) or 0.0) or _camera_pixel_um())
         self.dialog.adapter.setValue(float(s.value("camera/adapter", 1.0) or 1.0))
+        for w_ in (self.dialog.compass, self.dialog.rostral, self.dialog.medial):
+            w_.blockSignals(True)
+        self.dialog.compass.setChecked(str(s.value("camera/compass", "false")).lower() == "true")
+        self.dialog.rostral.setValue(int(float(s.value("camera/rostral_deg", 0) or 0)))
+        self.dialog.medial.setCurrentIndex(0 if str(s.value("camera/medial_right", "true")).lower() == "true" else 1)
+        for w_ in (self.dialog.compass, self.dialog.rostral, self.dialog.medial):
+            w_.blockSignals(False)
         self.dialog.pixel_um.blockSignals(False)
         self.dialog.adapter.blockSignals(False)
         self.set_objectives(str(s.value("camera/objectives", "") or ""))
@@ -810,6 +881,9 @@ class CameraPanel(QtWidgets.QWidget):
         s.setValue("camera/calibrated", json.dumps({f"{k:g}": v for k, v in self.calibrated.items()}))
         s.setValue("camera/pixel_um", self.dialog.pixel_um.value())
         s.setValue("camera/adapter", self.dialog.adapter.value())
+        s.setValue("camera/compass", self.dialog.compass.isChecked())
+        s.setValue("camera/rostral_deg", self.dialog.rostral.value())
+        s.setValue("camera/medial_right", self.dialog.medial.currentIndex() == 0)
         s.setValue("camera/objectives", ", ".join(f"{m:g}" for m in self.objectives))
         s.setValue("camera/objective_index", self.objective.value())
         s.setValue("camera/scale_bar", self.dialog.bar.isChecked())

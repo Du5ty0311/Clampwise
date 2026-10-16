@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0 — 2026-10-16
+
+- **A compass for the slice.** Rostral, caudal, medial and lateral marked over the camera's picture (Adjust...,
+  Compass), turned to where rostral points on the screen (degrees clockwise from up; a quarter turn either way with
+  one click) with medial on the side chosen; the rostral arm drawn thicker. Kept between sessions; snapshots record
+  the orientation.
+
 ## 1.3.0 — 2026-10-16
 
 - **Each pixel's size in um, without a micrometer.** The camera's own pixel (4.5 um on the INFINITY8-3M, filled in

@@ -192,6 +192,17 @@ def test_each_objective_s_scale_follows_one_calibration_by_its_magnification():
     assert um == pytest.approx(0.098 * 40 / 63) and "40x" in how
 
 
+def test_the_compass_turns_with_rostral_and_puts_medial_on_the_side_chosen():
+    c = picture.compass(0, medial_right=True)                                       # screen: x right, y down
+    assert c["Rostral"] == (0.0, -1.0) and c["Caudal"] == (0.0, 1.0)
+    assert c["Medial"] == (1.0, 0.0) and c["Lateral"] == (-1.0, 0.0)
+    c = picture.compass(90, medial_right=True)                                      # rostral right: medial down
+    assert c["Rostral"] == (1.0, 0.0) and c["Medial"] == (0.0, 1.0)
+    c = picture.compass(0, medial_right=False)
+    assert c["Medial"] == (-1.0, 0.0) and c["Lateral"] == (1.0, 0.0)
+    assert set(picture.compass(45)) == {"Rostral", "Caudal", "Medial", "Lateral"}  # no dorsal or ventral
+
+
 def test_before_any_calibration_a_pixel_s_size_follows_from_the_camera_s_own_pixel():
     assert picture.pixel_um_of("INFINITY8-3M") == 4.5 and picture.pixel_um_of("Lumenera INFINITY8-3M") == 4.5
     assert picture.pixel_um_of("unknown camera") == 0.0

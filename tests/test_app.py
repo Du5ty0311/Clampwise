@@ -577,6 +577,21 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert panel.objective_caption.text() == "Objective 20x  (0.225 um/px)" and panel.bar_line.isVisible()
     panel.dialog.adapter.setValue(0.5)
     assert panel.scale()[0] == pytest.approx(0.45) and "(0.45 um/px)" in panel.objective_caption.text()
+    # the slice's compass: rostral, caudal, medial, lateral over the picture, turned as the slice lies
+    assert not panel.compass_lines["Rostral"].isVisible()
+    panel.dialog.compass.setChecked(True)
+    assert all(panel.compass_text[k].isVisible() for k in ("Rostral", "Caudal", "Medial", "Lateral"))
+    (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Rostral"].getData()]
+    assert x1 == pytest.approx(x0) and y1 < y0                                    # rostral up
+    panel.dialog.rostral.setValue(90)                                             # rostral to the right
+    (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Rostral"].getData()]
+    assert x1 > x0 and y1 == pytest.approx(y0)
+    (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Medial"].getData()]
+    assert y1 > y0                                                                # medial its right: down
+    panel.dialog.medial.setCurrentIndex(1)
+    (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Medial"].getData()]
+    assert y1 < y0
+    assert panel.orientation() == (90, False)
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
 

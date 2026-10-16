@@ -154,6 +154,19 @@ def objective_scale(mag: float, calibrated: dict, pixel_um: float = 0.0, adapter
     return 0.0, "not calibrated"
 
 
+def compass(rostral_deg: float, medial_right: bool = True) -> dict[str, tuple[float, float]]:
+    """The slice's directions on the screen, as unit vectors (x to the right, y down, as the picture's rows run):
+    rostral ``rostral_deg`` clockwise from up, caudal opposite; medial a quarter turn clockwise of rostral (to its
+    right, as one faces rostral) or anticlockwise, lateral opposite. Dorsal and ventral are out of the picture's
+    plane (a horizontal slice) and not drawn."""
+    a = np.radians(float(rostral_deg) % 360.0)
+    rx, ry = float(np.sin(a)), float(-np.cos(a))
+    mx, my = (-ry, rx) if medial_right else (ry, -rx)
+    clean = lambda v: 0.0 if abs(v) < 1e-12 else v
+    return {"Rostral": (clean(rx), clean(ry)), "Caudal": (clean(-rx), clean(-ry)),
+            "Medial": (clean(mx), clean(my)), "Lateral": (clean(-mx), clean(-my))}
+
+
 def scale_bar(um_per_px: float, width_px: int) -> tuple[float, int]:
     """(length in um, length in px) of a round scale bar about a fifth of the picture's width."""
     target = um_per_px * width_px / 5

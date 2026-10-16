@@ -278,7 +278,11 @@ objective's magnification times the camera adapter's (Adjust..., Length calibrat
 often 1x, 0.63x or 0.5x). To measure it instead: under Adjust..., Length calibration,
 type the um a pixel for the objective in use, or drag the Measure line along a stage micrometer and choose From the
 Measure line; every other objective's scale is then that one's times the ratio of their magnifications, said as
-estimated, until it is calibrated itself. A snapshot records the objective and its scale. The picture is the
+estimated, until it is calibrated itself. A snapshot records the objective and its scale. The <b>compass</b>
+(Adjust..., Compass) marks the slice's rostral, caudal, medial and lateral over the picture (a horizontal slice: dorsal
+and ventral are out of its plane): set where rostral points on the screen (degrees clockwise from up; Turn left and
+Turn right by a quarter) and which side of rostral medial is on; the rostral arm is the thicker. A snapshot records
+the orientation too. The picture is the
 camera's video stream at its fastest frame rate, so the exposure alone sets the pace (37 ms: 27 pictures a second);
 the frame rate is shown beside the buttons, as taken and, when fewer, as drawn. While Clampwise holds the camera, the camera's own processing (the contrast and
 brightness its program leaves in it) is made neutral, and put back when it lets go.</p>
