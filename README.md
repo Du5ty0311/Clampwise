@@ -38,6 +38,10 @@ number with how it was measured. On a rig it can also watch the experiment live,
 
 Requirements: Windows 10 or 11, 64-bit. No Python or other installation is needed.
 
+**Updating.** From version 1.1 on, Clampwise checks for a new version when it starts and offers it under
+**Settings → Updates**: one click downloads it, checks it against GitHub's checksum, and replaces the program
+(projects and settings are kept). Copies of 1.0.0 need the new zip downloaded once by hand.
+
 To look around first, choose **Open the demos** on the Files screen: three public test recordings from NeuroExpress
 (a current-step family, a spontaneous-event recording and a spike train).
 
@@ -103,6 +107,17 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 produces `dist\Clampwise` and `dist\Clampwise-windows.zip`, and ends with the built program's own self-test. It needs
 the NeuroExpress test recordings (`CLAMPWISE_DEMOS`) to bundle as the demos, and downloads and checks the 32-bit
 embeddable Python.
+
+### Publishing a new version
+
+Describe it in `CHANGELOG.md` under `## <version>`, commit on `main`, then:
+
+```
+powershell -ExecutionPolicy Bypass -File packaging\release.ps1 -Version 1.1.1
+```
+
+It sets the version, builds and checks the program (tests and self-test), commits, tags and pushes, and makes the
+GitHub release with the zip; every copy of Clampwise then offers the update.
 
 ### Layout
 

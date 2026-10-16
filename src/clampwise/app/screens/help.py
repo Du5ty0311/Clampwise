@@ -41,6 +41,12 @@ header.</li>
 </ol>
 <p>Quality flags are informational: a value is never altered or excluded because of a flag. Every analysis reports
 which pulse, window or baseline was used for the recording, and why.</p>
+<p><b>Updates.</b> When Clampwise starts it asks GitHub whether a newer version has been released (Settings,
+Updates: the check can be turned off, and Check for updates asks at any time). A newer version is only announced;
+<b>Update to</b> downloads it, checks it against the checksum GitHub lists for it, closes Clampwise, replaces the
+program's folder and opens the new copy. Projects, settings and recordings are kept; an update is refused while a
+recording or membrane test runs. If the program's folder cannot be written (installed for all users), the release's
+page is opened instead. Whoever looks after a lab's PCs can run <i>Clampwise.exe --update</i>.</p>
 """
 
 HEAT_MAPS = """<h2>Heat maps</h2>

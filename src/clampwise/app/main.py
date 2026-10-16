@@ -284,6 +284,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if "--self-test" in flags:
         return self_test()
+    if "--update" in flags:                              # the update without a window (Settings, Updates has one)
+        from .. import update
+
+        try:
+            print(update.update_now(launch="--open" in flags))
+            return 0
+        except Exception as exc:                         # GitHub unreachable, a bad download: said, nothing changed
+            print(f"not updated: {exc}")
+            return 1
     logging.basicConfig(filename=str(log_folder() / "clampwise-error.log"), level=logging.WARNING,
                         format="\n===== %(asctime)s =====\n%(message)s", encoding="utf-8")
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
@@ -306,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     window = MainWindow(palette)
     window.resize(1366, 768)
     window.show()
+    QtCore.QTimer.singleShot(4000, window.screens["settings"].startup_check)   # a newer release?
     if positional and Path(positional[0]).is_dir():
         window.open_project(Path(positional[0]))
     return app.exec_()

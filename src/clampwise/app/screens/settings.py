@@ -1,15 +1,16 @@
 """Settings: the theme, the project's optional features, the folders (recent
-projects, the demos, the log), the project's saved results, and a check of
-this copy of Clampwise."""
+projects, the demos, the log), the project's saved results, a check of
+this copy of Clampwise, and its updates (``clampwise.update``)."""
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from ... import __version__
+from ... import __version__, update
 from ...project.features import FEATURES
 from .. import theme, widgets
 from ..widgets import box, label
@@ -90,6 +91,36 @@ class SettingsScreen(Screen):
         self.report.setReadOnly(True)
         self.report.setVisible(False)
         lay.addWidget(self.report, 1)
+        # updates, from the releases on GitHub
+        lay.addWidget(_section("Updates"))
+        self.auto_update = QtWidgets.QCheckBox("Check for a new version when Clampwise starts")
+        self.auto_update.setToolTip("Asks GitHub for the newest release; nothing is downloaded or installed unless "
+                                    "you choose Update")
+        self.auto_update.setChecked(self.updates_wanted())
+        self.auto_update.toggled.connect(self._keep_auto_update)
+        lay.addWidget(self.auto_update)
+        row = box("h", "s")
+        self.check_update = widgets.button("Check for updates", lambda: self.check_updates(quiet=False),
+                                           "Ask GitHub for the newest release of Clampwise")
+        row.addWidget(self.check_update)
+        self.do_update = widgets.primary("Update", self.install_update, "Download the new version (checked against "
+                                         "the checksum GitHub lists), close Clampwise, replace it and open it again; "
+                                         "projects and settings are kept")
+        self.do_update.setVisible(False)
+        row.addWidget(self.do_update)
+        self.update_bar = QtWidgets.QProgressBar()
+        self.update_bar.setMaximumHeight(8)
+        self.update_bar.setTextVisible(False)
+        self.update_bar.setVisible(False)
+        row.addWidget(self.update_bar, 1)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.update_note = label("", "muted", wrap=True)
+        lay.addWidget(self.update_note)
+        self._release: update.Release | None = None
+        self._got = [0, 0]                                 # bytes downloaded, of
+        self._bar_timer = QtCore.QTimer(self)
+        self._bar_timer.timeout.connect(self._show_progress)
         lay.addStretch(1)
         page = QtWidgets.QWidget()
         page.setLayout(lay)
@@ -145,6 +176,109 @@ class SettingsScreen(Screen):
         self.window.set_theme(palette)
         if self.window.persist:
             self.window._settings().setValue("theme", key)
+
+    # ---- updates
+    def updates_wanted(self) -> bool:
+        if not getattr(self.window, "persist", False):
+            return False
+        return str(self.window._settings().value("updates/check", "true")).lower() == "true"
+
+    def _keep_auto_update(self, on: bool) -> None:
+        if getattr(self.window, "persist", False):
+            self.window._settings().setValue("updates/check", "true" if on else "false")
+
+    def startup_check(self) -> None:
+        """When Clampwise starts: a quiet check, only for the built program (or a test server), if wanted."""
+        if self.updates_wanted() and (update.install_folder() is not None or os.environ.get("CLAMPWISE_UPDATE_URL")):
+            self.check_updates(quiet=True)
+
+    def check_updates(self, quiet: bool = False) -> None:
+        from .. import worker
+
+        self.check_update.setEnabled(False)
+        if not quiet:
+            self.update_note.setText("Asking GitHub for the newest release...")
+        worker.run(update.latest, lambda result, q=quiet: self._checked(result, q))
+
+    def _checked(self, result, quiet: bool) -> None:
+        self.check_update.setEnabled(True)
+        if isinstance(result, Exception):
+            if not quiet:
+                self.update_note.setText(f"GitHub could not be reached ({result}); try again later.")
+            return
+        if result is None or not update.is_newer(result.version):
+            self.do_update.setVisible(False)
+            if not quiet:
+                self.update_note.setText(f"Clampwise {__version__} is the newest version.")
+            return
+        self._release = result
+        self.do_update.setText(f"Update to {result.version}")
+        self.do_update.setVisible(True)
+        self.update_note.setText(f"Clampwise {result.version} is available (this copy is {__version__}): "
+                                 f"{result.page}")
+        self.window.say(f"Clampwise {result.version} is available: Settings, Update.")
+
+    def install_update(self) -> None:
+        from .. import worker
+
+        r = self._release
+        if r is None:
+            return
+        rec = getattr(self.window.screens.get("live"), "recorder", None)
+        if rec is not None and (rec.busy or rec.test.running):
+            self.update_note.setText("A recording or membrane test is running: stop it first, then update.")
+            return
+        install = update.install_folder()
+        if install is None:
+            self.update_note.setText(f"This copy runs from source: update it with git pull ({r.page}).")
+            return
+        notes = r.notes.strip()
+        notes = notes[:1200] + ("..." if len(notes) > 1200 else "")
+        answer = QtWidgets.QMessageBox.question(
+            self, f"Update to Clampwise {r.version}",
+            f"Clampwise {r.version} ({r.size / 1e6:.0f} MB) will be downloaded and checked; then Clampwise closes, "
+            f"is replaced and opens again. Your projects and settings are kept.\n\n{notes}")
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+        self.do_update.setEnabled(False)
+        self.check_update.setEnabled(False)
+        self.update_bar.setVisible(True)
+        self._got = [0, r.size]
+        self._bar_timer.start(200)
+        self.update_note.setText(f"Downloading Clampwise {r.version}...")
+        folder = update.log_path().parent / "updates"
+
+        def work():
+            z = update.download(r, folder, progress=lambda done, total: self._got.__setitem__(slice(0, 2),
+                                                                                               [done, total]))
+            return update.stage(z, install)
+
+        worker.run(work, lambda result: self._staged(result, install))
+
+    def _show_progress(self) -> None:
+        done, total = self._got
+        self.update_bar.setRange(0, max(1, total // 1024))
+        self.update_bar.setValue(done // 1024)
+
+    def _staged(self, result, install: Path) -> None:
+        from .export import open_path
+
+        self._bar_timer.stop()
+        self.update_bar.setVisible(False)
+        self.do_update.setEnabled(True)
+        self.check_update.setEnabled(True)
+        r = self._release
+        if isinstance(result, PermissionError):
+            self.update_note.setText(f"Clampwise's folder ({install}) cannot be written from this account: "
+                                     "download the new version from its page and unzip it in its place.")
+            open_path(r.page)
+            return
+        if isinstance(result, Exception):
+            self.update_note.setText(f"Not updated: {result}.")
+            return
+        update.start_swap(result, install)
+        self.update_note.setText(f"Updating to {r.version}: Clampwise closes and opens again.")
+        QtCore.QTimer.singleShot(300, self.window.close)
 
     def _log_folder(self) -> None:
         from ..main import log_folder
