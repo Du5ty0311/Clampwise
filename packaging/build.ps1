@@ -84,8 +84,16 @@ while ($app.MainWindowHandle -eq 0 -and $watch.Elapsed.TotalSeconds -lt 60 -and 
 }
 $seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
 if ($app.MainWindowHandle -eq 0) { throw "No window within $seconds s." }
-$app.CloseMainWindow() | Out-Null
-$app.WaitForExit(10000) | Out-Null
+# closed as a user closes it; asked again until it has (a close sent the moment the window appears can come before
+# the program listens: a 1.2.0 build left its copy open), and ended only if it never does
+for ($i = 0; $i -lt 20 -and -not $app.HasExited; $i++) {
+    $app.CloseMainWindow() | Out-Null
+    $app.WaitForExit(1000) | Out-Null
+}
+if (-not $app.HasExited) {
+    Write-Host "==> The program did not close when asked: ended" -ForegroundColor Yellow
+    $app.Kill()
+}
 
 Write-Host "==> Zip" -ForegroundColor Cyan
 $Zip = Join-Path $Project "dist\Clampwise-windows.zip"
