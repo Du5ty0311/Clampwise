@@ -125,17 +125,32 @@ def parse_objectives(text: str) -> list[float]:
     return sorted(out) or list(OBJECTIVES)
 
 
-def objective_scale(mag: float, calibrated: dict) -> tuple[float, str]:
+# the sensor's pixel, um, by camera model (the maker's specifications): a nominal scale before any calibration
+PIXEL_UM = {"INFINITY8-3M": 4.5}             # Sony IMX429, 1944 x 1472, 4.5 x 4.5 um (Lumenera; Edmund Optics)
+
+
+def pixel_um_of(model: str) -> float:
+    """The sensor's pixel (um) for a camera model as its program names it (e.g. 'INFINITY8-3M'), else 0."""
+    key = str(model or "").upper().replace("LUMENERA", "").strip()
+    return PIXEL_UM.get(key, 0.0)
+
+
+def objective_scale(mag: float, calibrated: dict, pixel_um: float = 0.0, adapter: float = 1.0) -> tuple[float, str]:
     """um a pixel with the ``mag`` objective, and how it is known. Its own calibration (a stage micrometer measured
     with it) first; else another objective's, scaled by the ratio of their magnifications (the camera sees each
     objective's image through the same tube and adapter, so um a pixel goes as 1 / magnification: the nearest
-    calibrated objective is used); else 0, not calibrated."""
+    calibrated objective is used); else nominal, from the sensor's own pixel: ``pixel_um`` / (``mag`` x the camera
+    adapter's magnification), which holds as far as the objective's and the adapter's magnifications are their
+    stated ones; else 0, not known."""
     cal = {float(k): float(v) for k, v in calibrated.items() if float(v) > 0}
     if cal.get(float(mag)):
         return cal[float(mag)], f"calibrated at {mag:g}x"
     if cal:
         ref = min(cal, key=lambda m: abs(np.log(m / mag)))
         return cal[ref] * ref / mag, f"estimated from the {ref:g}x calibration"
+    if pixel_um > 0 and adapter > 0:
+        return pixel_um / (mag * adapter), (f"nominal: the camera's {pixel_um:g} um pixels / ({mag:g}x objective x "
+                                            f"{adapter:g}x camera adapter)")
     return 0.0, "not calibrated"
 
 

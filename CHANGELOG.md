@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 — 2026-10-16
+
+- **Each pixel's size in um, without a micrometer.** The camera's own pixel (4.5 um on the INFINITY8-3M, filled in
+  from its model) over the objective's and the camera adapter's magnifications gives every objective's scale at
+  once (20x with a 1x adapter: 0.225 um a pixel), shown beside the Objective slider and used by Measure and the scale
+  bar; marked nominal until a stage micrometer is measured, which then takes over. The adapter is set under Adjust,
+  Length calibration.
+
 ## 1.2.0 — 2026-10-16
 
 - **The camera at its full frame rate.** The live picture is now the camera's video stream (27 pictures a second at

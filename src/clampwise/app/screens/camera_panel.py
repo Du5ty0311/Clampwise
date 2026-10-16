@@ -115,6 +115,17 @@ class CameraThread(QtCore.QThread):
         return True
 
 
+def _camera_pixel_um() -> float:
+    """The sensor's pixel for the camera its program last named (Infinity Analyze's settings), else 0."""
+    try:
+        from ...rig.camera import read_settings
+
+        s = read_settings()
+        return picture.pixel_um_of(s.camera) if s is not None else 0.0
+    except Exception:
+        return 0.0
+
+
 class AdjustDialog(QtWidgets.QDialog):
     """Each adjustment as a slider with its value and its reset; presets kept by name; the length calibration."""
 
@@ -245,7 +256,7 @@ class AdjustDialog(QtWidgets.QDialog):
         self.um.setRange(0.0, 50.0)
         self.um.setDecimals(5)
         self.um.setSingleStep(0.001)
-        self.um.setSpecialValueText("from another objective")
+        self.um.setSpecialValueText("not measured here")
         self.um.setSuffix(" um a pixel")
         self.um.setToolTip("Measured at the objective chosen on the camera's panel (a stage micrometer: From the "
                            "Measure line); 0: taken from another objective's calibration by the ratio of magnifications")
@@ -262,6 +273,30 @@ class AdjustDialog(QtWidgets.QDialog):
         self.objectives.setToolTip("The magnifications on the panel's slider, e.g. 2.5, 5, 10, 20, 40, 63")
         objs.addWidget(self.objectives, 1)
         lay.addLayout(objs)
+        nominal = box("h", "s")                         # the scale before any calibration: the sensor's own pixel
+        self.pixel_um = QtWidgets.QDoubleSpinBox()
+        self.pixel_um.setRange(0.0, 50.0)
+        self.pixel_um.setDecimals(3)
+        self.pixel_um.setSingleStep(0.05)
+        self.pixel_um.setSpecialValueText("unknown")
+        self.pixel_um.setSuffix(" um camera pixel")
+        self.pixel_um.setToolTip("The sensor's pixel, from the camera's specifications (INFINITY8-3M: 4.5 um, filled "
+                                 "in by itself)")
+        self.adapter = QtWidgets.QDoubleSpinBox()
+        self.adapter.setRange(0.1, 5.0)
+        self.adapter.setDecimals(3)
+        self.adapter.setSingleStep(0.01)
+        self.adapter.setValue(1.0)
+        self.adapter.setPrefix("adapter ")
+        self.adapter.setSuffix("x")
+        self.adapter.setToolTip("The camera adapter's magnification, between the microscope and the camera (printed on "
+                                "it: often 1x, 0.63x or 0.5x)")
+        for w in (self.pixel_um, self.adapter):
+            nominal.addWidget(w)
+        nominal.addStretch(1)
+        lay.addLayout(nominal)
+        self.pixel_um.valueChanged.connect(lambda *_: panel._objective_moved())
+        self.adapter.valueChanged.connect(lambda *_: panel._objective_moved())
         self.scale_note = label("", "muted", wrap=True)
         lay.addWidget(self.scale_note)
         self.um.valueChanged.connect(lambda v: panel.set_calibration(v))
@@ -621,7 +656,8 @@ class CameraPanel(QtWidgets.QWidget):
 
     def scale(self) -> tuple[float, str]:
         """um a pixel with the objective in use, and how it is known."""
-        return picture.objective_scale(self.magnification, self.calibrated)
+        return picture.objective_scale(self.magnification, self.calibrated, self.dialog.pixel_um.value(),
+                                       self.dialog.adapter.value())
 
     def set_objectives(self, text: str) -> None:
         keep = self.magnification if self.objectives else None
@@ -663,15 +699,17 @@ class CameraPanel(QtWidgets.QWidget):
     def _objective_moved(self, *_) -> None:
         um, how = self.scale()
         mag = self.magnification
-        self.objective_caption.setText(f"Objective {mag:g}x")
+        # the size of one pixel at this objective, on the panel itself (what Measure and the scale bar use)
+        self.objective_caption.setText(f"Objective {mag:g}x" + (f"  ({um:.3g} um/px)" if um else ""))
         self.objective.setToolTip(f"{mag:g}x: " + (f"{um:.4g} um a pixel, {how}" if um else
                                                     "not calibrated (Adjust..., Length calibration)"))
         self.dialog.um.blockSignals(True)
         self.dialog.um.setValue(self.calibrated.get(mag, 0.0))
         self.dialog.um.blockSignals(False)
         self.dialog.scale_note.setText(f"{mag:g}x: " + (f"{um:.4g} um a pixel, {how}." if um else
-                                       "not calibrated: measure a stage micrometer at any objective (From the "
-                                       "Measure line); the others follow by their magnifications."))
+                                       "not known: give the camera's pixel and adapter below, or measure a stage "
+                                       "micrometer at any objective (From the Measure line); the others follow by "
+                                       "their magnifications."))
         self._calibration()
 
     def _calibration(self) -> None:
@@ -751,6 +789,12 @@ class CameraPanel(QtWidgets.QWidget):
             mags = picture.parse_objectives(old_obj)
             if old_obj.strip() and len(mags) == 1:
                 self.calibrated[mags[0]] = old_um
+        self.dialog.pixel_um.blockSignals(True)
+        self.dialog.adapter.blockSignals(True)
+        self.dialog.pixel_um.setValue(float(s.value("camera/pixel_um", 0.0) or 0.0) or _camera_pixel_um())
+        self.dialog.adapter.setValue(float(s.value("camera/adapter", 1.0) or 1.0))
+        self.dialog.pixel_um.blockSignals(False)
+        self.dialog.adapter.blockSignals(False)
         self.set_objectives(str(s.value("camera/objectives", "") or ""))
         self.objective.setValue(int(s.value("camera/objective_index", self.objectives.index(20.0)
                                             if 20.0 in self.objectives else 0) or 0))
@@ -764,6 +808,8 @@ class CameraPanel(QtWidgets.QWidget):
         s.setValue("camera/presets", json.dumps(self.presets))
         s.setValue("camera/adjust", picture.preset_to_text(self.adjust))
         s.setValue("camera/calibrated", json.dumps({f"{k:g}": v for k, v in self.calibrated.items()}))
+        s.setValue("camera/pixel_um", self.dialog.pixel_um.value())
+        s.setValue("camera/adapter", self.dialog.adapter.value())
         s.setValue("camera/objectives", ", ".join(f"{m:g}" for m in self.objectives))
         s.setValue("camera/objective_index", self.objective.value())
         s.setValue("camera/scale_bar", self.dialog.bar.isChecked())

@@ -192,6 +192,16 @@ def test_each_objective_s_scale_follows_one_calibration_by_its_magnification():
     assert um == pytest.approx(0.098 * 40 / 63) and "40x" in how
 
 
+def test_before_any_calibration_a_pixel_s_size_follows_from_the_camera_s_own_pixel():
+    assert picture.pixel_um_of("INFINITY8-3M") == 4.5 and picture.pixel_um_of("Lumenera INFINITY8-3M") == 4.5
+    assert picture.pixel_um_of("unknown camera") == 0.0
+    um, how = picture.objective_scale(20, {}, pixel_um=4.5)                          # 4.5 um / 20x = 0.225 um
+    assert um == pytest.approx(0.225) and how.startswith("nominal")
+    um, _ = picture.objective_scale(63, {}, pixel_um=4.5, adapter=0.63)              # a 0.63x camera adapter
+    assert um == pytest.approx(4.5 / (63 * 0.63))
+    assert picture.objective_scale(20, {20: 0.21}, pixel_um=4.5) == (0.21, "calibrated at 20x")   # measured wins
+
+
 def test_a_snapshot_keeps_the_camera_s_pixels_how_it_was_taken_and_its_scale(tmp_path):
     rgb = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
     path = picture.write_tiff(picture.snapshot_name(tmp_path, "40x GFP"), rgb,

@@ -566,9 +566,17 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert panel.calibrated == {20.0: 0.2} and panel.bar_line.isVisible() and "um" in panel.ruler_text.toPlainText()
     panel.objective.setValue(panel.objectives.index(2.5))
     assert panel.scale() == (pytest.approx(1.6), "estimated from the 20x calibration")
-    assert panel.objective_caption.text() == "Objective 2.5x" and panel.dialog.um.value() == 0.0
+    assert panel.objective_caption.text() == "Objective 2.5x  (1.6 um/px)" and panel.dialog.um.value() == 0.0
     panel.set_objectives("2.5, 10, 20, 63")
     assert panel.magnification == 2.5 and panel.objective.maximum() == 3
+    # no calibration: the size of a pixel from the camera's own (4.5 um) and the adapter, shown on the panel
+    panel.calibrated.clear()
+    panel.dialog.pixel_um.setValue(4.5)
+    panel.objective.setValue(panel.objectives.index(20.0))
+    assert panel.scale()[0] == pytest.approx(0.225) and panel.scale()[1].startswith("nominal")
+    assert panel.objective_caption.text() == "Objective 20x  (0.225 um/px)" and panel.bar_line.isVisible()
+    panel.dialog.adapter.setValue(0.5)
+    assert panel.scale()[0] == pytest.approx(0.45) and "(0.45 um/px)" in panel.objective_caption.text()
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
 

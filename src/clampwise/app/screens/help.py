@@ -272,7 +272,10 @@ and <b>clipped pixels</b> are painted red, since a pixel at full scale is no lon
 &amp; Waters 2014; Murphy &amp; Davidson 2012). Grey, green (GFP), magenta and fire colour scales; a crosshair;
 <b>Measure</b> drags a line whose length is given in um once the camera is calibrated; the wheel zooms, a drag pans,
 <b>Fit</b> shows the whole picture. The <b>Objective</b> slider says which objective is in use (2.5x to 63x; the list
-is set in Adjust...), and the scale bar and Measure follow it. Calibrate once: under Adjust..., Length calibration,
+is set in Adjust...), and the scale bar and Measure follow it; the size of one pixel in um is shown beside it. Before
+any calibration it is nominal: the camera's own pixel (4.5 um on the INFINITY8-3M, filled in from its model) over the
+objective's magnification times the camera adapter's (Adjust..., Length calibration; the adapter is printed on it,
+often 1x, 0.63x or 0.5x). To measure it instead: under Adjust..., Length calibration,
 type the um a pixel for the objective in use, or drag the Measure line along a stage micrometer and choose From the
 Measure line; every other objective's scale is then that one's times the ratio of their magnifications, said as
 estimated, until it is calibrated itself. A snapshot records the objective and its scale. The picture is the
