@@ -64,11 +64,13 @@ shown in place. On a rig with the hardware below, Clampwise can also:
 
 - **record without Clampex**: play your Clampex protocols on the Digidata (Play, Pause, Record), drawing each sweep
   live, into ABF files that Clampex, Clampfit and pyabf open;
+- find the **digitizer, amplifier and camera by itself**, and say which program is using each;
 - run a **membrane test** that follows Clampex's own algorithm;
 - **control the amplifier** (mode, holding, seal test, compensation, Auto buttons), with MultiClamp Commander still
   usable beside it;
 - edit a protocol's epochs in a **simple stimulus editor** (always saved under a new name);
-- use a Lumenera **camera** without Infinity Analyze, with tools for patching.
+- use a Lumenera **camera** without Infinity Analyze, at its full frame rate, with tools for patching and a scale
+  bar that follows the objective in use.
 
 Tested with: Digidata 1440A and pCLAMP 10.7, MultiClamp 700B with Commander 2.2, Lumenera INFINITY camera with
 Infinity Analyze, Windows 10. pCLAMP and MultiClamp Commander must be installed (Clampwise uses their own libraries);

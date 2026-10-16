@@ -5,6 +5,11 @@ library reaches it, ``lucamapi.dll``, installed with Infinity Analyze (a vendor 
 is). It is called through ctypes; nothing is copied or installed. Only one program can hold
 the camera, so it is taken only when asked and only while Infinity Analyze is closed, and let go with one call.
 
+Live pictures are the camera's video stream at its fastest frame rate, so the exposure alone sets the pace (37 ms:
+27 a second, as Infinity Analyze shows). Single frames ("fast frames") took 160 ms each on the rig's camera. A
+monochrome camera's frames are kept as one grey channel (shown as colour without copying it three times); a colour
+camera's are demosaiced by the library (the fast method live, the high-quality one when frames are averaged).
+
 The layouts and numbers are Lumenera's ``lucamapi.h`` as Christoph Gohlke's ``lucam`` (BSD) declares them (Help
 credits it; no code copied), each checked against the camera's own answers on the rig PC.
 """
@@ -34,7 +39,9 @@ EXPOSURE, GAIN = 20, 40
 # found is put back when it lets go, so the camera's program finds the camera as it left it.
 NEUTRAL = {BRIGHTNESS: 0.0, CONTRAST: 1.0, GAMMA: 1.0, SATURATION: 1.0}
 PF_8, PF_16 = 0, 1                          # pixel formats: 8 or 16 bits a pixel, the sensor's raw (Bayer) pattern
-DEMOSAIC_HIGH_QUALITY, CORRECTION_NONE = 2, 0
+DEMOSAIC_FAST, DEMOSAIC_HIGH_QUALITY, CORRECTION_NONE = 1, 2, 0
+COLOR_FORMAT, CF_MONO = 80, 0               # the sensor: 0 monochrome, 8-11 a Bayer pattern (colour)
+STOP_STREAMING, START_STREAMING = 0, 1
 
 
 class Version(ctypes.Structure):
@@ -46,14 +53,6 @@ class FrameFormat(ctypes.Structure):
     _fields_ = [("xOffset", c_ulong), ("yOffset", c_ulong), ("width", c_ulong), ("height", c_ulong),
                 ("pixelFormat", c_ulong), ("subSampleX", c_ushort), ("flagsX", c_ushort),
                 ("subSampleY", c_ushort), ("flagsY", c_ushort)]
-
-
-class Snapshot(ctypes.Structure):
-    _fields_ = [("exposure", c_float), ("gain", c_float), ("gainRed", c_float), ("gainBlue", c_float),
-                ("gainGrn1", c_float), ("gainGrn2", c_float), ("useStrobe", c_int), ("strobeDelay", c_float),
-                ("useHwTrigger", c_int), ("timeout", c_float), ("format", FrameFormat), ("shutterType", c_ulong),
-                ("exposureDelay", c_float), ("bufferlastframe", c_int), ("ulReserved2", c_ulong),
-                ("flReserved1", c_float), ("flReserved2", c_float)]
 
 
 class Conversion(ctypes.Structure):
@@ -110,7 +109,9 @@ class Camera:
         self.serial = 0
         self.exposure_ms = 20.0
         self.gain = 1.0
-        self._fast = False
+        self._streaming = False
+        self.mono = False
+        self.frame_rate = 0.0
         self.status = ""
 
     # ---- taking and letting go
@@ -137,6 +138,8 @@ class Camera:
         fmt, rate = FrameFormat(), c_float(0.0)
         lib.LucamGetFormat(handle, ctypes.byref(fmt), ctypes.byref(rate))
         self.format = fmt
+        cf = self.setting(COLOR_FORMAT)
+        self.mono = cf is not None and int(cf.value) == CF_MONO
         self._neutral()
         exp = self.setting(EXPOSURE)
         if exp is not None:
@@ -149,11 +152,11 @@ class Camera:
 
     def close(self) -> None:
         if self.handle and self._lib is not None:
-            if self._fast:
-                self._lib.LucamDisableFastFrames(self.handle)
+            if self._streaming:
+                self._lib.LucamStreamVideoControl(self.handle, STOP_STREAMING, None)
             self._put_back()
             self._lib.LucamCameraClose(self.handle)
-        self.handle, self._fast = None, False
+        self.handle, self._streaming = None, False
 
     def _neutral(self) -> None:
         """Note the camera's own processing (in a file too, should Clampwise stop before letting go), then make it
@@ -203,9 +206,10 @@ class Camera:
                 ("LucamSetProperty", c_int, (ctypes.c_void_p, c_ulong, c_float, ctypes.c_long)),
                 ("LucamPropertyRange", c_int, (ctypes.c_void_p, c_ulong, p(c_float), p(c_float), p(c_float),
                                                p(ctypes.c_long))),
-                ("LucamEnableFastFrames", c_int, (ctypes.c_void_p, p(Snapshot))),
-                ("LucamTakeFastFrame", c_int, (ctypes.c_void_p, ctypes.c_void_p)),
-                ("LucamDisableFastFrames", c_int, (ctypes.c_void_p,)),
+                ("LucamSetFormat", c_int, (ctypes.c_void_p, p(FrameFormat), c_float)),
+                ("LucamEnumAvailableFrameRates", c_ulong, (ctypes.c_void_p, c_ulong, p(c_float))),
+                ("LucamStreamVideoControl", c_int, (ctypes.c_void_p, c_ulong, ctypes.c_void_p)),
+                ("LucamTakeVideo", c_int, (ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p)),
                 ("LucamConvertFrameToRgb24", c_int, (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, c_ulong,
                                                      c_ulong, c_ulong, p(Conversion))),
                 ("LucamGetLastError", c_ulong, ())):
@@ -229,13 +233,30 @@ class Camera:
         return Setting(value.value, low.value, high.value, default.value)
 
     def set_exposure(self, ms: float, gain: float | None = None) -> None:
-        """The next frames' exposure (ms) and gain; fast frames are begun again with them."""
+        """The exposure (ms) and gain, set on the camera at once (the stream goes on with them)."""
         self.exposure_ms = float(ms)
         if gain is not None:
             self.gain = float(gain)
-        if self._fast and self.handle:
-            self._lib.LucamDisableFastFrames(self.handle)
-            self._fast = False
+        if self.handle:
+            self._lib.LucamSetProperty(self.handle, c_ulong(EXPOSURE), c_float(self.exposure_ms), ctypes.c_long(0))
+            self._lib.LucamSetProperty(self.handle, c_ulong(GAIN), c_float(self.gain), ctypes.c_long(0))
+
+    def _stream(self) -> bool:
+        """The video stream started at the camera's fastest frame rate, with the exposure and gain wanted."""
+        lib = self._lib
+        n = lib.LucamEnumAvailableFrameRates(self.handle, 0, None)
+        rates = (c_float * max(1, n))()
+        if n:
+            lib.LucamEnumAvailableFrameRates(self.handle, n, rates)
+        best = max(rates[:n]) if n else 0.0
+        if best > 0 and lib.LucamSetFormat(self.handle, ctypes.byref(self.format), c_float(best)):
+            self.frame_rate = float(best)
+        self.set_exposure(self.exposure_ms, self.gain)
+        if not lib.LucamStreamVideoControl(self.handle, START_STREAMING, None):
+            self.status = f"the camera did not start (error {lib.LucamGetLastError()})"
+            return False
+        self._streaming = True
+        return True
 
     # ---- frames
     def _shape(self) -> tuple[int, int, int]:
@@ -250,25 +271,33 @@ class Camera:
             return None
         lib = self._lib
         w, h, depth = self._shape()
-        if not self._fast:
-            snap = Snapshot(exposure=self.exposure_ms, gain=self.gain, gainRed=1.0, gainBlue=1.0, gainGrn1=1.0,
-                            gainGrn2=1.0, timeout=max(1000.0, self.exposure_ms * 4 + 1000.0), format=self.format)
-            if not lib.LucamEnableFastFrames(self.handle, ctypes.byref(snap)):
-                self.status = f"the camera did not start (error {lib.LucamGetLastError()})"
-                return None
-            self._fast = True
-        raw = (ctypes.c_ubyte * (w * h * depth))()
-        rgb = (ctypes.c_ubyte * (w * h * 3))()
-        conv = Conversion(DEMOSAIC_HIGH_QUALITY, CORRECTION_NONE)
-        total = None
+        if not self._streaming and not self._stream():
+            return None
         n = max(1, int(average))
-        for _ in range(n):
-            if not lib.LucamTakeFastFrame(self.handle, raw):
-                self.status = f"no frame came (error {lib.LucamGetLastError()})"
-                return None
-            lib.LucamConvertFrameToRgb24(self.handle, rgb, raw, c_ulong(w), c_ulong(h),
-                                         c_ulong(self.format.pixelFormat), ctypes.byref(conv))
-            one = np.frombuffer(rgb, np.uint8).reshape(h, w, 3)[:, :, ::-1].astype(np.float32)   # BGR -> RGB
-            total = one if total is None else total + one
-        image = np.clip(np.round(total / n), 0, 255).astype(np.uint8)
+        size = w * h * depth
+        raw = (ctypes.c_ubyte * (size * n))()
+        if not lib.LucamTakeVideo(self.handle, n, raw):
+            self.status = f"no frame came (error {lib.LucamGetLastError()})"
+            return None
+        if self.mono:
+            frames = np.frombuffer(raw, np.uint8 if depth == 1 else "<u2").reshape(n, h, w)
+            if depth == 2:
+                frames = frames >> 8                                         # 16-bit frames shown as 8
+            if n == 1:
+                grey = frames[0].astype(np.uint8, copy=False)
+            else:
+                grey = ((frames.sum(axis=0, dtype=np.uint32) + n // 2) // n).astype(np.uint8)
+            image = np.broadcast_to(grey[:, :, None], (h, w, 3))             # grey as RGB, not copied
+            return Frame(image, self.exposure_ms, self.gain, n, self.serial)
+        rgb = (ctypes.c_ubyte * (w * h * 3))()
+        conv = Conversion(DEMOSAIC_FAST if n == 1 else DEMOSAIC_HIGH_QUALITY, CORRECTION_NONE)
+        total = None
+        for k in range(n):
+            lib.LucamConvertFrameToRgb24(self.handle, rgb, ctypes.c_void_p(ctypes.addressof(raw) + k * size),
+                                         c_ulong(w), c_ulong(h), c_ulong(self.format.pixelFormat), ctypes.byref(conv))
+            one = np.frombuffer(rgb, np.uint8).reshape(h, w, 3)[:, :, ::-1]   # BGR -> RGB
+            if n == 1:
+                return Frame(one.copy(), self.exposure_ms, self.gain, 1, self.serial)
+            total = one.astype(np.uint32) if total is None else total + one
+        image = ((total + n // 2) // n).astype(np.uint8)
         return Frame(image, self.exposure_ms, self.gain, n, self.serial)

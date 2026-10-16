@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0 — 2026-10-16
+
+- **The camera at its full frame rate.** The live picture is now the camera's video stream (27 pictures a second at
+  a 37 ms exposure, as Infinity Analyze shows; it was 1). It used single "fast frames" (160 ms each), a picture
+  statistic that sorted every pixel on each frame (217 ms; now a count of the 256 levels, twice a second), colour
+  processing on a monochrome camera's frames, and a fixed redraw gate that skipped every other frame. A monochrome
+  camera's frames stay one grey channel; the picture's adjustments are a lookup of each level; every frame the screen
+  can draw is drawn, never a queue behind the picture.
+- **A scale bar for each objective.** An Objective slider on the camera's panel (2.5x to 63x; the list can be set):
+  calibrate once at any objective (type the um a pixel, or drag the Measure line along a stage micrometer), and every
+  other objective's scale follows by the ratio of magnifications, marked estimated until it is calibrated itself.
+  Snapshots record the objective and its scale.
+- **The rig's hardware found by itself.** Live's Hardware section lists the Digidata 1440A, the MultiClamp 700B
+  (with its serial and each channel's mode from Commander's telegraph), the Lumenera camera (serial and model) and
+  the Polygon's IOBox, from Windows' device list without opening any of them, and says who is using each.
+
 ## 1.1.0 — 2026-10-15
 
 - **Updates from inside Clampwise.** When it starts, Clampwise asks GitHub for the newest release (Settings, Updates;

@@ -20,7 +20,8 @@ from ...rig import lucam, picture
 from .. import theme, widgets
 from ..widgets import box, label
 
-SHOW_EVERY_S = 0.1                   # the picture is redrawn at most 10 times a second
+SHOW_EVERY_S = 1 / 60                # at most 60 redraws a second, and only once the last one is drawn
+STATS_EVERY_S = 0.5                  # the histogram and the clipping warning, twice a second
 COLOURS = {"green": (0, 255, 0), "red": (255, 0, 0), "magenta": (255, 0, 255), "cyan": (0, 255, 255),
            "yellow": (255, 255, 0)}
 FRAMES = {"dark": 16, "background": 16, "overlay": 8}
@@ -45,6 +46,7 @@ class CameraThread(QtCore.QThread):
         self.corrections = picture.Corrections()
         self.request: tuple | None = None    # ("dark" | "background" | "overlay", frames) or ("auto",)
         self.taken = 0                       # pictures taken (each of ``average`` frames): the frame rate's count
+        self.drawing = False                 # a picture sent and not yet drawn: none other is sent meanwhile
         self._stop = False
 
     def stop(self) -> None:
@@ -59,7 +61,7 @@ class CameraThread(QtCore.QThread):
         try:
             exposure = cam.setting(lucam.EXPOSURE)
             self.opened.emit({"exposure": exposure, "gain": cam.setting(lucam.GAIN), "serial": cam.serial})
-            shown_at = 0.0
+            shown_at = stats_at = 0.0
             while not self._stop:
                 want = (self.exposure_ms or cam.exposure_ms, self.gain or cam.gain)
                 if want != (cam.exposure_ms, cam.gain):
@@ -72,9 +74,18 @@ class CameraThread(QtCore.QThread):
                 if f is None:
                     self.failed.emit(cam.status)
                     break
-                if time.monotonic() - shown_at >= SHOW_EVERY_S:
-                    shown_at = time.monotonic()
-                    self.frame.emit(f, picture.shown(f.rgb, self.corrections, self.adjust), picture.stats(f.rgb))
+                now = time.monotonic()
+                # every frame the screen keeps up with (the camera's own frames came 31-47 ms apart: a fixed
+                # 33 ms gate drew every other one), never a queue of frames behind the picture
+                if not self.drawing and now - shown_at >= SHOW_EVERY_S:
+                    shown_at = now
+                    stats = None
+                    if now - stats_at >= STATS_EVERY_S:
+                        stats_at, stats = now, picture.stats(f.rgb)
+                    table = picture.display_table(self.corrections, self.adjust) if picture.is_grey(f.rgb) else None
+                    self.drawing = True
+                    self.frame.emit(f, (f.rgb, table) if table is not None else
+                                    picture.shown(f.rgb, self.corrections, self.adjust), stats)
         finally:
             cam.close()
 
@@ -230,22 +241,32 @@ class AdjustDialog(QtWidgets.QDialog):
         lay.addWidget(self.hist)
         lay.addWidget(label("Length calibration", "section"))
         cal = box("h", "s")
-        self.um = QtWidgets.QDoubleSpinBox()
+        self.um = QtWidgets.QDoubleSpinBox()             # the calibration of the objective chosen on the panel
         self.um.setRange(0.0, 50.0)
         self.um.setDecimals(5)
         self.um.setSingleStep(0.001)
-        self.um.setSpecialValueText("not calibrated")
+        self.um.setSpecialValueText("from another objective")
         self.um.setSuffix(" um a pixel")
-        self.um.setToolTip("From a stage micrometer's picture (tools/rig/calibrate_camera.py); 0: not calibrated")
-        self.objective = QtWidgets.QLineEdit()
-        self.objective.setPlaceholderText("objective (40x)")
+        self.um.setToolTip("Measured at the objective chosen on the camera's panel (a stage micrometer: From the "
+                           "Measure line); 0: taken from another objective's calibration by the ratio of magnifications")
+        from_line = widgets.button("From the Measure line...", panel.calibrate_from_ruler,
+                                   "Drag the Measure line along a stage micrometer, then type its true length")
         self.bar = QtWidgets.QCheckBox("Scale bar")
-        for w in (self.um, self.objective, self.bar):
+        self.bar.setChecked(True)                        # shown as soon as there is a calibration
+        for w in (self.um, from_line, self.bar):
             cal.addWidget(w)
-        self.um.valueChanged.connect(lambda *_: self.changed.emit())
-        self.objective.textChanged.connect(lambda *_: self.changed.emit())
-        self.bar.toggled.connect(lambda *_: self.changed.emit())
         lay.addLayout(cal)
+        objs = box("h", "s")
+        objs.addWidget(label("Objectives", "muted"))
+        self.objectives = QtWidgets.QLineEdit()
+        self.objectives.setToolTip("The magnifications on the panel's slider, e.g. 2.5, 5, 10, 20, 40, 63")
+        objs.addWidget(self.objectives, 1)
+        lay.addLayout(objs)
+        self.scale_note = label("", "muted", wrap=True)
+        lay.addWidget(self.scale_note)
+        self.um.valueChanged.connect(lambda v: panel.set_calibration(v))
+        self.objectives.editingFinished.connect(lambda: panel.set_objectives(self.objectives.text()))
+        self.bar.toggled.connect(lambda *_: self.changed.emit())
         self.setLayout(lay)
         self._busy = False
 
@@ -341,10 +362,17 @@ class CameraPanel(QtWidgets.QWidget):
         self.average = QtWidgets.QSpinBox()
         self.average.setRange(1, 64)
         self.average.setToolTip("Frames averaged into each picture: more for dim fluorescence (less noise, slower)")
+        self.objective = QtWidgets.QSlider(QtCore.Qt.Horizontal)   # the magnification in use: the scale follows it
+        self.objective.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self.objective.setPageStep(1)
+        self.objective_caption = label("Objective", "muted")
+        self.objectives = list(picture.OBJECTIVES)
+        self.calibrated: dict[float, float] = {}           # um a pixel, each objective measured with
         for k, (caption, w) in enumerate((("Exposure (ms)", self.exposure), ("Gain", self.gain),
-                                          ("Average", self.average))):
-            controls.addWidget(label(caption, "muted"), 0, k)
+                                          ("Average", self.average), (self.objective_caption, self.objective))):
+            controls.addWidget(caption if isinstance(caption, QtWidgets.QWidget) else label(caption, "muted"), 0, k)
             controls.addWidget(w, 1, k)
+        self.objective.valueChanged.connect(self._objective_moved)
         self.exposure.editingFinished.connect(self._exposure)
         self.gain.editingFinished.connect(self._exposure)
         self.average.valueChanged.connect(self._average)
@@ -378,6 +406,8 @@ class CameraPanel(QtWidgets.QWidget):
         self._loading = True                                  # nothing is saved while the saved values come back
         self.dialog = AdjustDialog(self)
         self.dialog.changed.connect(self._calibration)
+        self.set_objectives("")                                # the standard objectives until the saved ones load
+        self.objective.setValue(self.objectives.index(20.0))
         self.load_settings()
         self._loading = False
 
@@ -459,10 +489,33 @@ class CameraPanel(QtWidgets.QWidget):
 
     def _show(self, frame, shown, stats=None) -> None:
         self._shown += 1
+        try:
+            self._draw(frame, shown, stats)
+        finally:
+            if self._thread is not None:
+                self._thread.drawing = False
+
+    def _draw(self, frame, shown, stats=None) -> None:
         self.last = frame
+        table = None
+        if isinstance(shown, tuple):                  # a grey frame and the table it is drawn through
+            shown, table = shown
         self.shown = shown
-        self.image.setImage(shown, autoLevels=False, levels=(0, 255))
-        self._calibration()
+        # a grey picture drawn as one channel (a monochrome camera's, untinted): a third of the work to draw; and only
+        # as many pixels as the screen shows (zoomed out, every 2nd to 4th), laid over the picture's full size so
+        # every coordinate (the scale bar, measuring) stays the camera's own; zoomed in, every pixel
+        img = shown[:, :, 0] if picture.is_grey(shown) else shown
+        self.image.setLookupTable(table if table is not None and img.ndim == 2 else None)
+        step = 1
+        vb = self.image.getViewBox()
+        if vb is not None:
+            try:
+                step = int(max(1.0, min(4.0, vb.viewPixelSize()[0])))
+            except Exception:                    # the view not laid out yet
+                step = 1
+        self.image.setImage(img[::step, ::step] if step > 1 else img, autoLevels=False, levels=(0, 255))
+        self.image.setRect(QtCore.QRectF(0, 0, shown.shape[1], shown.shape[0]))
+        self._place_bar()
         if stats is not None:
             edges = np.linspace(0, 256, len(stats["hist"]) + 1)
             self.dialog.hist_curve.setData(edges, stats["hist"])
@@ -534,12 +587,18 @@ class CameraPanel(QtWidgets.QWidget):
     def _measured(self) -> None:
         if self.ruler is None:
             return
-        (x1, y1), (x2, y2) = [(p.x(), p.y()) for p in (self.ruler.mapToParent(h["item"].pos())
-                                                       for h in self.ruler.handles)]
+        (x1, y1), (x2, y2) = self._ruler_ends()
         px = float(np.hypot(x2 - x1, y2 - y1))
-        um = self.dialog.um.value()
+        um = self.scale()[0]
         self.ruler_text.setText(f"{px * um:.1f} um" if um else f"{px:.0f} px (not calibrated)")
         self.ruler_text.setPos(max(x1, x2), min(y1, y2))
+
+    def _ruler_ends(self):
+        return [(p.x(), p.y()) for p in (self.ruler.mapToParent(h["item"].pos()) for h in self.ruler.handles)]
+
+    def _ruler_px(self) -> float:
+        (x1, y1), (x2, y2) = self._ruler_ends()
+        return float(np.hypot(x2 - x1, y2 - y1))
 
     def set_adjust(self, a: picture.Adjust) -> None:
         self.adjust = a
@@ -555,8 +614,73 @@ class CameraPanel(QtWidgets.QWidget):
         self.dialog.show_adjust(dataclasses.replace(self.adjust, red=round(r, 3), green=round(g, 3),
                                                     blue=round(b, 3)), apply=True)
 
+    # ---- the scale: the objective in use and its calibration
+    @property
+    def magnification(self) -> float:
+        return self.objectives[min(max(self.objective.value(), 0), len(self.objectives) - 1)]
+
+    def scale(self) -> tuple[float, str]:
+        """um a pixel with the objective in use, and how it is known."""
+        return picture.objective_scale(self.magnification, self.calibrated)
+
+    def set_objectives(self, text: str) -> None:
+        keep = self.magnification if self.objectives else None
+        self.objectives = picture.parse_objectives(text)
+        self.objective.blockSignals(True)
+        self.objective.setRange(0, len(self.objectives) - 1)
+        self.objective.setValue(min(range(len(self.objectives)),
+                                    key=lambda i: abs(self.objectives[i] - (keep or self.objectives[0]))))
+        self.objective.blockSignals(False)
+        self.dialog.objectives.setText(", ".join(f"{m:g}" for m in self.objectives))
+        self._objective_moved()
+
+    def set_calibration(self, um: float) -> None:
+        """The objective in use measured at ``um`` a pixel (0: none; then taken from another objective's)."""
+        if self.dialog.um.signalsBlocked():
+            return
+        if um > 0:
+            self.calibrated[self.magnification] = float(um)
+        else:
+            self.calibrated.pop(self.magnification, None)
+        self._objective_moved()
+
+    def calibrate_from_ruler(self) -> None:
+        if self.ruler is None:
+            self.toggle_measure()
+            self.window.say("Drag the Measure line along a stage micrometer's divisions, then choose From the "
+                            "Measure line again.")
+            return
+        px = self._ruler_px()
+        if px < 5:
+            self.window.say("The Measure line is too short to calibrate with.")
+            return
+        um, ok = QtWidgets.QInputDialog.getDouble(
+            self, "Calibrate this objective", f"The Measure line is {px:.1f} px long at {self.magnification:g}x. "
+            "Its true length (um):", 100.0, 0.001, 100000.0, 3)
+        if ok:
+            self.dialog.um.setValue(um / px)            # set_calibration then keeps it for this objective
+
+    def _objective_moved(self, *_) -> None:
+        um, how = self.scale()
+        mag = self.magnification
+        self.objective_caption.setText(f"Objective {mag:g}x")
+        self.objective.setToolTip(f"{mag:g}x: " + (f"{um:.4g} um a pixel, {how}" if um else
+                                                    "not calibrated (Adjust..., Length calibration)"))
+        self.dialog.um.blockSignals(True)
+        self.dialog.um.setValue(self.calibrated.get(mag, 0.0))
+        self.dialog.um.blockSignals(False)
+        self.dialog.scale_note.setText(f"{mag:g}x: " + (f"{um:.4g} um a pixel, {how}." if um else
+                                       "not calibrated: measure a stage micrometer at any objective (From the "
+                                       "Measure line); the others follow by their magnifications."))
+        self._calibration()
+
     def _calibration(self) -> None:
-        um = self.dialog.um.value()
+        self._place_bar()
+        self._measured()
+        self.save_settings()
+
+    def _place_bar(self) -> None:
+        um = self.scale()[0]
         h, w = (self.last.rgb.shape[:2] if self.last is not None else (0, 0))
         show = bool(um and w and self.dialog.bar.isChecked())
         self.bar_line.setVisible(show)
@@ -567,7 +691,6 @@ class CameraPanel(QtWidgets.QWidget):
             self.bar_line.setData([x1 - length_px, x1], [y, y])
             self.bar_text.setText(f"{length_um:g} um")
             self.bar_text.setPos(x1, y - h * 0.01)
-        self.save_settings()
 
     def open_adjust(self) -> None:
         self.dialog.fill_presets()
@@ -586,12 +709,13 @@ class CameraPanel(QtWidgets.QWidget):
             if not folder:
                 return None
         f = self.last
-        um = self.dialog.um.value() or None
+        um, how = self.scale()
+        um = um or None
         info = {"camera_serial": f.serial, "exposure_ms": f.exposure_ms, "gain": f.gain, "averaged": f.averaged,
-                "objective": self.dialog.objective.text().strip(), "um_per_px": um,
+                "objective": f"{self.magnification:g}x", "um_per_px": um, "scale": how,
                 "shown_with": self.adjust.changed(), "corrections_shown": self.corrections.active(),
                 "saved_by": "Clampwise", "taken": time.strftime("%Y-%m-%d %H:%M:%S")}
-        label_ = " ".join(x for x in (self.dialog.objective.text().strip(), self.dialog.presets.currentText()
+        label_ = " ".join(x for x in (f"{self.magnification:g}x", self.dialog.presets.currentText()
                                       if self.dialog.presets.currentText() in self.presets else "") if x)
         path = picture.write_tiff(picture.snapshot_name(folder, label_), np.ascontiguousarray(f.rgb), info, um)
         if not self.adjust.neutral() or self.corrections.active():
@@ -617,8 +741,19 @@ class CameraPanel(QtWidgets.QWidget):
                 self.adjust = picture.preset_from_text(text)
         except (ValueError, TypeError):
             self.presets = {}
-        self.dialog.um.setValue(float(s.value("camera/um_per_px", 0.0) or 0.0))
-        self.dialog.objective.setText(str(s.value("camera/objective", "") or ""))
+        try:
+            self.calibrated = {float(k): float(v) for k, v in
+                               json.loads(str(s.value("camera/calibrated", "{}") or "{}")).items()}
+        except (ValueError, TypeError):
+            self.calibrated = {}
+        old_um, old_obj = float(s.value("camera/um_per_px", 0.0) or 0.0), str(s.value("camera/objective", "") or "")
+        if old_um > 0 and not self.calibrated:                   # a calibration from before the slider
+            mags = picture.parse_objectives(old_obj)
+            if old_obj.strip() and len(mags) == 1:
+                self.calibrated[mags[0]] = old_um
+        self.set_objectives(str(s.value("camera/objectives", "") or ""))
+        self.objective.setValue(int(s.value("camera/objective_index", self.objectives.index(20.0)
+                                            if 20.0 in self.objectives else 0) or 0))
         self.dialog.bar.setChecked(str(s.value("camera/scale_bar", "true")).lower() == "true")
         self.average.setValue(int(s.value("camera/average", 1) or 1))
 
@@ -628,7 +763,8 @@ class CameraPanel(QtWidgets.QWidget):
         s = self.window._settings()
         s.setValue("camera/presets", json.dumps(self.presets))
         s.setValue("camera/adjust", picture.preset_to_text(self.adjust))
-        s.setValue("camera/um_per_px", self.dialog.um.value())
-        s.setValue("camera/objective", self.dialog.objective.text())
+        s.setValue("camera/calibrated", json.dumps({f"{k:g}": v for k, v in self.calibrated.items()}))
+        s.setValue("camera/objectives", ", ".join(f"{m:g}" for m in self.objectives))
+        s.setValue("camera/objective_index", self.objective.value())
         s.setValue("camera/scale_bar", self.dialog.bar.isChecked())
         s.setValue("camera/average", self.average.value())

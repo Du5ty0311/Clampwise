@@ -46,10 +46,41 @@ RANGES = {"brightness": (-1.0, 1.0), "contrast": (0.0, 3.0), "gamma": (0.2, 5.0)
           "sharpness": (0.0, 3.0), "clarity": (0.0, 3.0), "red": (0.0, 3.0), "green": (0.0, 3.0), "blue": (0.0, 3.0)}
 
 
+def is_grey(rgb: np.ndarray) -> bool:
+    """A monochrome camera's frame: one grey channel seen as three (a view, not a copy)."""
+    return rgb.ndim == 3 and rgb.strides[2] == 0
+
+
+def lum8(rgb: np.ndarray) -> np.ndarray:
+    """The brightness, uint8: the grey channel itself, else the channels' mean."""
+    if is_grey(rgb):
+        return rgb[:, :, 0]
+    return (rgb.sum(axis=2, dtype=np.uint16) // 3).astype(np.uint8)
+
+
+def _point_lut(a: Adjust, gain: float) -> np.ndarray:
+    """What ``apply`` does to one channel's 256 levels when only point operations are set."""
+    x = np.arange(256, dtype=np.float32) / 255.0 * gain
+    x = np.clip((x - 0.5) * a.contrast + 0.5 + a.brightness, 0.0, 1.0)
+    if a.gamma != 1.0:
+        x = x ** (1.0 / a.gamma)
+    return np.round(x * 255.0).astype(np.uint8)
+
+
 def apply(rgb: np.ndarray, a: Adjust) -> np.ndarray:
-    """The picture (H, W, 3) uint8 as shown with ``a``; the input is not changed."""
+    """The picture (H, W, 3) uint8 as shown with ``a``; the input is not changed. Brightness, contrast, gamma and the
+    colour balance alone (saturation too, on a grey picture) are a lookup of each level: 5 ms on the rig camera's
+    2.9 MP frame, where working in floating point took 43 ms."""
     if a.neutral():
         return rgb
+    if not (a.auto_levels or a.sharpness or a.clarity) and (a.saturation == 1.0 or is_grey(rgb)):
+        if is_grey(rgb) and a.red == a.green == a.blue:
+            g = _point_lut(a, a.red)[rgb[:, :, 0]]
+            return np.broadcast_to(g[:, :, None], rgb.shape)
+        out = np.empty(rgb.shape, np.uint8)
+        for c, gain in enumerate((a.red, a.green, a.blue)):
+            out[:, :, c] = _point_lut(a, gain)[rgb[:, :, c]]
+        return out
     x = rgb.astype(np.float32) / 255.0
     x = x * np.array([a.red, a.green, a.blue], np.float32)
     if a.auto_levels:
@@ -75,6 +106,37 @@ def white_balance(rgb: np.ndarray) -> tuple[float, float, float]:
     means = rgb.reshape(-1, 3).astype(np.float64).mean(axis=0)
     means = np.maximum(means, 1.0)
     return tuple(float(means.mean() / m) for m in means)
+
+
+OBJECTIVES = (2.5, 5.0, 10.0, 20.0, 40.0, 63.0)     # the slider's stops; each microscope's own can be set
+
+
+def parse_objectives(text: str) -> list[float]:
+    """'2.5, 5, 20x, 63' -> [2.5, 5.0, 20.0, 63.0] (sorted, no repeats); the standard list when nothing is readable."""
+    out = set()
+    for part in str(text).replace(";", ",").split(","):
+        part = part.strip().lower().rstrip("x").strip()
+        try:
+            v = float(part)
+        except ValueError:
+            continue
+        if v > 0:
+            out.add(v)
+    return sorted(out) or list(OBJECTIVES)
+
+
+def objective_scale(mag: float, calibrated: dict) -> tuple[float, str]:
+    """um a pixel with the ``mag`` objective, and how it is known. Its own calibration (a stage micrometer measured
+    with it) first; else another objective's, scaled by the ratio of their magnifications (the camera sees each
+    objective's image through the same tube and adapter, so um a pixel goes as 1 / magnification: the nearest
+    calibrated objective is used); else 0, not calibrated."""
+    cal = {float(k): float(v) for k, v in calibrated.items() if float(v) > 0}
+    if cal.get(float(mag)):
+        return cal[float(mag)], f"calibrated at {mag:g}x"
+    if cal:
+        ref = min(cal, key=lambda m: abs(np.log(m / mag)))
+        return cal[ref] * ref / mag, f"estimated from the {ref:g}x calibration"
+    return 0.0, "not calibrated"
 
 
 def scale_bar(um_per_px: float, width_px: int) -> tuple[float, int]:
@@ -224,16 +286,36 @@ def shown(raw: np.ndarray, c: Corrections, a: Adjust) -> np.ndarray:
     """The frame as shown: corrected, adjusted, coloured, the overlay laid over it, clipped pixels in red."""
     x = apply(corrected(raw, c), a)
     if c.lut != "colour":
-        x = _lut(c.lut)[np.round(x.mean(axis=2)).astype(np.uint8)]
+        x = _lut(c.lut)[lum8(x)]
     if c.overlay is not None and c.overlay_on and c.overlay.shape == x.shape[:2]:
         m = (c.overlay * c.overlay_opacity)[..., None]
         x = np.round(x * (1 - m) + np.array(c.overlay_colour, np.float32) * m).astype(np.uint8)
     if c.show_clipped:
-        clipped = (raw >= 255).any(axis=2)
+        clipped = raw[:, :, 0] == 255 if is_grey(raw) else (raw >= 255).any(axis=2)
         if clipped.any():
             x = x.copy()
             x[clipped] = (255, 0, 0)
     return x
+
+
+def display_table(c: Corrections, a: Adjust) -> np.ndarray | None:
+    """For a grey frame: what ``shown`` does, as a table of the 256 levels (256, 3) uint8, when it can be one (point
+    adjustments only, no correction or overlay); the screen then draws the camera's own pixels through it. None when
+    the picture needs ``shown`` itself. A frame with a clipped pixel took 51 ms to draw through ``shown`` (red pixels
+    make a colour copy); through the table, a few."""
+    if a.auto_levels or a.sharpness or a.clarity or c.mode != "off" and c.background is not None or c.dark is not None:
+        return None
+    if c.overlay is not None and c.overlay_on:
+        return None
+    levels = np.arange(256, dtype=np.uint8)[:, None, None]                  # the 256 levels as a grey picture
+    grey = np.broadcast_to(levels, (256, 1, 3))
+    table = np.ascontiguousarray(apply(grey, a)).reshape(256, 3)
+    if c.lut != "colour":
+        table = _lut(c.lut)[(table.sum(axis=1, dtype=np.uint16) // 3).astype(np.uint8)]
+    if c.show_clipped:
+        table = table.copy()
+        table[255] = (255, 0, 0)
+    return table
 
 
 def overlay_from(raw: np.ndarray, c: Corrections) -> np.ndarray:
@@ -245,11 +327,24 @@ def overlay_from(raw: np.ndarray, c: Corrections) -> np.ndarray:
 
 
 def stats(raw: np.ndarray, bins: int = 64) -> dict:
-    """The histogram of the frame's brightness, its brightest 0.5% and how much of it is clipped at either end."""
-    lum = raw.mean(axis=2)
-    hist, _ = np.histogram(lum, bins=bins, range=(0, 256))
-    return {"hist": hist, "p995": float(np.percentile(lum, 99.5)), "mean": float(lum.mean()),
-            "clipped": float((raw >= 255).any(axis=2).mean()), "black": float((raw <= 0).all(axis=2).mean())}
+    """The histogram of the frame's brightness, its brightest 0.5% and how much of it is clipped at either end, from
+    a count of the 256 levels (15 ms on the rig camera's grey frame; a sort of every pixel took 217 ms). A colour
+    frame is read every second pixel each way (the same histogram, a quarter of the work)."""
+    if not is_grey(raw) and raw.shape[0] * raw.shape[1] > 1_000_000:
+        raw = raw[::2, ::2]
+    lum = lum8(raw)
+    counts = np.bincount(lum.ravel(), minlength=256)
+    total = max(int(counts.sum()), 1)
+    hist = counts.reshape(bins, 256 // bins).sum(axis=1)
+    p995 = float(np.searchsorted(np.cumsum(counts), 0.995 * total))
+    mean = float((counts * np.arange(256)).sum() / total)
+    if is_grey(raw):
+        clipped, black = counts[255] / total, counts[0] / total
+    else:
+        top = raw.max(axis=2)
+        clipped = float(np.count_nonzero(top == 255)) / top.size
+        black = float(np.count_nonzero(top == 0)) / top.size
+    return {"hist": hist, "p995": p995, "mean": mean, "clipped": float(clipped), "black": float(black)}
 
 
 def next_exposure(ms: float, p995: float, low: float, high: float, clipped: float = 0.0) -> float:

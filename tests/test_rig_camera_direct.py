@@ -18,11 +18,12 @@ from clampwise.rig import camera, lucam, picture
 class FakeLucam:
     """Lumenera's library as a stand-in: one 8 x 6 colour camera whose raw frames count up."""
 
-    def __init__(self) -> None:
-        self.calls, self.frames, self.snap = [], 0, None
+    def __init__(self, mono: bool = False) -> None:
+        self.calls, self.frames, self.rate = [], 0, None
         # as the camera's program left it on the rig (2026-10-14): contrast 3.4, brightness -5
         self.props = {lucam.EXPOSURE: 37.18, lucam.GAIN: 1.2, lucam.BRIGHTNESS: -5.0, lucam.CONTRAST: 3.4,
-                      lucam.GAMMA: 1.0, lucam.SATURATION: 1.0}
+                      lucam.GAMMA: 1.0, lucam.SATURATION: 1.0,
+                      lucam.COLOR_FORMAT: lucam.CF_MONO if mono else 8}            # 8: a Bayer (colour) sensor
 
     def LucamNumCameras(self):
         return 1
@@ -58,19 +59,25 @@ class FakeLucam:
                                                                lucam.GAIN: (1.0, 1.2, 1.0)}.get(prop.value, (0, 1, 0))
         return 1
 
-    def LucamEnableFastFrames(self, handle, snap):
-        self.snap = (snap._obj.exposure, snap._obj.gain)
-        self.calls.append("fast")
+    def LucamEnumAvailableFrameRates(self, handle, count, rates):
+        if count:
+            rates[0], rates[1] = 31.4, 62.8
+        return 2
+
+    def LucamSetFormat(self, handle, fmt, rate):
+        self.rate = rate.value
         return 1
 
-    def LucamDisableFastFrames(self, handle):
-        self.calls.append("stop")
+    def LucamStreamVideoControl(self, handle, control, window):
+        self.calls.append("stream" if control == lucam.START_STREAMING else "stop")
         return 1
 
-    def LucamTakeFastFrame(self, handle, raw):
-        time.sleep(0.005)                     # an exposure takes time, as on the camera
-        self.frames += 1
-        ctypes.memset(raw, (10 * self.frames) % 200, ctypes.sizeof(raw))      # counts up, inside 8 bits
+    def LucamTakeVideo(self, handle, n, raw):
+        size = ctypes.sizeof(raw) // n
+        for k in range(n):                    # each frame of the stream a level that counts up, inside 8 bits
+            time.sleep(0.005)
+            self.frames += 1
+            ctypes.memset(ctypes.addressof(raw) + k * size, (10 * self.frames) % 200, size)
         return 1
 
     def LucamConvertFrameToRgb24(self, handle, rgb, raw, w, h, pf, conv):
@@ -113,18 +120,39 @@ def test_the_camera_s_own_processing_is_neutral_while_held_and_put_back_after():
     assert fake.props[lucam.CONTRAST] == pytest.approx(3.4) and fake.props[lucam.BRIGHTNESS] == -5.0
 
 
-def test_frames_are_colour_and_averaged_and_a_new_exposure_restarts_them():
+def test_frames_are_the_video_stream_colour_and_averaged_and_the_exposure_changes_on_the_fly():
     fake = FakeLucam()
     cam = lucam.Camera(fake, owner_check=lambda: False)
     cam.open()
     f = cam.frame()
     assert f.rgb.shape == (6, 8, 3) and tuple(f.rgb[0, 0]) == (12, 11, 10)          # BGR turned to RGB
+    assert fake.rate == pytest.approx(62.8) and cam.frame_rate == pytest.approx(62.8)   # the fastest the camera has
     f = cam.frame(average=4)                                                        # frames 2-5: 20..50, mean 35
     assert f.averaged == 4 and tuple(f.rgb[0, 0]) == (37, 36, 35)
-    assert fake.snap == (pytest.approx(37.18), pytest.approx(1.2)) and fake.calls.count("fast") == 1
-    cam.set_exposure(250.0, 1.1)
+    assert fake.calls.count("stream") == 1
+    cam.set_exposure(250.0, 1.1)                                                    # the stream goes on
     cam.frame()
-    assert fake.snap == (250.0, pytest.approx(1.1)) and fake.calls[-2:] == ["stop", "fast"]
+    assert fake.props[lucam.EXPOSURE] == 250.0 and fake.props[lucam.GAIN] == pytest.approx(1.1)
+    assert fake.calls.count("stream") == 1
+    cam.close()
+    assert fake.calls[-2:] == ["stop", "close"]
+
+
+def test_a_monochrome_camera_s_frames_stay_one_grey_channel():
+    fake = FakeLucam(mono=True)
+    cam = lucam.Camera(fake, owner_check=lambda: False)
+    cam.open()
+    f = cam.frame()
+    assert cam.mono and f.rgb.shape == (6, 8, 3) and tuple(f.rgb[0, 0]) == (10, 10, 10)
+    assert picture.is_grey(f.rgb)                                                   # three channels, one copy
+    f = cam.frame(average=4)                                                        # 20..50: 35
+    assert tuple(f.rgb[2, 3]) == (35, 35, 35)
+    s = picture.stats(f.rgb)
+    assert s["p995"] == 35 and s["hist"].sum() == 48 and s["clipped"] == 0
+    shown = picture.apply(f.rgb, picture.Adjust(contrast=2.0))                      # a lookup, still grey
+    assert picture.is_grey(shown) and tuple(shown[0, 0]) == tuple(picture.apply(
+        np.ascontiguousarray(f.rgb), picture.Adjust(contrast=2.0, sharpness=1e-12))[0, 0])
+    cam.close()
 
 
 def test_adjustments_change_what_is_shown_and_each_resets_to_neutral():
@@ -150,6 +178,18 @@ def test_white_balance_and_the_scale_bar():
     balanced = picture.apply(tinted, picture.Adjust(red=r, green=g, blue=b))
     assert np.ptp(balanced[0, 0].astype(int)) <= 1
     assert picture.scale_bar(0.16, 1944) == (50.0, 312)                              # a fifth of 311 um: 50 um
+
+
+def test_each_objective_s_scale_follows_one_calibration_by_its_magnification():
+    assert picture.parse_objectives("63, 2.5x; 20 , 20, nonsense") == [2.5, 20.0, 63.0]
+    assert picture.parse_objectives("") == list(picture.OBJECTIVES)
+    assert picture.objective_scale(20, {}) == (0.0, "not calibrated")
+    um, how = picture.objective_scale(20, {20: 0.2})
+    assert um == 0.2 and how == "calibrated at 20x"
+    um, how = picture.objective_scale(2.5, {20: 0.2})                                # 8x less magnified: 8x more
+    assert um == pytest.approx(1.6) and how == "estimated from the 20x calibration"
+    um, how = picture.objective_scale(63, {20: 0.2, 40: 0.098})                       # the nearest calibration
+    assert um == pytest.approx(0.098 * 40 / 63) and "40x" in how
 
 
 def test_a_snapshot_keeps_the_camera_s_pixels_how_it_was_taken_and_its_scale(tmp_path):

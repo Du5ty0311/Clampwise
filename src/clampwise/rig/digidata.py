@@ -100,6 +100,11 @@ def lend() -> _Lent:
         return _Lent(_kept)
 
 
+def held() -> bool:
+    """Whether Clampwise holds the digitizer open now (its helper kept for Play, Record and the membrane test)."""
+    return _kept is not None and _kept.proc.poll() is None
+
+
 def let_go() -> None:
     """The digitizer let go (Live's Let go, Clampwise closing): the acquisition program can open it."""
     global _kept

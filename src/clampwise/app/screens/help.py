@@ -196,8 +196,14 @@ nothing in the file records when the stimulus came.</p>
 
 LIVE = """<h2>The Live screen</h2>
 <p>Live puts the cell you are recording and the rig's programs on one screen. The screen names the rig's roles;
-these are the programs behind them on this rig, and what is read from each. Everything is <b>read</b>: nothing on
-the rig is ever set, started or stopped from Clampwise.</p>
+these are the programs behind them on this rig, and what is read from each. Nothing on the rig is changed unless you
+do it from Clampwise (record, the amplifier's controls, the camera); everything else is <b>read</b>.</p>
+<p><b>Hardware.</b> At the top of the cell's panel, the rig's devices as Windows lists them, found by themselves
+every few seconds (Detect looks now) and never opened to do it: the digitizer (Digidata 1440A), the amplifier
+(MultiClamp 700B, with its serial, and each channel's mode from MultiClamp Commander's telegraph when it is open),
+the camera (Lumenera INFINITY, with its serial and model) and, when connected, the Polygon's IOBox (Mightex). Each
+says who is using it, in the screen's words: the acquisition program (Clampex), the camera's program (Infinity
+Analyze), Clampwise; or that it is free.</p>
 <table cellpadding='4'><tr><th align='left'>Role</th><th align='left'>Program</th><th align='left'>What is read, and how</th></tr>
 <tr><td>Amplifier</td><td>MultiClamp 700B Commander</td><td>The amplifier itself, twice a second, through Commander's
 message interface (its <i>AxMultiClampMsg</i> library): the mode, the holding and whether it is on, the primary and
@@ -265,7 +271,13 @@ brightest 0.5% of the picture to 80% of the camera's full scale; the <b>histogra
 and <b>clipped pixels</b> are painted red, since a pixel at full scale is no longer a measure (Waters 2009; Lambert
 &amp; Waters 2014; Murphy &amp; Davidson 2012). Grey, green (GFP), magenta and fire colour scales; a crosshair;
 <b>Measure</b> drags a line whose length is given in um once the camera is calibrated; the wheel zooms, a drag pans,
-<b>Fit</b> shows the whole picture. The frame rate is shown beside the buttons: pictures a second as the camera takes them (the exposure and averaging set it) and, when fewer, as drawn. While Clampwise holds the camera, the camera's own processing (the contrast and
+<b>Fit</b> shows the whole picture. The <b>Objective</b> slider says which objective is in use (2.5x to 63x; the list
+is set in Adjust...), and the scale bar and Measure follow it. Calibrate once: under Adjust..., Length calibration,
+type the um a pixel for the objective in use, or drag the Measure line along a stage micrometer and choose From the
+Measure line; every other objective's scale is then that one's times the ratio of their magnifications, said as
+estimated, until it is calibrated itself. A snapshot records the objective and its scale. The picture is the
+camera's video stream at its fastest frame rate, so the exposure alone sets the pace (37 ms: 27 pictures a second);
+the frame rate is shown beside the buttons, as taken and, when fewer, as drawn. While Clampwise holds the camera, the camera's own processing (the contrast and
 brightness its program leaves in it) is made neutral, and put back when it lets go.</p>
 <p><b>Recording in Clampwise.</b> The acquisition view's <b>Use here</b> records without Clampex (Clampex must be
 closed: one program at a time holds the Digidata). Choose one of your protocols (<b>Protocols...</b> picks their

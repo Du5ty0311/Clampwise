@@ -17,7 +17,7 @@ from pathlib import Path
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from ...rig import digidata, growing, multiclamp
+from ...rig import digidata, growing, hardware, multiclamp
 from ...rig import state as rig_state
 from ...rig import windows as rig_windows
 from .. import theme, widgets
@@ -543,6 +543,36 @@ class LiveScreen(Screen):
         # the cell, compact: the channel as the amplifier's panel shows it, then the recorded trace, Rs, the records
         panel = QtWidgets.QWidget()
         lay = box("v", "s")
+        # the rig's hardware, found by itself (rig.hardware): what is connected and who is using it
+        found = QtWidgets.QFrame()
+        found.setObjectName("desk")
+        found.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        fl = box("v", "xs", "s")
+        ftop = box("h", "s")
+        ftop.addWidget(label("Hardware", "heading"), 1)
+        ftop.addWidget(widgets.button("Detect", self.detect_hardware, "Look for the digitizer, the amplifier and the "
+                                      "camera now (they are looked for every few seconds anyway)", quiet=True))
+        fl.addLayout(ftop)
+        self.hardware_grid = QtWidgets.QGridLayout()
+        self.hardware_grid.setHorizontalSpacing(theme.SPACE["m"])
+        self.hardware_grid.setVerticalSpacing(theme.SPACE["xs"])
+        self.hardware_grid.setColumnStretch(1, 1)
+        self.hardware_rows: dict[str, widgets.Badge] = {}
+        for row, role in enumerate(hardware.ROLES):
+            badge = widgets.Badge("muted", "looking...")
+            badge.setVisible(role != "light")              # the patterned light's IOBox only when it is there
+            caption = label(hardware.WORDS[role], "muted")
+            caption.setVisible(role != "light")
+            self.hardware_grid.addWidget(caption, row, 0)
+            self.hardware_grid.addWidget(badge, row, 1)
+            self.hardware_rows[role] = badge
+        fl.addLayout(self.hardware_grid)
+        found.setLayout(fl)
+        lay.addWidget(found)
+        self.hardware: list[hardware.Device] = []
+        self._detecting = False
+        self._hardware_timer = QtCore.QTimer(self)
+        self._hardware_timer.timeout.connect(self.detect_hardware)
         channel = QtWidgets.QFrame()
         channel.setObjectName("desk")
         channel.setAttribute(QtCore.Qt.WA_StyledBackground, True)
@@ -923,8 +953,41 @@ class LiveScreen(Screen):
         for role, sub_ in self._subs.items():
             self._save_sub(role, sub_)
 
+    # ---- the rig's hardware, found by itself
+    def detect_hardware(self) -> None:
+        """Look for the devices in the background (Windows' device list and Commander's telegraph: nothing opened)."""
+        from .. import worker
+
+        if self._detecting or not self.isVisible():
+            return
+        self._detecting = True
+        held = {"acquisition": digidata.held() or self.recorder.busy or self.recorder.test.running,
+                "camera": self.camera.running}
+        worker.run(lambda: hardware.detect(held=held), self._hardware_found)
+
+    def _hardware_found(self, result) -> None:
+        self._detecting = False
+        if isinstance(result, Exception):
+            return
+        self.hardware = result
+        have = {d.role: d for d in result}
+        for role, badge in self.hardware_rows.items():
+            d = have.get(role)
+            if role == "light":
+                badge.setVisible(d is not None)
+                self.hardware_grid.itemAtPosition(hardware.ROLES.index(role), 0).widget().setVisible(d is not None)
+            if d is None:
+                badge.set("muted", "not connected", "Not among the USB devices Windows lists now")
+                continue
+            busy = d.state.startswith("in use by") and "Clampwise" not in d.state or "closed" in d.state
+            badge.set("warn" if busy else "ok", d.line(), f"Windows' device: {d.instance}")
+            badge.setWordWrap(True)
+
     # ---- the readout runs while the screen shows or the folder is watched
     def on_shown(self) -> None:
+        if not self._hardware_timer.isActive():
+            self._hardware_timer.start(5000)
+        QtCore.QTimer.singleShot(0, self.detect_hardware)
         if not self._split_set:                          # first time: the programs take most of the width
             self._split_set = True
             total = max(self.split.width(), 2)

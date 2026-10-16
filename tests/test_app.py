@@ -560,6 +560,15 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert _wait(qapp, lambda: panel.status.text().startswith("Auto exposure:"))
     panel.toggle_measure()
     assert panel.ruler is not None and "px (not calibrated)" in panel.ruler_text.toPlainText()
+    # the objective's slider and the calibration: one objective measured, the others by their magnification
+    assert panel.magnification == 20.0 and not panel.bar_line.isVisible()
+    panel.dialog.um.setValue(0.2)                                                 # 20x measured: 0.2 um a pixel
+    assert panel.calibrated == {20.0: 0.2} and panel.bar_line.isVisible() and "um" in panel.ruler_text.toPlainText()
+    panel.objective.setValue(panel.objectives.index(2.5))
+    assert panel.scale() == (pytest.approx(1.6), "estimated from the 20x calibration")
+    assert panel.objective_caption.text() == "Objective 2.5x" and panel.dialog.um.value() == 0.0
+    panel.set_objectives("2.5, 10, 20, 63")
+    assert panel.magnification == 2.5 and panel.objective.maximum() == 3
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
 
