@@ -11,5 +11,5 @@ experiment's store, ``analysis`` measures (no Qt), ``export`` writes,
 ``protocol`` designs stimuli, ``app`` is the window.
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 APP_NAME = "Clampwise"
