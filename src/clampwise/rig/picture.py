@@ -154,17 +154,51 @@ def objective_scale(mag: float, calibrated: dict, pixel_um: float = 0.0, adapter
     return 0.0, "not calibrated"
 
 
-def compass(rostral_deg: float, medial_right: bool = True) -> dict[str, tuple[float, float]]:
-    """The slice's directions on the screen, as unit vectors (x to the right, y down, as the picture's rows run):
-    rostral ``rostral_deg`` clockwise from up, caudal opposite; medial a quarter turn clockwise of rostral (to its
-    right, as one faces rostral) or anticlockwise, lateral opposite. Dorsal and ventral are out of the picture's
-    plane (a horizontal slice) and not drawn."""
-    a = np.radians(float(rostral_deg) % 360.0)
+# a slice's plane: its two axes in the picture (the first the one turned, the second put on a side of it), and the
+# axis cut across, out of the picture
+PLANES = {"horizontal": (("rostral", "caudal"), ("medial", "lateral"), ("dorsal", "ventral")),
+          "coronal": (("dorsal", "ventral"), ("medial", "lateral"), ("rostral", "caudal")),
+          "sagittal": (("dorsal", "ventral"), ("rostral", "caudal"), ("medial", "lateral"))}
+# how the directions are named: rostral-caudal as such or as anterior-posterior, in words or by their letters
+NAMINGS = ("Rostral, caudal", "Anterior, posterior", "Letters: R C D V M L", "Letters: A P D V M L")
+
+
+def direction_name(direction: str, naming: str = NAMINGS[0]) -> str:
+    """``direction`` (rostral, caudal, dorsal, ventral, medial or lateral) as ``naming`` (one of NAMINGS) names it."""
+    anterior, letters = NAMINGS.index(naming) in (1, 3), NAMINGS.index(naming) in (2, 3)
+    if anterior:
+        direction = {"rostral": "anterior", "caudal": "posterior"}.get(direction, direction)
+    return direction[0].upper() if letters else direction.capitalize()
+
+
+def in_words(naming: str) -> str:
+    """``naming`` in words: rostral-caudal kept as such or as anterior-posterior."""
+    return NAMINGS[1] if NAMINGS.index(naming) in (1, 3) else NAMINGS[0]
+
+
+def axis_name(pair: tuple[str, str], naming: str = NAMINGS[0]) -> str:
+    """An axis by its two ends' letters, as atlases write it (RC or AP, DV, ML)."""
+    letters = NAMINGS[3] if NAMINGS.index(naming) in (1, 3) else NAMINGS[2]
+    return "".join(direction_name(d, letters) for d in pair)
+
+
+def compass(up_deg: float, side_right: bool = True, plane: str = "horizontal",
+            naming: str = NAMINGS[0]) -> dict[str, tuple[float, float]]:
+    """The slice's directions in the picture, as unit vectors (x to the right, y down, as the picture's rows run),
+    named as ``naming`` names them, the first the plane's turned direction (drawn stronger). The plane's first axis
+    (rostral in a horizontal slice; dorsal in a coronal or a sagittal one) points ``up_deg`` clockwise from up, its
+    other end opposite; the second axis's first end (medial in a horizontal or a coronal slice, rostral in a sagittal
+    one) a quarter turn clockwise of it (to its right, as one faces it) or anticlockwise. The axis the slice is cut
+    across (dorsal-ventral in a horizontal slice, rostral-caudal in a coronal one, medial-lateral in a sagittal one)
+    is out of the picture and not drawn."""
+    (a0, a1), (b0, b1), _ = PLANES[plane]
+    a = np.radians(float(up_deg) % 360.0)
     rx, ry = float(np.sin(a)), float(-np.cos(a))
-    mx, my = (-ry, rx) if medial_right else (ry, -rx)
+    mx, my = (-ry, rx) if side_right else (ry, -rx)
     clean = lambda v: 0.0 if abs(v) < 1e-12 else v
-    return {"Rostral": (clean(rx), clean(ry)), "Caudal": (clean(-rx), clean(-ry)),
-            "Medial": (clean(mx), clean(my)), "Lateral": (clean(-mx), clean(-my))}
+    n = lambda d: direction_name(d, naming)
+    return {n(a0): (clean(rx), clean(ry)), n(a1): (clean(-rx), clean(-ry)),
+            n(b0): (clean(mx), clean(my)), n(b1): (clean(-mx), clean(-my))}
 
 
 def scale_bar(um_per_px: float, width_px: int) -> tuple[float, int]:

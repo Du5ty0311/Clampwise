@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0 — 2026-10-18
+
+- **The compass follows the slice's plane.** Horizontal (rostral-caudal and medial-lateral in the picture), coronal
+  (dorsal-ventral and medial-lateral) or sagittal (dorsal-ventral and rostral-caudal); the axis cut across is named
+  beside it. Rostral-caudal can be named anterior-posterior, and every direction by its letter (R C, or A P; D V;
+  M L). Turned by the plane's first direction (rostral in a horizontal slice, dorsal in the others). Snapshots
+  record the plane.
+
 ## 1.4.0 — 2026-10-16
 
 - **A compass for the slice.** Rostral, caudal, medial and lateral marked over the camera's picture (Adjust...,

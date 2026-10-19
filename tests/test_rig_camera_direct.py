@@ -193,14 +193,29 @@ def test_each_objective_s_scale_follows_one_calibration_by_its_magnification():
 
 
 def test_the_compass_turns_with_rostral_and_puts_medial_on_the_side_chosen():
-    c = picture.compass(0, medial_right=True)                                       # screen: x right, y down
+    c = picture.compass(0, side_right=True)                                         # screen: x right, y down
     assert c["Rostral"] == (0.0, -1.0) and c["Caudal"] == (0.0, 1.0)
     assert c["Medial"] == (1.0, 0.0) and c["Lateral"] == (-1.0, 0.0)
-    c = picture.compass(90, medial_right=True)                                      # rostral right: medial down
+    c = picture.compass(90, side_right=True)                                        # rostral right: medial down
     assert c["Rostral"] == (1.0, 0.0) and c["Medial"] == (0.0, 1.0)
-    c = picture.compass(0, medial_right=False)
+    c = picture.compass(0, side_right=False)
     assert c["Medial"] == (-1.0, 0.0) and c["Lateral"] == (1.0, 0.0)
-    assert set(picture.compass(45)) == {"Rostral", "Caudal", "Medial", "Lateral"}  # no dorsal or ventral
+    assert list(picture.compass(45)) == ["Rostral", "Caudal", "Medial", "Lateral"]  # no dorsal or ventral
+
+
+def test_the_compass_draws_the_two_axes_in_the_slice_s_plane():
+    c = picture.compass(0, True, "coronal")                                         # rostral-caudal cut across
+    assert list(c) == ["Dorsal", "Ventral", "Medial", "Lateral"]
+    assert c["Dorsal"] == (0.0, -1.0) and c["Medial"] == (1.0, 0.0)
+    c = picture.compass(0, False, "sagittal")                                       # medial-lateral cut across
+    assert list(c) == ["Dorsal", "Ventral", "Rostral", "Caudal"] and c["Rostral"] == (-1.0, 0.0)
+    assert list(picture.compass(0, True, "sagittal", "Anterior, posterior")) == ["Dorsal", "Ventral", "Anterior",
+                                                                                 "Posterior"]
+    assert list(picture.compass(0, True, "horizontal", "Letters: A P D V M L")) == ["A", "P", "M", "L"]
+    assert list(picture.compass(0, True, "coronal", "Letters: R C D V M L")) == ["D", "V", "M", "L"]
+    across = {p: picture.axis_name(picture.PLANES[p][2]) for p in picture.PLANES}
+    assert across == {"horizontal": "DV", "coronal": "RC", "sagittal": "ML"}
+    assert picture.axis_name(picture.PLANES["coronal"][2], "Anterior, posterior") == "AP"
 
 
 def test_before_any_calibration_a_pixel_s_size_follows_from_the_camera_s_own_pixel():

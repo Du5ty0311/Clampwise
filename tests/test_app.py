@@ -592,6 +592,21 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Medial"].getData()]
     assert y1 < y0
     assert panel.orientation() == (90, False)
+    # a coronal slice: dorsal-ventral and medial-lateral drawn, rostral-caudal cut across; dorsal the one turned
+    panel.dialog.plane.setCurrentIndex(panel.dialog.plane.findData("coronal"))
+    assert set(panel.compass_text) == {"Dorsal", "Ventral", "Medial", "Lateral"}
+    assert panel.compass_text["Dorsal"].toPlainText() == "Dorsal" and panel.dialog.up_label.text() == "Dorsal points"
+    assert panel.dialog.out_of_plane.text() == "RC is cut across"
+    (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Dorsal"].getData()]
+    assert x1 > x0 and y1 == pytest.approx(y0)                                    # dorsal where rostral was
+    panel.dialog.plane.setCurrentIndex(panel.dialog.plane.findData("sagittal"))
+    panel.dialog.naming.setCurrentText("Anterior, posterior")
+    assert set(panel.compass_text) == {"Dorsal", "Ventral", "Anterior", "Posterior"}
+    assert panel.dialog.medial.currentText() == "Anterior to the left of dorsal"
+    assert panel.orientation_text() == ("sagittal slice: dorsal 90 deg clockwise from up, anterior to its left; "
+                                        "ML cut across")
+    panel.dialog.naming.setCurrentText("Letters: A P D V M L")
+    assert set(panel.compass_text) == {"D", "V", "A", "P"}
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
 
