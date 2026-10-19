@@ -51,6 +51,8 @@ class Watch:
             from .telegraph import read as read_telegraph
         self.read_telegraph = read_telegraph
         self.slow_every_s = 2.0
+        self.telegraph_every_s = 1.0           # the telegraph repeats Commander's own mode and scales: once a second
+        self._telegraph, self._telegraph_at = None, -1e9
         # the first look shows the programs and the amplifier at once; the files (the Lab Book is a second's
         # read) come with the next, half a second later
         self._slow_at = time.monotonic() - self.slow_every_s + 0.5
@@ -71,6 +73,7 @@ class Watch:
                 self.controls = Controls(self.commander)
             command, said = self.commands.popleft()
             said(self.controls.run(command))
+            self._telegraph_at = -1e9                     # a control sent: the telegraph read again at once
         snap.windows = self.find_windows()
         snap.clampex_open, snap.light_open = snap.running("acquisition"), snap.running("light")
         snap.camera_open = snap.running("camera")
@@ -78,7 +81,10 @@ class Watch:
         amp = snap.amplifier
         if amp is not None and amp.connected and amp.device is not None and self.read_telegraph is not None:
             # what Commander telegraphs to an acquisition program: the mode, each output's scale and gain, the filter, the command's sensitivity
-            snap.telegraph = self.read_telegraph(amp.device.serial, amp.device.channel, timeout=0.3)
+            if time.monotonic() - self._telegraph_at >= self.telegraph_every_s:
+                self._telegraph_at = time.monotonic()
+                self._telegraph = self.read_telegraph(amp.device.serial, amp.device.channel, timeout=0.3)
+            snap.telegraph = self._telegraph
         if time.monotonic() - self._slow_at >= self.slow_every_s:
             self._slow_at = time.monotonic()
             self._slow = self._files()

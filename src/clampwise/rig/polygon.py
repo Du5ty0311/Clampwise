@@ -29,6 +29,19 @@ ERRORS = {-1: "critical error", -2: "out of range", -3: "not connected", -4: "ti
           -6: "invalid", -7: "out of memory", -8: "file name", -9: "bad data", -10: "wrong state", -13: "warning"}
 
 
+DISPLAY_SEQUENCE = 1
+TRIGGER_COMMAND, TRIGGER_AUTO, TRIGGER_EXTERNAL = 0, 1, 2
+EDGE_RISE, EDGE_FALL, EDGE_ANY = 1, 2, 3
+
+
+class PatternSetting(ctypes.Structure):
+    """A sequence's settings, as PolyScan's code passes them (by value): the bits a mirror, the patterns' number,
+    what steps it on (2: a TTL at Trig In), the delay after it, how long each pattern is shown (us), which edge."""
+    _fields_ = [("BitDepth", ctypes.c_int), ("PtnNumber", ctypes.c_int), ("Reserved1", ctypes.c_int),
+                ("TrigType", ctypes.c_int), ("TrigDelay", ctypes.c_int), ("Reserved2", ctypes.c_int),
+                ("ExposureTime", ctypes.c_uint), ("Reserved3", ctypes.c_int), ("TrigEdge", ctypes.c_int)]
+
+
 class DeviceState(ctypes.Structure):
     _fields_ = [("Temperature", ctypes.c_int), ("State", ctypes.c_int), ("SeqIdx", ctypes.c_int)] + \
                [(f"Reserved{i}", ctypes.c_int) for i in range(1, 10)]
@@ -74,6 +87,7 @@ class Polygon:
         self.status = "not connected"
         self.model = ""
         self.shown: str | None = None              # the name of the step shown, None when nothing is
+        self.sequence = False                      # stepping through a sequence on its trigger
 
     def _load(self):
         if self._lib is None:
@@ -84,8 +98,10 @@ class Polygon:
             lib = ctypes.CDLL(str(path))
             for name in ("MTPLG_InitDevice", "MTPLG_ConnectDev", "MTPLG_DisconnectDev", "MTPLG_UnInitDevice",
                          "MTPLG_SetDevDisplayMode", "MTPLG_SetDevStaticImageFromMemory", "MTPLG_GetDevModuleNo",
-                         "MTPLG_GetDevRunStatus"):
+                         "MTPLG_GetDevRunStatus", "MTPLG_SetDevPtnSetting", "MTPLG_SetDevPtnFromMemory",
+                         "MTPLG_StartPattern", "MTPLG_StopPattern"):
                 getattr(lib, name).restype = ctypes.c_int
+            lib.MTPLG_SetDevPtnSetting.argtypes = [ctypes.c_int, PatternSetting]
             self._lib = lib
         return self._lib
 
@@ -144,20 +160,71 @@ class Polygon:
             return False
         return True
 
-    def show(self, step: patterns.Step, on_value: int = 255) -> bool:
-        if self.send(patterns.image(step.mirrors(), on_value)):
+    def show(self, step: patterns.Step, on_value: int = 255, mask: np.ndarray | None = None) -> bool:
+        """``step`` shown (``mask``: its mirrors, when already worked out)."""
+        if self.send(patterns.image(step.mirrors() if mask is None else mask, on_value)):
             self.shown = step.name
             self.status = f"showing {step.name}"
             return True
         return False
 
     def off(self, on_value: int = 255) -> bool:
-        """Every mirror away from the slice: nothing lit even with the LED on."""
+        """Every mirror away from the slice: nothing lit even with the LED on (a sequence stopped first)."""
+        if self.sequence:
+            return self.stop_sequence(on_value)
         if self.send(patterns.image(np.zeros((patterns.ROWS, patterns.COLUMNS), bool), on_value)):
             self.shown = None
             self.status = "off: no mirror lit"
             return True
         return False
+
+    def run_sequence(self, masks: list[np.ndarray], on_value: int = 255, shown_us: int = 50_000,
+                     edge: int = EDGE_RISE, delay_us: int = 0, bit_depth: int = 1) -> bool:
+        """The steps loaded into the Polygon and stepped by its own trigger: each TTL at Trig In shows the next
+        (after ``delay_us``) for ``shown_us``, so pulse 1 of a sweep can light one region and pulse 2 another,
+        timed by the protocol's digital output, not by this PC. ``bit_depth`` 1: each mirror on or off."""
+        if not self.connected:
+            self.status = "not connected"
+            return False
+        lib = self._lib
+        r = lib.MTPLG_SetDevDisplayMode(self.index, DISPLAY_SEQUENCE)
+        if r == 0:
+            r = lib.MTPLG_SetDevPtnSetting(self.index, PatternSetting(bit_depth, len(masks), 0, TRIGGER_EXTERNAL,
+                                                                      int(delay_us), 0, int(shown_us), 0, int(edge)))
+        images = [patterns.image(m, on_value) for m in masks]                  # kept until the SDK has them
+        for k, img in enumerate(images):
+            if r != 0:
+                break
+            r = lib.MTPLG_SetDevPtnFromMemory(self.index, k + 1, img.ctypes.data_as(ctypes.c_void_p))
+        if r == 0:
+            r = lib.MTPLG_StartPattern(self.index)
+        if r != 0:
+            self.status = f"the sequence was not taken ({_why(r)})"
+            self.stop_sequence(on_value)
+            return False
+        self.shown, self.sequence = f"sequence of {len(masks)}", True
+        self.status = f"stepping through {len(masks)} pattern(s), one on each trigger"
+        return True
+
+    def stop_sequence(self, on_value: int = 255) -> bool:
+        """The sequence stopped and the Polygon back to still pictures, nothing lit."""
+        if not self.connected:
+            return False
+        self._lib.MTPLG_StopPattern(self.index)
+        self.sequence = False
+        if self._lib.MTPLG_SetDevDisplayMode(self.index, DISPLAY_STATIC) != 0:
+            self.status = "it would not go back to still pictures"
+            return False
+        return self.off(on_value)
+
+    def sequence_index(self) -> int | None:
+        """Which pattern of the sequence is shown (from 0), as the Polygon says."""
+        if not self.connected:
+            return None
+        s = DeviceState()
+        if self._lib.MTPLG_GetDevRunStatus(self.index, ctypes.byref(s), ctypes.c_longlong(0)) != 0:
+            return None
+        return int(s.SeqIdx)
 
     def temperature(self) -> int | None:
         if not self.connected:
@@ -176,4 +243,5 @@ class Polygon:
                 self._lib.MTPLG_UnInitDevice()
         self.connected = False
         self.shown = None
+        self.sequence = False
         self.status = "not connected"

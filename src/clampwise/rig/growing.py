@@ -264,12 +264,19 @@ def _remove(path: Path) -> None:
 
 def newest(folder: str | Path, since: float = 0.0) -> Path | None:
     """The newest ABF file in ``folder`` changed after ``since`` (time.time()), none when there is none."""
+    # the directory's own listing carries each file's time on Windows: no call a file (Live asks twice a second,
+    # of a folder that holds a day's recordings)
+    best: tuple[float, str] | None = None
     try:
-        files = [(p.stat().st_mtime, p) for p in Path(folder).glob("*.abf")]
+        with os.scandir(folder) as entries:
+            for e in entries:
+                if e.name.lower().endswith(".abf") and e.is_file():
+                    t = e.stat().st_mtime
+                    if t >= since and (best is None or (t, e.path) > best):
+                        best = (t, e.path)
     except OSError:
         return None
-    files = [f for f in files if f[0] >= since]
-    return max(files)[1] if files else None
+    return Path(best[1]) if best is not None else None
 
 
 def rs_change(tests: list[SweepTest], reference: int = 3) -> float:

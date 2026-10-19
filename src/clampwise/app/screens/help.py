@@ -41,6 +41,11 @@ header.</li>
 </ol>
 <p>Quality flags are informational: a value is never altered or excluded because of a flag. Every analysis reports
 which pulse, window or baseline was used for the recording, and why.</p>
+<p><b>Low-power mode</b> (Settings, Performance) keeps Clampwise light on a cheaper PC: the camera's picture is drawn
+at most 15 times a second (every frame is still taken, for snapshots and averages), every second pixel while it is
+shown smaller than taken, its histogram once a second, and the rig's programs are looked at once a second. It is on
+by default on a PC with fewer than 4 cores or less than 8 GB. Otherwise the picture is drawn up to 30 times a
+second. The camera's frame rate, hovered, says what sets it: the exposure, the camera's readout, or the drawing.</p>
 <p><b>Updates.</b> When Clampwise starts it asks GitHub whether a newer version has been released (Settings,
 Updates: the check can be turned off, and Check for updates asks at any time). A newer version is only announced;
 <b>Update to</b> downloads it, checks it against the checksum GitHub lists for it, closes Clampwise, replaces the
@@ -318,6 +323,28 @@ test: each test picture waits up to 10 s for a pulse and reads the frame it lit.
 <b>Drawn on the picture</b>, add an ellipse over it, <b>Make the steps</b> and <b>Project</b>: the protocol's pulses
 then light only that region, at every current step; dragged onto another cell, it is shown there at once. The Polygon's mirrors are diamonds in rows half a mirror apart, so its field is 16:10 and a round spot is
 drawn round on the slice.</p>
+<p><b>The calibration is kept for each objective</b> (and camera adapter) it was measured with: each objective
+centres the field a little differently, so with another objective the regions are refused until it is calibrated
+too (which byte lights a mirror is the Polygon's own and is kept for all). After the fit, a <b>check grid</b> of 8
+spots the fit did not use is projected and found: how far each lands from where the calibration puts it is said in
+um (aim for under 5 um before lighting one soma) and drawn on the picture (o where it should be, + where it fell).
+<b>Click the cell's centre</b> places a round region of the diameter typed (in um) where you click next; name it
+first (Cell 1). <b>Add a control beside it</b> makes a region of the same size and shape the distance typed away:
+drag it onto neuropil with no cell, and what it evokes in the cell is light scattered onto it. <b>Keep with the
+cell</b> saves the regions in the cell's folder, <b>This cell's regions</b> draws them again. Each step shown says
+the fraction of the field lit and its area in um^2: at one LED command each mirror passes the same light, so the
+irradiance where it lights is the same for a full field and for one region, and the power on the slice goes with the
+area (a full field also scatters onto the cell's dendrites and its neighbours). The log, <i>polygon_log.csv</i>,
+times each step to the millisecond on this PC's clock, with its shapes on the field and on the picture (pixels and
+um), its area, the objective and the byte. When a recording made in Clampwise ends, each sweep (and each light
+pulse) is given the pattern shown then, written beside the file as <i>&lt;file&gt;.light.json</i>, and nothing is
+left lit (<b>Off after each recording</b>; Let go and closing Clampwise light nothing too). The evoked responses'
+analysis reads it (or matches the log beside another program's recording, within 1 s of its clock): when sweeps
+were lit by different regions, each region's sweeps are measured on their own, in the table <i>by_pattern</i>;
+sweeps whose pattern changed near or during them are left out of it and counted. <b>Step on each trigger</b> loads
+every step into the Polygon and lets a TTL at its Trig In show the next one, so pulse 1 of a sweep lights one region
+and pulse 2 another, timed by the protocol's digital output (sent a few ms before each light pulse; it needs that
+output wired to Trig In); each pulse is then given its step in the pulse table.</p>
 <p><b>Recording in Clampwise.</b> The acquisition view's <b>Use here</b> records without Clampex (Clampex must be
 closed: one program at a time holds the Digidata). Choose one of your protocols (<b>Protocols...</b> picks their
 folder) and the folder to record into. Before it plays, the protocol is drawn in the scope (each sweep's command in the amplifier's present unit), and a line above the scope says what it is doing or waiting for (opening the digitizer, the sweep under way, the seconds to the next). <b>Play</b> runs the protocol, drawn and measured live, keeping nothing (as Clampex's View); <b>Record</b> runs it into a file; <b>Pause</b> ends the run once the sweep under way is complete (the digitizer queues its outputs seconds ahead, so a sweep is never cut; a gap-free run pauses at once), the file then whole, and <b>Resume</b> goes on with the next sweep in the same file, each sweep at its real time in the synch array (a gap-free run resumes into a new file, so no gap is hidden in a continuous one); <b>Stop</b> ends it. The protocol is played as Clampex plays it: its epochs,

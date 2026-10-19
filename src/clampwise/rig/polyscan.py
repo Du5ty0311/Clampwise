@@ -189,7 +189,7 @@ def read_session(folder: str | Path) -> Session:
 
 _folders: dict[Path, tuple[float, list[Path]]] = {}
 _cache: dict[Path, tuple[float, Session]] = {}
-LIST_FOR_S = 10.0                               # the folder list is looked at again after this
+LIST_FOR_S = 30.0                               # the folder list (1,500 sessions: 0.15 s) looked at again after this
 
 
 def session_folders(root: str | Path | None = None) -> list[Path]:

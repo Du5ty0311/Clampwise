@@ -12,6 +12,7 @@ user move without getting lost (B0 items 1-6).
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
@@ -294,12 +295,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_project(self, folder: Path) -> None:
         from ..io import find_recordings, group_recordings
 
+        if getattr(self, "_opening", False):              # a folder is being looked through already
+            return
+        self._opening = True
+        try:
+            # a large folder takes seconds to look through (5,000 recordings: 2 s; a deep tree on a slow disk more):
+            # off the window's thread, the window going on and saying so
+            paths, notes = self.in_background(f"Opening {folder.name}: looking for its recordings",
+                                              lambda: group_recordings(find_recordings(folder)))
+        finally:
+            self._opening = False
         if self.project is not None:
             self.project.close()
         if self._watcher is not None:
             self.set_watching(False)
         self.project = Project.open(folder)
-        paths, notes = group_recordings(find_recordings(folder))
         added = len(paths) - len(self.project.recordings())
         # hashed when first analyzed, in the background: opening never reads every file
         self.project.add_recordings(paths, hash_files=False)
@@ -319,6 +329,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_changed()
         self.go("files")
         self.organize()
+
+    def in_background(self, what: str, fn):
+        """``fn()`` run off the window's thread, the window answering meanwhile, and after half a second a line
+        saying what it is doing and for how long (B0: nothing on screen waits on the data); its result, or the
+        exception it raised, raised here."""
+        from . import worker
+
+        loop, out, began = QtCore.QEventLoop(), {}, time.monotonic()
+
+        def done(result):
+            out["result"] = result
+            loop.quit()
+
+        def tick():
+            s = time.monotonic() - began
+            if s >= 0.5:
+                self.say(f"{what} ({s:.0f} s)...")
+
+        timer = QtCore.QTimer()
+        timer.timeout.connect(tick)
+        timer.start(500)
+        worker.run(fn, done)
+        if "result" not in out:
+            loop.exec_()
+        timer.stop()
+        result = out["result"]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def organize(self) -> None:
         """Each cell's Notes.txt, episodes and rigs, worked out in the background from the

@@ -2,19 +2,21 @@
 while Clampex times the light itself.
 
 A pattern is made (a full field, a spot, a numbered grid, a line of spots, an image file, a PolyScan sequence, or
-shapes drawn on the camera's picture) and its steps shown one at a time: chosen in the list, or the next one every
-few seconds. Each step shown is written to ``polygon_log.csv`` in the cell's folder (when it was shown, which step,
-its shapes), to be matched to the recordings made meanwhile.
+shapes drawn on the camera's picture: named regions placed by a cell's centre and a diameter in um, each with a
+control region beside it, kept with the cell) and its steps shown one at a time: chosen in the list, the next one
+every few seconds, or all loaded into the Polygon and stepped by a TTL at its Trig In. Each step shown is written
+to ``polygon_log.csv`` in the cell's folder (``rig.light_record``: to the millisecond, its shapes, area and the
+objective), matched to the recordings' sweeps; nothing is left lit after a recording, at Let go or at closing.
 
 The light test and calibration (with the light on and a fluorescent slide or slice in view) shows the Polygon
 nothing and everything, to learn which byte lights a mirror, then a few spots, found on the camera's picture, to
-learn how the Polygon's field lies under the camera; drawing on the picture and the outlines over it need it.
+learn how the Polygon's field lies under the camera; drawing on the picture and the outlines over it need it. A
+check grid of spots the fit did not use then says how far it is off, in um; it is kept for its objective.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-import csv
 import json
 import time
 from pathlib import Path
@@ -23,7 +25,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from ...rig import patterns
+from ...rig import light_record, patterns
 from ...rig.polygon import Polygon
 from .. import theme, widgets
 from ..widgets import box, label
@@ -65,9 +67,12 @@ class PolygonPanel(QtWidgets.QWidget):
         self.temperature_c: int | None = None
         self._done.connect(self._finished)
         self.steps: list[patterns.Step] = []
-        self.calibration = patterns.Calibration()
+        self.calibrations = patterns.Calibrations()   # the byte that lights, and a map for each objective
+        self.calibration = patterns.Calibration()     # the one for the objective in use
         self.drawn: list[pg.ROI] = []
         self.outline_items: list = []
+        self._clicking = False                        # the next click on the picture places a region's centre
+        self._show_check = False                      # the check grid drawn, until steps are made
         self._cal: dict | None = None                 # the calibration under way
         lay = box("v", "s", "m")
         lay.addWidget(label("Clampwise sets where the light goes and holds it; the light itself is switched by "
@@ -103,6 +108,9 @@ class PolygonPanel(QtWidgets.QWidget):
                                "each test picture waits for a pulse (up to 10 s) and reads the frame it lit. "
                                "Unticked: the light is on all the time")
         cal.addWidget(self.pulsed)
+        cal.addStretch(1)
+        lay.addLayout(cal)
+        cal = box("h", "s")                           # two rows: the panel fits a narrow view
         self.outlines = QtWidgets.QCheckBox("Outlines on the picture")
         self.outlines.setChecked(True)
         self.outlines.setToolTip("The steps' shapes drawn over the camera's picture (the one shown brighter)")
@@ -145,6 +153,8 @@ class PolygonPanel(QtWidgets.QWidget):
         go.addWidget(widgets.button("Next", lambda: self.step_by(1), "The next step, shown", quiet=True))
         go.addWidget(widgets.button("Off", self.off, "No mirror lit"))
         go.addStretch(1)
+        lay.addLayout(go)
+        go = box("h", "s")
         self.auto = QtWidgets.QCheckBox("Next every")
         self.auto.setToolTip("Step on by itself (time it to your protocol's sweeps); unticked: by hand")
         self.every = _pct(10.0, 0.2, 3600.0, 1.0, " s")
@@ -154,7 +164,26 @@ class PolygonPanel(QtWidgets.QWidget):
         self.every.valueChanged.connect(lambda *_: self._auto(self.auto.isChecked()))
         go.addWidget(self.auto)
         go.addWidget(self.every)
+        go.addStretch(1)
         lay.addLayout(go)
+        self.off_after = QtWidgets.QCheckBox("Off after each recording")
+        self.off_after.setChecked(True)
+        self.off_after.setToolTip("When a recording made here ends, no mirror is left lit: the next run never "
+                                  "lights the slice with a pattern left from this one")
+        lay.addWidget(self.off_after)
+        trig = box("h", "s")
+        self.on_trigger = QtWidgets.QCheckBox("Step on each trigger (Trig In)")
+        self.on_trigger.setToolTip("Project loads every step into the patterned light, and each TTL at its Trig In "
+                                   "shows the next one: pulse 1 of a sweep on one region, pulse 2 on another, timed "
+                                   "by the protocol's digital output (sent a few ms before each light pulse). Off "
+                                   "stops it. Needs the digitizer's digital output wired to Trig In.")
+        trig.addWidget(self.on_trigger)
+        self.held_ms = _pct(50.0, 1.0, 10000.0, 5.0, " ms")
+        self.held_ms.setToolTip("How long each step stays after its trigger: longer than the light pulse")
+        trig.addWidget(label("each held", "muted"))
+        trig.addWidget(self.held_ms)
+        trig.addStretch(1)
+        lay.addLayout(trig)
         self.shown_label = label("Nothing shown.", "muted", wrap=True)
         lay.addWidget(self.shown_label)
         widgets.resizable(self, lay)
@@ -162,6 +191,15 @@ class PolygonPanel(QtWidgets.QWidget):
         self._poll.setInterval(50)
         self._poll.timeout.connect(self._calibration_tick)
         self.load()
+        objective = getattr(panel, "objective", None)
+        if objective is not None:                     # another objective: its own calibration (or none)
+            objective.valueChanged.connect(lambda *_: self._use_objective())
+        adapter = getattr(getattr(panel, "dialog", None), "adapter", None)
+        if adapter is not None:
+            adapter.valueChanged.connect(lambda *_: self._use_objective())
+        scene = panel.box.scene() if hasattr(panel.box, "scene") else None
+        if scene is not None:
+            scene.sigMouseClicked.connect(self._clicked)
 
     # ---------------------------------------------------------------- the pages of settings
     def _build_pages(self) -> None:
@@ -211,15 +249,47 @@ class PolygonPanel(QtWidgets.QWidget):
         page(("File", self._with(self.seq_path, pick)),
              ("", label("Its steps as its own program made them (grids, cells, drawn regions).", "muted", wrap=True)))
         draw = QtWidgets.QWidget()
+        dv = box("v", "xs")
+        d = box("h", "s")
+        self.roi_name = QtWidgets.QLineEdit()
+        self.roi_name.setPlaceholderText("Name (e.g. Cell 1)")
+        self.roi_name.setToolTip("The next region's name: its step is called so, in the log and with the recordings")
+        d.addWidget(self.roi_name, 1)
+        self.roi_um = _pct(15.0, 1.0, 2000.0, 1.0, " um")
+        self.roi_um.setToolTip("The diameter of a region placed by its centre (a soma: about 10-20 um)")
+        d.addWidget(self.roi_um)
+        d.addWidget(widgets.button("Click the cell's centre", self.click_centre, "The next click on the picture "
+                                   "places a round region there, this diameter across", quiet=True))
+        dv.addLayout(d)
         d = box("h", "s")
         d.addWidget(widgets.button("Add a rectangle", lambda: self.add_shape("rect"), quiet=True))
         d.addWidget(widgets.button("Add an ellipse", lambda: self.add_shape("ellipse"), quiet=True))
         d.addWidget(widgets.button("Clear", self.clear_shapes, quiet=True))
+        d.addStretch(1)
+        dv.addLayout(d)
+        d = box("h", "s")
+        d.addWidget(widgets.button("Add a control beside it", self.add_control, "A region of the same size and "
+                                   "shape, this far from the last one (drag it to neuropil with no cell): a response "
+                                   "to it is light scattered onto the cell", quiet=True))
+        self.control_um = _pct(40.0, 5.0, 2000.0, 5.0, " um")
+        self.control_um.setToolTip("How far the control region sits from the region it controls for")
+        d.addWidget(self.control_um)
+        d.addStretch(1)
+        dv.addLayout(d)
+        d = box("h", "s")
         self.each_step = QtWidgets.QCheckBox("Each shape its own step")
         self.each_step.setChecked(True)
         d.addWidget(self.each_step)
         d.addStretch(1)
-        draw.setLayout(d)
+        dv.addLayout(d)
+        d = box("h", "s")
+        d.addWidget(widgets.button("Keep with the cell", self.save_regions, "The regions saved in the cell's "
+                                   "folder (polygon_regions.json), found again with this cell", quiet=True))
+        d.addWidget(widgets.button("This cell's regions", self.load_regions, "The regions kept with this cell, "
+                                   "drawn again", quiet=True))
+        d.addStretch(1)
+        dv.addLayout(d)
+        draw.setLayout(dv)
         self.pages.addWidget(draw)
 
     @staticmethod
@@ -287,6 +357,7 @@ class PolygonPanel(QtWidgets.QWidget):
                 self.released.emit()
             else:
                 self._busy_end()
+                self._log(light_record.entry("taken"))
                 self.panel.window.say("The patterned light is ready: held by Clampwise.")
 
         self._async(work, done)
@@ -365,6 +436,7 @@ class PolygonPanel(QtWidgets.QWidget):
             self.pattern_note.setText(f"Not made: {e}.")
             return
         self.steps = steps
+        self._show_check = False
         self.list.clear()
         self.list.addItems([s.name for s in steps])
         if steps:
@@ -380,26 +452,72 @@ class PolygonPanel(QtWidgets.QWidget):
             return
         if not self._held():
             return
+        if self.on_trigger.isChecked():
+            self.project_on_triggers()
+            return
         step, on, n = self.steps[row], self.calibration.on_value, len(self.steps)
+        cal, um, key = self.calibration.at_size(self._frame_size()), self._um_per_px(), self._objective()
+        pattern = self.source.currentText()
         self._wanted += 1
         ticket = self._wanted
 
         def work():
-            return None if ticket != self._wanted else self.polygon.show(step, on)   # a newer step asked for
+            if ticket != self._wanted:                 # a newer step asked for
+                return None
+            mask = step.mirrors()
+            if not self.polygon.show(step, on, mask):
+                return False
+            when = time.time()                         # the moment the Polygon took it
+            return light_record.entry("shown", step, pattern, patterns.dose(step, mask, cal, um), key, on, when)
 
-        def done(ok):
-            if ok is None:
+        def done(e):
+            if e is None:
                 return
-            if ok is True:
-                self.shown_label.setText(f"Showing step {step.name} ({row + 1} of {n}) since "
-                                         f"{time.strftime('%H:%M:%S')}." + ("" if self._calibrated_light() else
-                                         " The light test has not been done: lit and unlit may be swapped."))
-                self._log(step)
+            if isinstance(e, light_record.Shown):
+                area = f", {e.area_um2:,.0f} um^2" if e.area_um2 else ""
+                self.shown_label.setText(f"Showing step {step.name} ({row + 1} of {n}; {e.field_fraction:.1%} of the "
+                                         f"field{area}) since {time.strftime('%H:%M:%S')}." +
+                                         ("" if self._calibrated_light() else
+                                          " The light test has not been done: lit and unlit may be swapped."))
+                self._log(e)
             else:
-                self.shown_label.setText(f"Step {step.name} was not shown: {self.polygon.status}.")
+                why = e if isinstance(e, Exception) else self.polygon.status
+                self.shown_label.setText(f"Step {step.name} was not shown: {why}.")
 
         self._async(work, done)
         self.draw_outlines()
+
+    def project_on_triggers(self) -> None:
+        """Every step loaded, the patterned light stepping through them on its own trigger (step 1 on the first
+        TTL after this, then 2...): logged as one sequence, so each light pulse is matched to its step."""
+        self.auto.setChecked(False)
+        steps, on = list(self.steps), self.calibration.on_value
+        cal, um, key = self.calibration.at_size(self._frame_size()), self._um_per_px(), self._objective()
+        held_us = int(self.held_ms.value() * 1000)
+        pattern = self.source.currentText()
+        self._wanted += 1
+
+        def work():
+            masks = [s.mirrors() for s in steps]
+            if not self.polygon.run_sequence(masks, on, held_us):
+                return False
+            when = time.time()
+            doses = [{"step": s.name, **patterns.dose(s, m, cal, um)} for s, m in zip(steps, masks)]
+            e = light_record.entry("sequence", None, pattern, {"field_fraction": max(d["field_fraction"]
+                                                                                     for d in doses)}, key, on, when)
+            e.step, e.shapes = " | ".join(s.name for s in steps), doses
+            return e
+
+        def done(e):
+            if isinstance(e, light_record.Shown):
+                self.shown_label.setText(f"Stepping through {len(steps)} step(s) on each trigger since "
+                                         f"{time.strftime('%H:%M:%S')}: {e.step}. Off stops it.")
+                self._log(e)
+            else:
+                why = e if isinstance(e, Exception) else self.polygon.status
+                self.shown_label.setText(f"The steps were not loaded for the trigger: {why}.")
+
+        self._async(work, done)
 
     def step_by(self, k: int, wrap: bool = True) -> None:
         n = len(self.steps)
@@ -420,53 +538,216 @@ class PolygonPanel(QtWidgets.QWidget):
         on = self.calibration.on_value
         self._wanted += 1
 
-        def done(ok):
-            if ok is True:
-                self.shown_label.setText(f"Off since {time.strftime('%H:%M:%S')}: no mirror lit.")
-                self._log(None)
+        def work():
+            return light_record.entry("off", on_value=on) if self.polygon.off(on) else False
 
-        self._async(lambda: self.polygon.off(on), done)
+        def done(e):
+            if isinstance(e, light_record.Shown):
+                self.shown_label.setText(f"Off since {time.strftime('%H:%M:%S')}: no mirror lit.")
+                self._log(e)
+
+        self._async(work, done)
         self.draw_outlines()
+
+    def after_run(self, files) -> None:
+        """A recording made here has ended: each file given the patterns its sweeps saw (``<file>.light.json``),
+        and, unless unticked, nothing left lit."""
+        if self.polygon.connected and self.off_after.isChecked() and self.polygon.shown is not None:
+            self.off()
+        folder = Path(self.panel.folder() or "")
+        if not files or not (folder / light_record.LOG_NAME).is_file():
+            return
+        from ...io import load
+        from ..worker import run
+
+        def work():
+            matched = []
+            for f in files:
+                try:
+                    sweeps = light_record.for_recording(load(f), [folder], own=True)
+                except Exception:                     # a file that cannot be read now is matched when analysed
+                    continue
+                if sweeps is not None:
+                    matched.append((Path(f).name, sweeps))
+            return matched
+
+        def done(matched):
+            if isinstance(matched, list) and matched:
+                parts = []
+                for name, sweeps in matched:
+                    groups = light_record.by_step(sweeps)
+                    parts.append(f"{name}: " + ", ".join(f"{k} ({len(v)})" for k, v in groups.items()))
+                self.shown_label.setText(self.shown_label.text() + " The patterns are kept with the recording: "
+                                         + "; ".join(parts) + ".")
+
+        self._matching = run(work, done)
 
     def _auto(self, on: bool) -> None:
         self.timer.stop()
         if on:
             self.timer.start(int(self.every.value() * 1000))
 
-    def _log(self, step: patterns.Step | None) -> None:
-        folder = self.panel.folder() or ""
-        if not folder or not Path(folder).is_dir():
-            return
-        path = Path(folder) / "polygon_log.csv"
-        new = not path.exists()
-        try:
-            with path.open("a", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                if new:
-                    w.writerow(["time", "step", "shapes (field: 0-1 across, down)", "pattern"])
-                w.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), step.name if step else "off",
-                            step.describe() if step else "", self.source.currentText()])
-        except OSError:
-            pass
+    def _log(self, e: light_record.Shown) -> None:
+        light_record.write(self.panel.folder() or "", e)
 
     # ---------------------------------------------------------------- drawn on the picture
     def _frame_size(self) -> tuple[int, int]:
         last = self.panel.last
         return (last.rgb.shape[1], last.rgb.shape[0]) if last is not None else (0, 0)
 
-    def add_shape(self, kind: str) -> None:
+    def _um_per_px(self) -> float:
+        """The camera's um a pixel now (its objective, its binning), 0 when not known."""
+        scale = getattr(self.panel, "scale", None)
+        try:
+            return float(scale()[0]) if scale is not None else 0.0
+        except (TypeError, ValueError, IndexError):
+            return 0.0
+
+    def _objective(self) -> str:
+        mag = getattr(self.panel, "magnification", None)
+        adapter = getattr(getattr(self.panel, "dialog", None), "adapter", None)
+        return patterns.objective_key(mag, adapter.value() if adapter is not None else 1.0)
+
+    def add_shape(self, kind: str, centre=None, size=None, name: str = "", angle: float = 0.0) -> pg.ROI | None:
+        """A region on the picture: ``centre`` and ``size`` in its pixels (else in the middle, a sixth of it)."""
         w, h = self._frame_size()
         if not w:
             self.panel.window.say("Take the camera first: shapes are drawn on its picture.")
-            return
-        size = [w * 0.15, w * 0.15]
-        pos = [w / 2 - size[0] / 2 + 20 * len(self.drawn), h / 2 - size[1] / 2]
+            return None
+        size = list(size) if size is not None else [w * 0.15, w * 0.15]
+        cx, cy = centre if centre is not None else (w / 2 + 20 * len(self.drawn), h / 2)
+        pos = [cx - size[0] / 2, cy - size[1] / 2]
         pen = pg.mkPen("c", width=2)
         roi = pg.RectROI(pos, size, pen=pen) if kind == "rect" else pg.EllipseROI(pos, size, pen=pen)
+        if angle:
+            roi.setAngle(angle, center=(0.5, 0.5))
         roi.kind = kind
+        roi.name = name or self.roi_name.text().strip() or f"Region {len(self.drawn) + 1}"
+        if not name:
+            self.roi_name.clear()
         self.panel.box.addItem(roi)
         self.drawn.append(roi)
         roi.sigRegionChangeFinished.connect(lambda *_: self._drawn_moved())
+        return roi
+
+    def click_centre(self) -> None:
+        if not self._frame_size()[0]:
+            self.panel.window.say("Take the camera first: the region is placed on its picture.")
+            return
+        if not self._um_per_px():
+            self.panel.window.say("The camera's scale is not known at this objective: calibrate its length first "
+                                  "(the camera's Adjust..., Length calibration), then the diameter in um can be used.")
+            return
+        self._clicking = True
+        self.panel.window.say(f"Click the cell's centre on the picture: a round region {self.roi_um.value():g} um "
+                              "across goes there.")
+
+    def _clicked(self, event) -> None:
+        if not self._clicking:
+            return
+        self._clicking = False
+        p = self.panel.box.mapSceneToView(event.scenePos())
+        self.place_at(p.x(), p.y())
+        event.accept()
+
+    def place_at(self, x: float, y: float) -> pg.ROI | None:
+        """A round region centred on (x, y) of the picture, the diameter asked for across."""
+        um = self._um_per_px()
+        if not um:
+            return None
+        d = self.roi_um.value() / um
+        roi = self.add_shape("ellipse", (x, y), (d, d))
+        if roi is not None and self.source.currentText() == "Drawn on the picture" and self.calibration.ready:
+            self.make_steps()
+        return roi
+
+    def add_control(self) -> pg.ROI | None:
+        """A control region: the last region's size and shape, ``control_um`` to its right on the picture (dragged
+        then to neuropil where no cell is lit): what it evokes in the cell is the light scattered onto it."""
+        mains = [r for r in self.drawn if not getattr(r, "control", False)]
+        if not mains:
+            self.panel.window.say("Add the region on the cell first: the control is made beside it.")
+            return None
+        last = mains[-1]
+        um = self._um_per_px()
+        sw, sh = last.size()
+        x, y = self._centre(last)
+        gap = self.control_um.value() / um if um else 3 * max(sw, sh)
+        roi = self.add_shape(last.kind, (x + gap, y), (sw, sh), f"{last.name} control", last.angle())
+        if roi is not None:
+            roi.control = True
+            roi.setPen(pg.mkPen("m", width=2, style=QtCore.Qt.DashLine))
+            if self.source.currentText() == "Drawn on the picture" and self.calibration.ready:
+                self.make_steps()
+        return roi
+
+    @staticmethod
+    def _centre(roi) -> tuple[float, float]:
+        sw, sh = roi.size()
+        p = roi.mapToParent(QtCore.QPointF(sw / 2, sh / 2))
+        return float(p.x()), float(p.y())
+
+    def _regions_path(self) -> Path | None:
+        folder = self.panel.folder() or ""
+        return Path(folder) / "polygon_regions.json" if folder and Path(folder).is_dir() else None
+
+    def save_regions(self) -> Path | None:
+        """The regions drawn, kept in the cell's folder: on the picture (pixels and um), on the field (when
+        calibrated), with the objective and the picture's size."""
+        path = self._regions_path()
+        if path is None:
+            self.panel.window.say("No cell's folder to keep the regions in: choose the cell first.")
+            return None
+        um, size = self._um_per_px(), self._frame_size()
+        regions = []
+        for roi in self.drawn:
+            (x, y), (sw, sh) = self._centre(roi), roi.size()
+            regions.append({"name": roi.name, "kind": roi.kind, "control": bool(getattr(roi, "control", False)),
+                            "centre_px": [float(x), float(y)], "size_px": [float(sw), float(sh)],
+                            "angle": float(roi.angle()),
+                            "centre_um": [round(x * um, 2), round(y * um, 2)] if um else None,
+                            "size_um": [round(sw * um, 2), round(sh * um, 2)] if um else None})
+        body = {"objective": self._objective(), "picture_px": list(size), "um_per_px": um, "regions": regions,
+                "saved": time.strftime("%Y-%m-%d %H:%M:%S")}
+        try:
+            path.write_text(json.dumps(body, indent=1), encoding="utf-8")
+        except OSError as e:
+            self.panel.window.say(f"The regions were not kept: {e}.")
+            return None
+        self.panel.window.say(f"{len(regions)} region(s) kept with the cell.")
+        return path
+
+    def load_regions(self) -> int:
+        """The regions kept with this cell drawn again (scaled to the picture's binning now); their number."""
+        path = self._regions_path()
+        if path is None or not path.is_file():
+            self.panel.window.say("No regions are kept with this cell yet.")
+            return 0
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            self.panel.window.say(f"The cell's regions could not be read: {e}.")
+            return 0
+        w0, h0 = body.get("picture_px") or (0, 0)
+        w, h = self._frame_size()
+        if not w:
+            self.panel.window.say("Take the camera first: the regions are drawn on its picture.")
+            return 0
+        k = w / w0 if w0 else 1.0
+        self.clear_shapes()
+        for r in body.get("regions", []):
+            (x, y), (sw, sh) = r["centre_px"], r["size_px"]
+            # a binned pixel's centre is half way along the pixels it sums
+            roi = self.add_shape(r.get("kind", "ellipse"), ((x + 0.5) * k - 0.5, (y + 0.5) * k - 0.5),
+                                 (sw * k, sh * k), r.get("name", ""), float(r.get("angle", 0.0)))
+            if roi is not None and r.get("control"):
+                roi.control = True
+                roi.setPen(pg.mkPen("m", width=2, style=QtCore.Qt.DashLine))
+        if body.get("objective") and body["objective"] != self._objective():
+            now = self._objective() or "this objective"
+            self.panel.window.say(f"These regions were drawn at {body['objective']}, not at {now}: check they still "
+                                  "sit on the cell.")
+        return len(self.drawn)
 
     def _drawn_moved(self) -> None:
         """A shape moved or resized on the picture: while drawn shapes are shown, shown again where they are now."""
@@ -487,7 +768,9 @@ class PolygonPanel(QtWidgets.QWidget):
 
     def drawn_steps(self) -> list[patterns.Step]:
         if not self.calibration.ready:
-            raise ValueError("calibrate first: the shapes drawn are found on the patterned light's field through it")
+            why = self.calibrations.refusal(self._objective())
+            raise ValueError(why if self.calibrations.maps else "calibrate first: the shapes drawn are found on the "
+                             "patterned light's field through it")
         if not self.drawn:
             raise ValueError("add a shape on the picture first")
         shapes = []
@@ -505,7 +788,8 @@ class PolygonPanel(QtWidgets.QWidget):
             u, v = self.calibration.at_size(self._frame_size()).field_of(cam[:, 0], cam[:, 1])
             shapes.append(patterns.Shape("polygon", tuple(np.column_stack([u, v]).ravel().tolist())))
         if self.each_step.isChecked():
-            return [patterns.Step(str(k + 1), [s]) for k, s in enumerate(shapes)]
+            return [patterns.Step(getattr(roi, "name", "") or str(k + 1), [s])
+                    for k, (roi, s) in enumerate(zip(self.drawn, shapes))]
         return [patterns.Step("Drawn", shapes)]
 
     # ---------------------------------------------------------------- outlines over the picture
@@ -513,11 +797,21 @@ class PolygonPanel(QtWidgets.QWidget):
         for item in self.outline_items:
             self.panel.box.removeItem(item)
         self.outline_items = []
-        if not (self.outlines.isChecked() and self.calibration.ready and self.steps and self.isVisible()):
+        if not (self.outlines.isChecked() and self.calibration.ready and self.isVisible()):
+            return
+        cal = self.calibration.at_size(self._frame_size())     # the picture's binning now
+        for x0, y0, x1, y1 in (cal.check if self._show_check else []):   # the check: where each spot fell (+), from
+            item = pg.ScatterPlotItem([x1], [y1], symbol="o", size=10, pen=pg.mkPen((0, 255, 255), width=1),
+                                      brush=None)              # where the map put it (o)
+            line = pg.PlotCurveItem([x1, x0], [y1, y0], pen=pg.mkPen((0, 255, 255), width=1))
+            mark = pg.ScatterPlotItem([x0], [y0], symbol="+", size=8, pen=pg.mkPen((0, 255, 255), width=1))
+            for it in (item, line, mark):
+                self.panel.box.addItem(it)
+                self.outline_items.append(it)
+        if not self.steps:
             return
         current = self.list.currentRow()
         many = len(self.steps) > 100
-        cal = self.calibration.at_size(self._frame_size())     # the picture's binning now
         for k, step in enumerate(self.steps):
             if many and k != current:
                 continue
@@ -610,10 +904,18 @@ class PolygonPanel(QtWidgets.QWidget):
             found = patterns.find_spot(c["pictures"][name], c["off"])
             if found is not None:
                 c["spots"].append((found, patterns.CALIBRATION_SPOTS[int(name[4:])]))
+        elif name.startswith("check"):
+            found = patterns.find_spot(c["pictures"][name], c["off"])
+            c["checks"].append((found, patterns.CHECK_SPOTS[int(name[5:])]))
+        if name not in ("none", "all"):
+            c["pictures"].pop(name, None)             # a picture is 11 MB in floats: only the dark one is kept
         if self._cal is None:
             return
         if c["k"] + 1 >= len(c["plan"]):
-            self._fit()
+            if "checks" in c:
+                self._checked()
+            else:
+                self._fit()
             return
         self._next_picture()
 
@@ -675,9 +977,50 @@ class PolygonPanel(QtWidgets.QWidget):
         self.calibration.to_field = to_field
         self.calibration.residual_px = residual
         self.calibration.camera_size = self._frame_size()
-        self._end_calibration(f"Calibrated with {len(c['spots'])} spots: a mirror is lit by "
-                              f"{self.calibration.on_value}; the spots land within {residual:.1f} px of where "
-                              "the fit puts them.", keep_light=True)
+        self.calibration.objective = self._objective()
+        self.calibration.um_per_px = self._um_per_px()
+        self.calibration.check = []
+        # then the check: spots the fit did not use, each found and compared with where the map puts it
+        c["checks"] = []
+        on = self.calibration.on_value
+        for k, (u, v) in enumerate(patterns.CHECK_SPOTS):
+            step = patterns.spot(u, v, patterns.CALIBRATION_DIAMETER)[0]
+            c["plan"].append((f"check{k}", patterns.image(step.mirrors(), on)))
+        self.cal_status.setText(f"Fitted with {len(c['spots'])} spots (within {residual:.1f} px); now the check "
+                                f"grid of {len(patterns.CHECK_SPOTS)} spots...")
+        self._next_picture()
+
+    def _checked(self) -> None:
+        """The check grid's spots compared with where the map puts them: the errors in um (pixels when the camera's
+        scale is not known), kept with the calibration and drawn on the picture."""
+        c, cal = self._cal, self.calibration
+        rows = []
+        for found, (u, v) in c["checks"]:
+            if found is None:
+                continue
+            x, y = cal.camera_of(np.array([u]), np.array([v]))
+            rows.append([found[0], found[1], float(x[0]), float(y[0])])
+        cal.check = rows
+        self._show_check = True
+        n, total = len(rows), len(patterns.CHECK_SPOTS)
+        base = (f"Calibrated with {len(c['spots'])} spots at {cal.objective or 'this objective'}: a mirror is lit by "
+                f"{cal.on_value}. ")
+        if not n:
+            self._end_calibration(base + "None of the check grid's spots was found on the picture: the fit is kept "
+                                  "but not checked.", keep_light=True)
+            return
+        err = cal.check_errors_px()
+        if cal.um_per_px:
+            e = err * cal.um_per_px
+            verdict = ("within the target" if e.max() <= patterns.CHECK_TARGET_UM else
+                       f"over the {patterns.CHECK_TARGET_UM:g} um target: calibrate again (focus on the slide, "
+                       "brighter spots) before relying on regions of one cell")
+            text = (f"Check: {n} of {total} spots found, each within {e.max():.1f} um of where the map puts it (mean "
+                    f"{e.mean():.1f} um), {verdict}.")
+        else:
+            text = (f"Check: {n} of {total} spots found, each within {err.max():.1f} px of where the map puts it "
+                    f"(mean {err.mean():.1f} px); calibrate the camera's length to read it in um.")
+        self._end_calibration(base + text, keep_light=True)
 
     def _end_calibration(self, text: str, keep_light: bool = False) -> None:
         self._poll.stop()
@@ -689,6 +1032,7 @@ class PolygonPanel(QtWidgets.QWidget):
         self.cal_button.setEnabled(True)
         self.cal_status.setText(text)
         if keep_light:
+            self.calibrations.keep(self.calibration)
             self.save()
         self.draw_outlines()
         self._said()
@@ -696,23 +1040,39 @@ class PolygonPanel(QtWidgets.QWidget):
     # ---------------------------------------------------------------- kept for the user
     def _cal_text(self) -> str:
         c = self.calibration
+        light = (f"a mirror is lit by {c.on_value}" if c.light_tested else
+                 f"lit by {c.on_value} assumed (the light test has not been done)")
         if not c.ready:
-            if c.light_tested:
-                return f"Light tested (a mirror is lit by {c.on_value}); the field's place is not known yet."
-            return "Not calibrated: the light test and the field's place are not known yet."
-        return (f"Calibrated: a mirror is lit by {c.on_value}; the field's place fitted within "
-                f"{c.residual_px:.1f} px at {c.camera_size[0]} x {c.camera_size[1]}.")
+            why = self.calibrations.refusal(self._objective())
+            return f"Not calibrated here: {light}; {why}." if self.calibrations.maps else \
+                f"Not calibrated: {light}; the field's place is not known yet."
+        text = (f"Calibrated at {c.objective or 'an objective not noted'}: {light}; the field's place fitted within "
+                f"{c.residual_px:.1f} px at {c.camera_size[0]} x {c.camera_size[1]}")
+        if c.check:
+            err = c.check_errors_px()
+            text += (f"; checked within {err.max() * c.um_per_px:.1f} um" if c.um_per_px else
+                     f"; checked within {err.max():.1f} px")
+        return text + "."
+
+    def _use_objective(self) -> None:
+        """The objective (or camera adapter) changed: its own calibration used, or none."""
+        stopped = self._cal is not None               # its spots were found through the other objective
+        if stopped:
+            self._end_calibration("")
+        self.calibration = self.calibrations.at(self._objective())
+        self.cal_status.setText(("The objective changed during the calibration: stopped. " if stopped else "")
+                                + self._cal_text())
+        self.draw_outlines()
 
     def load(self) -> None:
         main = widgets._main_window(self.panel)
-        if main is None or not getattr(main, "persist", False):
-            self.cal_status.setText(self._cal_text())
-            return
-        try:
-            self.calibration = patterns.Calibration.from_dict(json.loads(str(main._settings().value(
-                "polygon/calibration", "{}") or "{}")))
-        except (ValueError, TypeError):
-            self.calibration = patterns.Calibration()
+        if main is not None and getattr(main, "persist", False):
+            try:
+                self.calibrations = patterns.Calibrations.from_dict(json.loads(str(main._settings().value(
+                    "polygon/calibration", "{}") or "{}")))
+            except (ValueError, TypeError, AttributeError):
+                self.calibrations = patterns.Calibrations()
+        self.calibration = self.calibrations.at(self._objective())
         self.cal_status.setText(self._cal_text())
         self.swap.blockSignals(True)
         self.swap.setChecked(self.calibration.on_value == 0)
@@ -720,7 +1080,7 @@ class PolygonPanel(QtWidgets.QWidget):
 
     def _swapped(self, on: bool) -> None:
         """Lit by 0 or by 255, set by hand: the step shown is sent again so the change is seen at once."""
-        self.calibration.on_value = 0 if on else 255
+        self.calibration.on_value = self.calibrations.on_value = 0 if on else 255
         self.save()
         self.cal_status.setText(self._cal_text() + " (lit by " + str(self.calibration.on_value) + ", set by hand)")
         if self.polygon.connected and self.polygon.shown is not None:
@@ -729,7 +1089,7 @@ class PolygonPanel(QtWidgets.QWidget):
     def save(self) -> None:
         main = widgets._main_window(self.panel)
         if main is not None and getattr(main, "persist", False):
-            main._settings().setValue("polygon/calibration", json.dumps(self.calibration.to_dict()))
+            main._settings().setValue("polygon/calibration", json.dumps(self.calibrations.to_dict()))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -753,5 +1113,22 @@ class PolygonPanel(QtWidgets.QWidget):
         if self.polygon.connected or self._opening:
             self.device_status.setText("")
             self._busy_start("Letting the patterned light go", 4.0)
-            self._async(self.polygon.close, lambda *_: self._busy_end())
+            on = self.calibration.on_value
+
+            def work():
+                # no mirror left lit: the Polygon keeps showing its last picture after it is let go
+                off = bool(self.polygon.connected and self.polygon.off(on))
+                when = time.time()
+                self.polygon.close()
+                return off, when
+
+            def done(result):
+                self._busy_end()
+                off, when = result if isinstance(result, tuple) else (False, time.time())
+                if off:
+                    self._log(light_record.entry("off", on_value=on, when=when))
+                self._log(light_record.entry("let go"))
+                self.shown_label.setText("Let go" + (" with no mirror lit." if off else "."))
+
+            self._async(work, done)
         self.released.emit()

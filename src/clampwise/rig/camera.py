@@ -16,6 +16,7 @@ import os
 import re
 import struct
 import xml.etree.ElementTree as ET
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -122,8 +123,27 @@ def _number(text: str | None) -> float | None:
         return None
 
 
+_READ: dict[tuple, "Picture"] = {}          # each picture read once while it is unchanged (Live looks every 2 s)
+
+
 def read_picture(path: str | Path) -> Picture:
     path = Path(path)
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and key in _READ:
+        return copy.deepcopy(_READ[key])
+    pic = _read_picture(path)
+    if key is not None:
+        if len(_READ) > 2000:
+            _READ.clear()
+        _READ[key] = copy.deepcopy(pic)
+    return pic
+
+
+def _read_picture(path: Path) -> Picture:
     pic = Picture(path)
     stamp = modified(path)
     if stamp:

@@ -125,6 +125,9 @@ class Badge(QtWidgets.QLabel):
 
     def set(self, status: str, word: str, detail: str = "") -> None:
         status = status if status in self.SYMBOLS else "muted"
+        if getattr(self, "_shown", None) == (status, word, detail):
+            return                    # unchanged: no restyle (Live sets its badges twice a second)
+        self._shown = (status, word, detail)
         self.setObjectName(f"badge_{status}")
         self.setText(f"{self.SYMBOLS[status]} {word}")
         self.setToolTip(detail or word)

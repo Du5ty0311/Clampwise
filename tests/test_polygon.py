@@ -157,6 +157,24 @@ class FakeSDK:
 
     def MTPLG_GetDevRunStatus(self, i, state, timeout):
         state._obj.Temperature = 41
+        state._obj.SeqIdx = getattr(self, "seq_idx", 0)
+        return 0
+
+    def MTPLG_SetDevPtnSetting(self, i, setting):
+        self.setting, self.patterns = setting, {}
+        return 0
+
+    def MTPLG_SetDevPtnFromMemory(self, i, k, ptr):
+        n = patterns.ROWS * patterns.COLUMNS
+        self.patterns[k] = np.ctypeslib.as_array(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8)), (n,)).copy()
+        return 0
+
+    def MTPLG_StartPattern(self, i):
+        self.calls.append(("start",))
+        return 0
+
+    def MTPLG_StopPattern(self, i):
+        self.calls.append(("stop",))
         return 0
 
     def MTPLG_DisconnectDev(self, i):
@@ -276,9 +294,18 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     ys, xs = np.nonzero(lit)
     x, y = rig.cal.camera_of(np.array([0.25]), np.array([0.25]))
     assert xs.mean() == pytest.approx(x[0], abs=3) and ys.mean() == pytest.approx(y[0], abs=3)
-    assert (tmp_path / "polygon_log.csv").read_text(encoding="utf-8").splitlines()[1].split(",")[1] == "1"
+    from clampwise.rig import light_record
+
+    log = light_record.read(tmp_path / "polygon_log.csv")
+    assert [e.event for e in log][:2] == ["taken", "shown"] and log[1].step == "1" and log[1].lit
+    assert log[1].field_fraction == pytest.approx(0.25, abs=0.01)
+    # the check grid: spots the fit did not use land where the map puts them
+    assert "Check: 8 of 8 spots found" in dlg.cal_status.text() and len(dlg.calibration.check) == 8
+    assert dlg.calibration.check_errors_px().max() < 2.0
     dlg.release()
     assert dlg.wait() and ("uninit",) in sdk.calls
+    assert not (sdk.image == on).any()                                           # let go with nothing lit
+    assert [e.event for e in light_record.read(tmp_path / "polygon_log.csv")][-1] == "let go"
 
 
 def test_the_light_test_says_so_when_the_light_is_off(qapp, monkeypatch):
@@ -457,3 +484,298 @@ def test_a_region_drawn_over_a_neuron_is_lit_and_follows_it_when_moved(qapp):
     assert dlg.wait()
     ys, xs = np.nonzero(rig.picture(sdk.image) > 100)
     assert xs.mean() == pytest.approx(135, abs=2) and ys.mean() == pytest.approx(105, abs=2)
+
+
+# ------------------------------------------------------------------ calibrations by objective, areas, the light log
+
+def test_a_calibration_is_kept_for_its_objective_and_refused_at_another():
+    cals = patterns.Calibrations()
+    key10, key40 = patterns.objective_key(10), patterns.objective_key(40, 1.0)
+    assert key40 == "40x, adapter 1x" and patterns.objective_key(None) == ""
+    c = cals.at(key10)
+    c.on_value, c.light_tested, c.objective = 0, True, key10
+    c.to_field = [[0.004, 0.0, 0.1], [0.0, 0.006, 0.2]]
+    cals.keep(c)
+    assert cals.at(key10).ready and not cals.at(key40).ready
+    assert cals.at(key40).on_value == 0 and cals.at(key40).light_tested         # the byte is the Polygon's own
+    assert "10x" in cals.refusal(key40) and "calibrate with this objective" in cals.refusal(key40)
+    assert cals.refusal(key10) == ""
+    again = patterns.Calibrations.from_dict(cals.to_dict())
+    assert again.at(key10).to_field == c.to_field and again.on_value == 0
+    old = patterns.Calibrations.from_dict({"on_value": 0, "light_tested": True, "to_field": c.to_field})
+    assert old.on_value == 0 and not old.maps                                     # its objective was not noted
+
+
+def test_the_check_grid_and_the_scale_follow_the_binning():
+    full = patterns.Calibration(to_field=[[0.004, 0.0, 0.0], [0.0, 0.006, 0.0]], camera_size=(1944, 1472),
+                                check=[[100.5, 200.5, 102.5, 200.5]], um_per_px=0.1)
+    binned = full.at_size((972, 736))
+    assert binned.um_per_px == pytest.approx(0.2)
+    assert binned.check_errors_px()[0] * binned.um_per_px == pytest.approx(full.check_errors_px()[0] * 0.1)
+
+
+def test_a_step_s_area_on_the_slice_is_worked_out_through_the_calibration():
+    cal = patterns.Calibration(to_field=[[1 / 1000, 0.0, 0.0], [0.0, 1 / 625, 0.0]])   # the field: 1000 x 625 px
+    um = 0.5                                                                     # so 500 x 312.5 um
+    whole = patterns.full_field()[0]
+    d = patterns.dose(whole, whole.mirrors(), cal, um)
+    assert d["field_fraction"] == pytest.approx(1.0) and d["area_um2"] == pytest.approx(500 * 312.5, rel=1e-3)
+    spot = patterns.spot(0.5, 0.5, 0.04)[0]                                      # 40 px = 20 um across
+    d = patterns.dose(spot, spot.mirrors(), cal, um)
+    assert d["area_um2"] == pytest.approx(np.pi * 10 ** 2, rel=0.05)
+    assert d["shapes"][0]["area_um2"] == pytest.approx(np.pi * 10 ** 2, rel=0.01)
+    assert d["shapes"][0]["centre_um"] == pytest.approx([250, 156.25])
+    assert patterns.dose(spot, spot.mirrors(), patterns.Calibration(), 0.0)["area_um2"] is None
+
+
+def test_the_light_log_is_timed_to_the_millisecond_and_an_older_log_is_kept_aside(tmp_path):
+    from clampwise.rig import light_record
+
+    (tmp_path / "polygon_log.csv").write_text("time,step,shapes (field: 0-1 across, down),pattern\n"
+                                              "2026-10-19 10:00:00,1,\"rect(0, 0, 1, 1)\",Grid\n", encoding="utf-8")
+    old = light_record.read(tmp_path / "polygon_log.csv")
+    assert old[0].coarse and old[0].step == "1" and old[0].event == "shown"
+    step = patterns.spot(0.5, 0.5, 0.1)[0]
+    e = light_record.entry("shown", step, "Spot", {"field_fraction": 0.01, "area_um2": 78.5, "shapes": [{"k": 1}]},
+                           "40x, adapter 1x", 0, when=1_790_000_000.123)
+    light_record.write(tmp_path, e)
+    assert (tmp_path / "polygon_log (before 1).csv").exists()
+    back = light_record.read(tmp_path / "polygon_log.csv")
+    assert len(back) == 1 and back[0].unix_s == pytest.approx(1_790_000_000.123, abs=1e-3)
+    assert back[0].step == "Spot" and back[0].area_um2 == 78.5 and back[0].on_value == 0 and back[0].lit
+    assert back[0].shapes == [{"k": 1}] and back[0].objective == "40x, adapter 1x"
+
+
+def test_each_sweep_gets_the_pattern_shown_and_how_sure_that_is():
+    import datetime as dt
+
+    from clampwise.rig import light_record as lr
+
+    t0 = dt.datetime(2026, 10, 26, 14, 0, 0)
+    s = t0.timestamp()
+    roi = patterns.Step("Cell 1", [patterns.Shape("ellipse", (0.4, 0.4, 0.5, 0.5))])
+    log = [lr.entry("taken", when=s - 60), lr.entry("shown", roi, when=s - 30, dose={"field_fraction": 0.01}),
+           lr.entry("shown", patterns.full_field()[0], when=s + 10.5, dose={"field_fraction": 1.0}),
+           lr.entry("off", when=s + 25.0), lr.entry("let go", when=s + 40)]
+    # sweeps of 2 s every 5 s: 0, 5, 10 (the change at 10.5 s within it), 15, 20 (Off at 25.0: 3 s after it), 45
+    starts = [0, 5, 10, 15, 20, 45]
+    out = lr.match(log, t0, starts, 2.0, clock_s=1.0, pulses_s=[[0.375, 0.475]] * 3 + [[0.375]] * 3)
+    assert [o["step"] for o in out] == ["Cell 1", "Cell 1", "Cell 1", "Full field", "Full field", None]
+    assert out[0]["sure"] and out[1]["sure"] and not out[2]["sure"] and "changed during" in out[2]["why"]
+    assert out[2]["pulses"][0]["step"] == "Cell 1" and not out[2]["pulses"][0]["sure"]  # 0.125 s from the change
+    assert out[3]["sure"] and out[4]["sure"] and out[4]["margin_s"] == pytest.approx(3.0)
+    assert not out[5]["sure"] and "let go" in out[5]["why"]
+    tight = lr.match(log, t0, [8.0], 2.0, clock_s=1.0)                           # ends 0.5 s before the change
+    assert not tight[0]["sure"] and "uncertainty" in tight[0]["why"]
+    groups = lr.by_step(out)
+    assert groups == {"Cell 1": [1, 2], "not sure": [3, 6], "Full field": [4, 5]}
+
+
+def test_comparing_a_full_field_with_a_region_says_what_differs():
+    from clampwise.rig import light_record as lr
+
+    sweeps = [{"sweep": 1, "sure": True, "lit": True, "step": "Full field", "field_fraction": 1.0,
+               "area_um2": 150000.0},
+              {"sweep": 2, "sure": True, "lit": True, "step": "Cell 1", "field_fraction": 0.002, "area_um2": 300.0}]
+    notes = lr.dose_notes(sweeps)
+    assert len(notes) == 1 and "500x" in notes[0] and "irradiance is the same" in notes[0]
+    assert lr.dose_notes(sweeps[:1]) == []
+
+
+def test_a_recording_s_sweeps_are_matched_once_and_kept_beside_it(tmp_path):
+    import datetime as dt
+    import json
+    from types import SimpleNamespace
+
+    from clampwise.rig import light_record as lr
+
+    t0 = dt.datetime(2026, 10, 26, 14, 0, 0)
+    lr.write(tmp_path, lr.entry("shown", patterns.full_field()[0], when=t0.timestamp() - 5,
+                                dose={"field_fraction": 1.0}))
+    rec = SimpleNamespace(source=tmp_path / "26o26cw000.abf", start_time=t0, sweep_start_times_s=np.array([0.0, 5.0]),
+                          sweep_duration_s=2.0, stimulus=None)
+    out = lr.for_recording(rec)
+    assert [o["step"] for o in out] == ["Full field", "Full field"] and all(o["sure"] for o in out)
+    side = json.loads((tmp_path / "26o26cw000.light.json").read_text(encoding="utf-8"))
+    assert side["clock_uncertainty_s"] == lr.OWN_CLOCK_S and len(side["sweeps"]) == 2
+    (tmp_path / lr.LOG_NAME).unlink()
+    assert lr.for_recording(rec) == out                                          # read back from beside it
+    rec.source = tmp_path / "other.abf"
+    assert lr.for_recording(rec) is None                                         # no log, no sidecar
+
+
+def test_evoked_responses_are_measured_for_each_region_lit(tmp_path):
+    """Sweeps alternating between a region on the cell and its control beside it (a fifth of the response,
+    scattered light): the evoked analysis measures each pattern's sweeps on their own."""
+    from clampwise import simulate
+    from clampwise.analysis import pipeline
+    from clampwise.rig import light_record as lr
+
+    sim = simulate.evoked(onsets_s=(0.2,), amplitudes=(-50.0,), n_sweeps=20, seed=3)
+    rec = sim.recording
+    rec.source = tmp_path / "26101cw000.abf"                                     # Clampwise's own: its clock
+    signal = rec.samples._arrays[0]
+    signal[1::2] = -20.0 + (signal[1::2] + 20.0) * 0.2
+    t0 = rec.start_time.timestamp()
+    cell = patterns.Step("Cell 1", [patterns.Shape("ellipse", (0.4, 0.4, 0.45, 0.47))])
+    ctrl = patterns.Step("Cell 1 control", [patterns.Shape("ellipse", (0.6, 0.4, 0.65, 0.47))])
+    for k, start in enumerate(rec.sweep_start_times_s):
+        lr.write(tmp_path, lr.entry("shown", ctrl if k % 2 else cell, when=t0 + start - 0.5,
+                                    dose={"field_fraction": 0.002, "area_um2": 180.0}))
+    e = pipeline.analyze(rec).results["evoked"]
+    assert not e.error, e.error
+    rows = {r["pattern"]: r for r in e.tables["by_pattern"]}
+    assert set(rows) == {"Cell 1", "Cell 1 control"} and rows["Cell 1"]["sweeps"] == 10
+    assert rows["Cell 1"]["p1_amplitude"] == pytest.approx(-50, rel=0.15)
+    assert rows["Cell 1 control"]["p1_amplitude"] == pytest.approx(-10, rel=0.3)
+    assert not (tmp_path / "26101cw000.light.json").exists()                     # the analysis writes nothing
+
+
+def test_the_steps_can_be_stepped_by_the_polygon_s_own_trigger_and_off_stops_them():
+    from clampwise.rig import polygon
+
+    sdk = FakeSDK()
+    p = Polygon(sdk, polyscan_running=lambda: False)
+    assert p.open()
+    a, b = patterns.grid(1, 2)
+    assert p.run_sequence([a.mirrors(), b.mirrors()], on_value=0, shown_us=20_000)
+    s = sdk.setting
+    assert (s.PtnNumber, s.TrigType, s.ExposureTime, s.TrigEdge, s.BitDepth) == (2, polygon.TRIGGER_EXTERNAL, 20_000,
+                                                                                 polygon.EDGE_RISE, 1)
+    assert sdk.mode == polygon.DISPLAY_SEQUENCE and ("start",) in sdk.calls and p.sequence
+    first = sdk.patterns[1].reshape(patterns.ROWS, patterns.COLUMNS)
+    assert (first[:, :400] == 0).all() and (first[:, 520:] == 255).all()          # lit by 0: the left half
+    assert p.sequence_index() == 0
+    assert p.off(0) and ("stop",) in sdk.calls and sdk.mode == polygon.DISPLAY_STATIC and not p.sequence
+    assert (sdk.image == 255).all()                                              # still, nothing lit
+
+
+def test_each_pulse_stepped_by_the_trigger_is_given_its_own_region(tmp_path):
+    from clampwise import simulate
+    from clampwise.analysis import pipeline
+    from clampwise.rig import light_record as lr
+
+    sim = simulate.evoked(onsets_s=(0.2, 0.3), amplitudes=(-50.0, -10.0), n_sweeps=10, seed=4)
+    rec = sim.recording
+    rec.source = tmp_path / "26101cw001.abf"
+    e = lr.entry("sequence", None, "Drawn on the picture", {"field_fraction": 0.002}, "40x, adapter 1x", 255,
+                 when=rec.start_time.timestamp() - 5)
+    e.step, e.shapes = "Cell 1 | Cell 1 control", [{"step": "Cell 1"}, {"step": "Cell 1 control"}]
+    lr.write(tmp_path, e)
+    from clampwise.analysis import stimulus as finder
+
+    out = lr.for_recording(rec, write_it=False, stimulus=finder.find_stimulus(rec))
+    assert all(o["sure"] for o in out)
+    assert [p["step"] for p in out[0]["pulses"]] == ["Cell 1", "Cell 1 control"] and out[0]["pulses"][1]["by_trigger"]
+    ev = pipeline.analyze(rec).results["evoked"]
+    assert [r["pattern"] for r in ev.tables["pulses"]] == ["Cell 1", "Cell 1 control"]
+    assert any("pulse 2 Cell 1 control" in n for n in ev.notes)
+
+
+def test_projecting_on_triggers_loads_every_step_and_logs_them_as_one_sequence(qapp, tmp_path):
+    from clampwise.app.screens import polygon_panel
+    from clampwise.rig import light_record as lr
+
+    sdk = FakeSDK()
+    panel = _panel_with_scale(tmp_path)
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
+    dlg.take()
+    assert dlg.wait()
+    dlg.source.setCurrentText("Grid")
+    dlg.rows.setValue(1)
+    dlg.cols.setValue(3)
+    dlg.make_steps()
+    dlg.on_trigger.setChecked(True)
+    dlg.held_ms.setValue(30.0)
+    dlg.project()
+    assert dlg.wait() and len(sdk.patterns) == 3 and sdk.setting.ExposureTime == 30_000
+    seq = [e for e in lr.read(tmp_path / lr.LOG_NAME) if e.event == "sequence"]
+    assert len(seq) == 1 and seq[0].step == "1 | 2 | 3" and [d["step"] for d in seq[0].shapes] == ["1", "2", "3"]
+    dlg.off()
+    assert dlg.wait() and not dlg.polygon.sequence and not sdk.image.any()
+
+
+def _panel_with_scale(tmp_path, um=0.5, mag=40.0):
+    from types import SimpleNamespace
+
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtWidgets
+
+    from clampwise.rig import lucam
+
+    panel = QtWidgets.QWidget()
+    panel.box, panel.window, panel.folder = pg.ViewBox(), SimpleNamespace(say=lambda *_: None), lambda: str(tmp_path)
+    panel._thread, panel._shown = None, 0
+    panel.magnification = mag
+    panel.scale = lambda: (um, "calibrated")
+    adapter = QtWidgets.QDoubleSpinBox()
+    adapter.setValue(1.0)
+    panel.dialog = SimpleNamespace(adapter=adapter)
+    g = np.zeros((160, 200), np.uint8)
+    panel.last = lucam.Frame(np.broadcast_to(g[:, :, None], g.shape + (3,)), 1.0, 1.0)
+    return panel
+
+
+def test_a_cell_s_region_is_placed_by_its_centre_and_diameter_with_a_control_beside_it(qapp, tmp_path):
+    import json
+
+    from clampwise.app.screens import polygon_panel
+
+    panel = _panel_with_scale(tmp_path)
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(FakeSDK(), polyscan_running=lambda: False))
+    rig = SimRig(255)
+    dlg.calibration = patterns.Calibration(255, True, rig.cal.to_field, (rig.w, rig.h), 0.1, "40x, adapter 1x")
+    dlg.source.setCurrentText("Drawn on the picture")
+    dlg.roi_name.setText("Cell 1")
+    dlg.roi_um.setValue(15.0)                                                    # 30 px at 0.5 um a pixel
+    roi = dlg.place_at(80.0, 60.0)
+    assert roi.name == "Cell 1" and tuple(roi.size()) == pytest.approx((30, 30))
+    assert dlg._centre(roi) == pytest.approx((80, 60))
+    dlg.control_um.setValue(40.0)                                                # 80 px to its right
+    ctrl = dlg.add_control()
+    assert ctrl.name == "Cell 1 control" and dlg._centre(ctrl) == pytest.approx((160, 60))
+    assert [s.name for s in dlg.steps] == ["Cell 1", "Cell 1 control"]
+    path = dlg.save_regions()
+    body = json.loads(path.read_text(encoding="utf-8"))
+    assert body["regions"][0]["centre_um"] == [40.0, 30.0] and body["regions"][1]["control"]
+    dlg.clear_shapes()
+    assert dlg.load_regions() == 2 and dlg._centre(dlg.drawn[1]) == pytest.approx((160, 60))
+    assert getattr(dlg.drawn[1], "control", False) and dlg.drawn[0].name == "Cell 1"
+
+
+def test_another_objective_uses_its_own_calibration_or_says_why_not(qapp, tmp_path):
+    from clampwise.app.screens import polygon_panel
+
+    panel = _panel_with_scale(tmp_path, mag=10.0)
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(FakeSDK(), polyscan_running=lambda: False))
+    rig = SimRig(255)
+    c = patterns.Calibration(255, True, rig.cal.to_field, (rig.w, rig.h), 0.1, dlg._objective())
+    dlg.calibrations.keep(c)
+    dlg._use_objective()
+    assert dlg.calibration.ready and "Calibrated at 10x" in dlg.cal_status.text()
+    panel.magnification = 40.0
+    dlg._use_objective()
+    assert not dlg.calibration.ready and "calibrated at 10x, adapter 1x, not at 40x" in dlg.cal_status.text()
+    dlg.source.setCurrentText("Drawn on the picture")
+    dlg.add_shape("ellipse")
+    dlg.make_steps()
+    assert not dlg.steps and "calibrate with this objective" in dlg.pattern_note.text()
+
+
+def test_a_recording_s_end_leaves_nothing_lit(qapp, tmp_path):
+    from clampwise.app.screens import polygon_panel
+
+    sdk = FakeSDK()
+    panel = _panel_with_scale(tmp_path)
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
+    dlg.take()
+    assert dlg.wait()
+    dlg.make_steps()                                                             # the full field
+    dlg.project()
+    assert dlg.wait() and (sdk.image == 255).all() and dlg.off_after.isChecked()
+    dlg.after_run([])
+    assert dlg.wait() and not sdk.image.any()
+    dlg.off_after.setChecked(False)
+    dlg.project()
+    dlg.after_run([])
+    assert dlg.wait() and (sdk.image == 255).all()                               # unticked: left as it is

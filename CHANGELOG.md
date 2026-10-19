@@ -17,6 +17,42 @@
   seconds while the window goes on. **Lit by 0** swaps lit and unlit by hand. The light test and calibration work
   with the light in pulses too (the protocol playing): each test picture waits for a pulse and reads the frame it
   lit. A region drawn over a neuron is lit alone, and dragged onto another cell it is shown there at once.
+- **The patterned light's calibration, checked and kept per objective.** A map is kept for each objective (and
+  camera adapter) and refused at another; after the fit a check grid of 8 spots it did not use reports how far each
+  lands, in um (target under 5 um), drawn on the picture.
+- **Regions for one cell, and their controls.** Click the cell's centre to place a round region of a diameter typed
+  in um; name it; add a control region of the same size a set distance away (for light scattered onto the cell);
+  keep the regions with the cell and draw them again later.
+- **The pattern belongs with the recording.** Each step shown is logged to the millisecond with its shapes (field,
+  picture pixels and um), area in um^2, fraction of the field lit, objective and byte. A recording made in
+  Clampwise gets `<file>.light.json`: each sweep's and each light pulse's pattern and how sure the match is. The
+  evoked analysis measures each region's sweeps on their own (table `by_pattern`) and notes what differs between a
+  full field and a region (the same irradiance at one LED command; the power and the scatter go with the area).
+- **Nothing is left lit.** Off after each recording (on by default), and Off before Let go and when Clampwise
+  closes (the Polygon keeps showing its last image otherwise).
+- **Per-pulse patterns on the Polygon's own trigger.** Step on each trigger loads every step into the Polygon and
+  each TTL at its Trig In shows the next: pulse 1 on one region, pulse 2 on another; the analysis labels each pulse
+  with its region. Needs a digital output wired to Trig In.
+- **Lighter on the PC.** Measured with `tools/rigtest/profile_live.py` on the rig's PC: Live idle 16.5% of one
+  core before, 4.7% now (badges no longer restyled when unchanged; the camera's pictures read once, not every
+  2 s; the data folder listed without a call per file; the telegraph once a second; no 20 ms polling between
+  looks); the window's longest pause 50-90 ms before, under 50 ms now. The camera at its full 60 frames a second:
+  28% of one core (its thread half what it was: frame memory no longer zeroed), 30 drawn a second (the eye sees
+  no more), every frame still taken. Memory reserved 611 MB before, 225 MB now (numpy's and scipy's matrix
+  libraries held to 2 threads each). On 2 cores at low priority every budget holds in low-power mode.
+- **Low-power mode** (Settings, Performance): the picture drawn 15 times a second, every 2nd pixel while shown
+  smaller, its histogram once a second, the rig's programs looked at once a second. On by default on a PC with
+  fewer than 4 cores or under 8 GB. The frame rate's tooltip says what sets it (the exposure, the camera's
+  readout, or the drawing).
+- **Never a frozen window**: opening a large project (5,000 recordings take 2 s to find) and Send to Excel / CSV
+  run in the background, the status line counting the seconds.
+- **Live's views at 1366 x 768**: a narrow view keeps its name and Use here / Let go readable (its status word,
+  then enlarge and hide, give way); the patterned light's controls fit a narrow window.
+- **`tools/rigtest/`**: scripts that drive Clampwise from source as a person would (the window, the camera, the
+  patterned light), take screenshots and print what they measured: `profile_live.py` (CPU per thread, memory,
+  the event loop's pauses, frames; `--cores 2 --low-priority` for a cheaper PC), `camera_fps.py`,
+  `small_screen.py`, and, only with `--at-the-rig`, `polygon_light_test.py` and `polygon_roi.py`. Each ends with
+  nothing lit and every device let go.
 - **An adjustable histogram under the camera's picture**, set by hand as ImageJ's Brightness & Contrast: the
   picture's histogram (log counts, so the few bright pixels of dim fluorescence show) with a band whose edges are
   the grey levels shown black and white (contrast), the band itself dragged to move both (brightness), and a line

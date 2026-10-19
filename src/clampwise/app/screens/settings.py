@@ -91,6 +91,18 @@ class SettingsScreen(Screen):
         self.report.setReadOnly(True)
         self.report.setVisible(False)
         lay.addWidget(self.report, 1)
+        # a cheaper PC
+        lay.addWidget(_section("Performance"))
+        from .. import power
+
+        self.low_power = QtWidgets.QCheckBox("Low-power mode (a PC with few cores or little memory)")
+        self.low_power.setToolTip("The camera's picture drawn at most 15 times a second (every frame still taken), "
+                                  "every 2nd pixel while shown smaller, its histogram once a second, the rig's "
+                                  "programs looked at once a second. On by default on a PC with fewer than 4 cores "
+                                  "or less than 8 GB")
+        self.low_power.setChecked(power.enabled(window._settings() if getattr(window, "persist", False) else None))
+        self.low_power.toggled.connect(self._keep_low_power)
+        lay.addWidget(self.low_power)
         # updates, from the releases on GitHub
         lay.addWidget(_section("Updates"))
         self.auto_update = QtWidgets.QCheckBox("Check for a new version when Clampwise starts")
@@ -182,6 +194,19 @@ class SettingsScreen(Screen):
         if not getattr(self.window, "persist", False):
             return False
         return str(self.window._settings().value("updates/check", "true")).lower() == "true"
+
+    def _keep_low_power(self, on: bool) -> None:
+        """Kept for this PC, and applied at once to the camera and the rig's readout."""
+        from .. import power
+
+        if getattr(self.window, "persist", False):
+            self.window._settings().setValue(power.KEY, "true" if on else "false")
+        live = self.window.screens.get("live")
+        if live is None:
+            return
+        live.camera._power(on=on)
+        if getattr(live, "_thread", None) is not None:
+            live._thread.every_s = power.limits(on)["rig_s"]
 
     def _keep_auto_update(self, on: bool) -> None:
         if getattr(self.window, "persist", False):

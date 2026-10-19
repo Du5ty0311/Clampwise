@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import threading
 from pathlib import Path
 
 import pyqtgraph as pg
@@ -47,7 +48,7 @@ class RigThread(QtCore.QThread):
         self.make_watch, self.every_s, self._stop = make_watch, every_s, False
         self.folder = ""                     # the open project's folder, read beside the acquisition's (set any time)
         self.pending: list = []              # controls asked for before the watch began
-        self._now = False
+        self._wake = threading.Event()       # a control or the stop: the next look at once (no polling between)
 
     def send(self, command: tuple) -> None:
         """An amplifier control (rig.amplifier_control), run in this thread at once (before the next look)."""
@@ -56,7 +57,7 @@ class RigThread(QtCore.QThread):
             self.pending.append(command)
             return
         watch.commands.append((command, self.done.emit))
-        self._now = True
+        self._wake.set()
 
     def run(self) -> None:
         watch = self.make_watch()
@@ -73,16 +74,14 @@ class RigThread(QtCore.QThread):
                 except Exception as exc:                  # one bad look never ends the watch
                     self.snapshot.emit(exc)
                     self.msleep(2000)
-                waited = 0
-                self._now = False
-                while waited < self.every_s * 1000 and not self._now and not self._stop:     # a control: at once
-                    self.msleep(20)
-                    waited += 20
+                self._wake.wait(self.every_s)                   # a control: at once
+                self._wake.clear()
         finally:
             watch.close()
 
     def stop(self) -> None:
         self._stop = True
+        self._wake.set()
         self.wait(5000)
 
 
@@ -234,7 +233,24 @@ class WindowView(QtWidgets.QFrame):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._fit_head()
         self._place()
+
+    def _fit_head(self) -> None:
+        """A narrow view keeps its name and its Use here (or Let go) readable: the status word gives way first,
+        then the enlarge and hide buttons (pop out stays: a window of its own is as large as wanted)."""
+        tools_allowed = not self.popped and not getattr(self, "_free", False)
+        use = getattr(self, "use_button", None)
+        need = self.name.minimumWidth() + self.pop_button.sizeHint().width() + 40
+        if use is not None:
+            need += use.sizeHint().width()
+        tools = self.enlarge_button.sizeHint().width() + self.hide_button.sizeHint().width()
+        room = self.width()
+        self.enlarge_button.setVisible(tools_allowed and room >= need + tools)
+        self.hide_button.setVisible(tools_allowed and room >= need + tools)
+        self.badge.setVisible(room >= need + (tools if tools_allowed else 0) + self.badge.sizeHint().width())
+        if use is not None:
+            use.setMinimumWidth(use.sizeHint().width())
 
     def _tool(self, icon, slot) -> QtWidgets.QToolButton:
         b = QtWidgets.QToolButton()
@@ -285,13 +301,16 @@ class WindowView(QtWidgets.QFrame):
 
     def set_free(self, on: bool) -> None:
         """In a window inside Clampwise, whose own title bar maximizes and closes it."""
+        self._free = on
         self.enlarge_button.setVisible(not on and not self.popped)
         self.hide_button.setVisible(not on and not self.popped)
+        self._fit_head()
 
     def set_popped(self, on: bool) -> None:
         self.popped = on
         self.enlarge_button.setVisible(not on)
         self.hide_button.setVisible(not on)
+        self._fit_head()
         self.pop_button.setToolTip("Put back into Live" if on else "Pop out: a window of its own, to resize, "
                                    "maximize or lay over another (closing it puts it back)")
 
@@ -544,6 +563,7 @@ class LiveScreen(Screen):
             "recording in Clampwise, into ABF files the acquisition program reads (Let go gives the view back)")
         self.recorder.released.connect(lambda: self.views["acquisition"].set_own(False))
         self.recorder.recording.connect(self._recording_into)
+        self.recorder.run_ended.connect(self.patterned.after_run)    # the patterns kept with it; then Off
         side.addWidget(self.stack, 1)
         programs.setLayout(side)
         programs.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -1033,7 +1053,10 @@ class LiveScreen(Screen):
     def _start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = RigThread(self.make_watch)
+        from .. import power
+
+        settings = self.window._settings() if getattr(self.window, "persist", False) else None
+        self._thread = RigThread(self.make_watch, power.limits(power.enabled(settings))["rig_s"])
         self._thread.folder = self._watched()
         self._thread.snapshot.connect(self.show_snapshot)
         self._thread.done.connect(self.amp_controls.said)

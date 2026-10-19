@@ -34,6 +34,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
 
     released = QtCore.Signal()
     recording = QtCore.Signal(str)           # the folder being recorded into ("" when it ends)
+    run_ended = QtCore.Signal(list)          # a run has ended: the files it recorded (none when played)
 
     def __init__(self, window, make=recorder.Recorder, make_test=membrane_test.MembraneTest) -> None:
         super().__init__()
@@ -341,6 +342,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
             files = getattr(st, "files", None) or ([st.path] if st.path is not None else [])
             if st.state == "done" and st.saving and files:
                 self.window.say(f"Recorded {', '.join(p.name for p in files)} into {files[0].parent}.")
+            self.run_ended.emit([p for p in files if st.saving and Path(p).exists()])
 
     # ---- the membrane test
     def _show_test_settings(self, mode: str) -> None:

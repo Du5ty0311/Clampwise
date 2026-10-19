@@ -140,6 +140,47 @@ def test_every_screen_has_one_primary_action_at_most(qapp, window, folder):
         assert len(_primaries(screen)) <= 1, (key, _primaries(screen))
 
 
+def test_a_large_folder_is_looked_through_while_the_window_goes_on(qapp, window, folder, monkeypatch):
+    """5,000 recordings take 2 s to find (a deep tree on a slow disk longer): the window answers meanwhile and says
+    what it is doing, and the project is open when open_project returns."""
+    import clampwise.io as cio
+
+    real = cio.find_recordings
+
+    def slow(f):
+        time.sleep(1.2)
+        return real(f)
+
+    monkeypatch.setattr(cio, "find_recordings", slow)
+    beats, said = [], []
+    timer = QtCore.QTimer()
+    timer.timeout.connect(lambda: beats.append(time.monotonic()))
+    timer.start(20)
+    monkeypatch.setattr(window, "say", lambda text: said.append(text))
+    window.open_project(folder)
+    timer.stop()
+    assert window.project is not None and len(window.project.recordings()) == 2
+    assert np.diff(beats).max() < 0.3 and len(beats) > 30
+    assert any(t.startswith("Opening A9: looking for its recordings (") for t in said)
+
+
+def test_the_workbook_is_written_off_the_window_s_thread(qapp, window, folder, monkeypatch):
+    from clampwise import export
+
+    window.open_project(folder)
+    window.project.set_meta("note_for_export", "kept")                     # what the window wrote, seen by it
+    seen = {}
+
+    def write(project):
+        seen["meta"] = project.meta("note_for_export")
+        seen["same"] = project is window.project
+        return export.write_workbook(project)
+
+    monkeypatch.setattr("clampwise.app.screens.export.open_path", lambda p: None, raising=False)
+    out = window.screens["export"]._write("workbook", write)
+    assert out is not None and out.exists() and seen == {"meta": "kept", "same": False}
+
+
 def test_open_a_folder_select_navigate_back_and_undo(qapp, window, folder):
     window.open_project(folder)
     files = window.screens["files"]

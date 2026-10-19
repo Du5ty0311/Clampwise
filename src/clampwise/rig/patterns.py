@@ -287,16 +287,33 @@ def read_seq(path: str | Path) -> tuple[list[Step], list[str]]:
 @dataclass
 class Calibration:
     """How the Polygon sits under the camera: ``on_value`` the byte that lights a mirror (0 or 255), and the
-    affine map from the camera's pixels (x across, y down) to the field (u, v): [u, v] = A @ [x, y, 1]."""
+    affine map from the camera's pixels (x across, y down) to the field (u, v): [u, v] = A @ [x, y, 1], measured
+    with one ``objective`` (and camera adapter): the field's place shifts a little between objectives (their
+    centring), so a map is used only with the objective it was measured with. ``check`` holds the check grid
+    projected after the fit: each spot where it was found and where the map put it (x, y, x, y, camera pixels)."""
     on_value: int = 255
     light_tested: bool = False                                        # on_value seen to light, not assumed
     to_field: list[list[float]] = field(default_factory=list)       # 2 x 3; empty: not calibrated
     camera_size: tuple[int, int] = (0, 0)                             # (width, height) it was measured at
     residual_px: float = float("nan")
+    objective: str = ""                                               # "40x, adapter 1x"; "" not known
+    check: list[list[float]] = field(default_factory=list)
+    um_per_px: float = 0.0                                            # the camera's scale when it was measured
 
     @property
     def ready(self) -> bool:
         return len(self.to_field) == 2
+
+    def check_errors_px(self) -> np.ndarray:
+        """How far each check spot landed from where the map put it, camera pixels."""
+        c = np.asarray(self.check, float).reshape(-1, 4)
+        return np.hypot(c[:, 0] - c[:, 2], c[:, 1] - c[:, 3])
+
+    def field_area_px(self) -> float:
+        """The whole field's area on the camera's picture, square pixels (the field is 1 x 1 in its own units)."""
+        a = np.asarray(self.to_field, float)
+        det = abs(a[0, 0] * a[1, 1] - a[0, 1] * a[1, 0]) if self.ready else 0.0
+        return 1.0 / det if det > 0 else float("nan")
 
     def field_of(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         a = np.asarray(self.to_field, float)
@@ -319,21 +336,121 @@ class Calibration:
         a[:, 2] += a[:, 0] * (sx - 1) / 2 + a[:, 1] * (sy - 1) / 2
         a[:, 0] *= sx
         a[:, 1] *= sy
-        return Calibration(self.on_value, self.light_tested, a.tolist(), (int(w), int(h)), self.residual_px / sx)
+        check = [[(x0 - (sx - 1) / 2) / sx, (y0 - (sy - 1) / 2) / sy, (x1 - (sx - 1) / 2) / sx,
+                  (y1 - (sy - 1) / 2) / sy] for x0, y0, x1, y1 in self.check]
+        return Calibration(self.on_value, self.light_tested, a.tolist(), (int(w), int(h)), self.residual_px / sx,
+                           self.objective, check, self.um_per_px * sx)
 
     def to_dict(self) -> dict:
         return {"on_value": self.on_value, "light_tested": self.light_tested, "to_field": self.to_field,
-                "camera_size": list(self.camera_size), "residual_px": self.residual_px}
+                "camera_size": list(self.camera_size), "residual_px": self.residual_px,
+                "objective": self.objective, "check": self.check, "um_per_px": self.um_per_px}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Calibration":
         return cls(int(d.get("on_value", 255)), bool(d.get("light_tested", False)),
                    [list(map(float, r)) for r in d.get("to_field", [])],
-                   tuple(int(x) for x in d.get("camera_size", (0, 0))), float(d.get("residual_px", float("nan"))))
+                   tuple(int(x) for x in d.get("camera_size", (0, 0))), float(d.get("residual_px", float("nan"))),
+                   str(d.get("objective", "")), [list(map(float, r)) for r in d.get("check", [])],
+                   float(d.get("um_per_px", 0.0) or 0.0))
+
+
+def objective_key(magnification: float | None, adapter: float | None = 1.0) -> str:
+    """The name a calibration is kept under: the objective and the camera adapter it was measured with."""
+    if not magnification:
+        return ""
+    return f"{magnification:g}x, adapter {adapter or 1.0:g}x"
+
+
+class Calibrations:
+    """The calibrations kept: which byte lights a mirror (the Polygon's own: the same with every objective) and one
+    map of the field for each objective (and camera adapter) it was measured with."""
+
+    def __init__(self, on_value: int = 255, light_tested: bool = False, maps: dict | None = None) -> None:
+        self.on_value, self.light_tested = on_value, light_tested
+        self.maps: dict[str, Calibration] = dict(maps or {})
+
+    def at(self, key: str) -> Calibration:
+        """The calibration to use with the objective ``key``: its map when one was measured with it (else none),
+        and the light test's byte."""
+        c = self.maps.get(key)
+        if c is None:
+            return Calibration(self.on_value, self.light_tested, objective=key)
+        c.on_value, c.light_tested = self.on_value, self.light_tested
+        return c
+
+    def keep(self, c: Calibration) -> None:
+        self.on_value, self.light_tested = c.on_value, c.light_tested
+        if c.ready:
+            self.maps[c.objective] = c
+
+    def refusal(self, key: str) -> str:
+        """Why no map can be used with ``key`` ("" when one can)."""
+        if key in self.maps:
+            return ""
+        others = [k for k in self.maps if k != key]
+        if not others:
+            return "calibrate first (Test and calibrate)"
+        return (f"calibrated at {', '.join(sorted(others))}, not at {key or 'this objective'}: calibrate with this "
+                "objective (each objective centres the field a little differently)")
+
+    def to_dict(self) -> dict:
+        return {"on_value": self.on_value, "light_tested": self.light_tested,
+                "maps": {k: c.to_dict() for k, c in self.maps.items()}}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Calibrations":
+        """Also reads the single calibration kept before objectives were (its byte only: its map's objective is not
+        known)."""
+        out = cls(int(d.get("on_value", 255)), bool(d.get("light_tested", False)))
+        for k, m in (d.get("maps") or {}).items():
+            c = Calibration.from_dict(m)
+            if c.ready:
+                out.maps[str(k)] = c
+        return out
 
 
 CALIBRATION_SPOTS = ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75), (0.5, 0.5))
 CALIBRATION_DIAMETER = 0.06
+# after the fit, a check grid of spots not used by it: how far each lands from where the map puts it
+CHECK_SPOTS = tuple((u, v) for v in (0.35, 0.5, 0.65) for u in (0.35, 0.5, 0.65) if (u, v) != (0.5, 0.5))
+CHECK_TARGET_UM = 5.0
+
+
+def shape_area(shape: Shape) -> float:
+    """A shape's area in field units (the field is 1 x 1)."""
+    if shape.kind == "polygon":
+        p = np.asarray(shape.points, float).reshape(-1, 2)
+        x, y = p[:, 0], p[:, 1]
+        return float(abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2)
+    l, t, r, b = shape.points
+    w, h = abs(r - l), abs(b - t)
+    return float(w * h if shape.kind == "rect" else np.pi * w * h / 4)
+
+
+def dose(step: "Step", mask: np.ndarray, cal: Calibration, um_per_px: float) -> dict:
+    """What a step lights on the slice: the fraction of the field's mirrors lit; its area in um^2 (from the mirrors
+    lit, through the calibration and the camera's scale, when both are known); each shape's centre and area on the
+    camera's picture (pixels and um from the picture's top left). The irradiance where it lights is the same for any
+    pattern at one LED command (each mirror passes the same light); the power on the slice goes with the area."""
+    fraction = float(np.asarray(mask, bool).mean())
+    field_px = cal.field_area_px() if cal.ready else float("nan")
+    um2 = um_per_px ** 2 if um_per_px else float("nan")
+    shapes = []
+    for s in step.shapes:
+        d = {"kind": s.kind, "field": [round(float(x), 6) for x in s.points]}
+        if cal.ready:
+            cu, cv = s.centre()
+            x, y = cal.camera_of(np.array([cu]), np.array([cv]))
+            d["centre_px"] = [round(float(x[0]), 2), round(float(y[0]), 2)]
+            d["area_px2"] = round(shape_area(s) * field_px, 2)
+            if um_per_px:
+                d["centre_um"] = [round(float(x[0]) * um_per_px, 2), round(float(y[0]) * um_per_px, 2)]
+                d["area_um2"] = round(shape_area(s) * field_px * um2, 1)
+        shapes.append(d)
+    area = fraction * field_px * um2
+    return {"field_fraction": round(fraction, 6), "area_um2": round(area, 1) if np.isfinite(area) else None,
+            "shapes": shapes}
 
 
 def fit_affine(camera_xy: np.ndarray, field_uv: np.ndarray) -> tuple[list[list[float]], float]:

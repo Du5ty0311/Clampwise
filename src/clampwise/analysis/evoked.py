@@ -478,6 +478,74 @@ OUTPUTS = tuple(replace(o, label=LABELS[o.key][0], headline=LABELS[o.key][1]) if
                 for o in OUTPUTS)
 
 
+def _by_pattern(recording: Recording, context, s, sweeps: list[int], out: Result) -> None:
+    """Patterned light (the Polygon's log kept with the recording): the sweeps measured again for each pattern lit
+    (each region of interest, the full field, a control region), into the table ``by_pattern``; sweeps whose
+    pattern is not sure are left out of it and counted. Nothing when one pattern lit them all."""
+    import copy
+
+    from ..rig import light_record
+
+    try:
+        matched = light_record.for_recording(recording, write_it=False, stimulus=context.stimulus)
+    except Exception:                                 # a log that cannot be read: the recording as a whole
+        return
+    if not matched:
+        return
+    per = light_record.for_sweeps(recording, matched)
+    # stepped by the trigger: each pulse its own pattern, the same in every sweep (pulse j, step j)
+    by_pulse: dict[int, set] = {}
+    for i in sweeps:
+        m = per[i] if i < len(per) else None
+        for j, p in enumerate((m or {}).get("pulses") or []):
+            if p.get("by_trigger"):
+                by_pulse.setdefault(j, set()).add(p["step"] if p.get("sure") else None)
+    if by_pulse:
+        for j, names in sorted(by_pulse.items()):
+            name = next(iter(names)) if len(names) == 1 and None not in names else None
+            if j < len(out.tables.get("pulses", [])):
+                out.tables["pulses"][j]["pattern"] = name or "not sure"
+        out.notes.append("patterned light stepped on each trigger: " + ", ".join(
+            f"pulse {j + 1} {next(iter(n)) if len(n) == 1 and None not in n else 'not sure'}"
+            for j, n in sorted(by_pulse.items())) + " (each pulse's pattern assumes one trigger a pulse)")
+    groups: dict[str, list[int]] = {}
+    unsure = 0
+    for i in sweeps:
+        m = per[i] if i < len(per) else None
+        if m is None or not m.get("sure"):
+            unsure += 1
+        elif m.get("lit"):
+            groups.setdefault(m["step"], []).append(i)
+    if len(groups) < 2 and not unsure:
+        if groups:
+            out.notes.append(f"patterned light: every sweep lit by {next(iter(groups))}")
+        return
+    rows = []
+    for name, idx in groups.items():
+        sub = copy.copy(context)
+        sub.shared = {**context.shared, "sweep_indices": idx, "by_pattern": True}
+        try:
+            r = run(recording, sub, s)
+        except Exception as exc:                      # one pattern never fails the rest
+            out.notes.append(f"patterned light: {name} not measured ({exc})")
+            continue
+        first = per[idx[0]]
+        v = r.values
+        rows.append({"pattern": name, "sweeps": len(idx), "sweep_numbers": ", ".join(str(i + 1) for i in idx),
+                     "area_um2": first.get("area_um2"), "field_fraction": first.get("field_fraction"),
+                     "p1_amplitude": v.get("p1_amplitude", NAN), "p1_latency_median": v.get("p1_latency_median", NAN),
+                     "p1_success_rate": v.get("p1_success_rate", NAN), "ppr": v.get("ppr", NAN)})
+    if rows:
+        out.tables["by_pattern"] = rows
+        out.notes.append("patterned light: the sweeps measured again for each pattern lit (" +
+                         ", ".join(f"{r['pattern']}: {r['sweeps']}" for r in rows) + "), in the table by_pattern")
+    if unsure:
+        out.notes.append(f"patterned light: {unsure} sweep(s) whose pattern is not sure (a change near or during "
+                         "them, or the patterned light not held by Clampwise) are left out of by_pattern")
+    for note in light_record.dose_notes([m for m in per if m]):
+        out.notes.append("patterned light: " + note)
+
+
 @register("evoked", "Evoked responses, every pulse", version=2, types=EVOKED, settings=SETTINGS, outputs=OUTPUTS,
           description="Single pulses, paired pulses and trains: each pulse's amplitude, latency, kinetics, charge "
                       "and reliability, measured on the average and sweep by sweep.",
@@ -838,6 +906,8 @@ def run(recording: Recording, context, s) -> Result:
                                   severity="flag" if qc else "note"))
     if moving:
         out.notes.append("the pulses move between sweeps: each pulse is measured on its own pulse-aligned average")
+    if light and not context.shared.get("by_pattern"):
+        _by_pattern(recording, context, s, sweeps, out)
     # what to draw: each pulse's peak and the fitted decay of pulse 1
     for p in pulses:
         if np.isfinite(p.peak_time_s):

@@ -20,11 +20,33 @@ from ...rig import lucam, picture
 from .. import theme, widgets
 from ..widgets import box, label
 
-SHOW_EVERY_S = 1 / 60                # at most 60 redraws a second, and only once the last one is drawn
+SHOW_EVERY_S = 1 / 30                # at most 30 redraws a second (smooth to the eye; 60 doubled the drawing for
+                                     # nothing seen), and only once the last one is drawn
 STATS_EVERY_S = 0.5                  # the histogram and the clipping warning, twice a second
 COLOURS = {"green": (0, 255, 0), "red": (255, 0, 0), "magenta": (255, 0, 255), "cyan": (0, 255, 255),
            "yellow": (255, 255, 0)}
 FRAMES = {"dark": 16, "background": 16, "overlay": 8}
+
+
+def fps_limit(taken: float, shown: float, exposure_ms: float, average: int, draw_cap: float) -> str:
+    """What sets the pictures a second: the exposure (a picture cannot come faster than its exposure, times the
+    frames averaged), the camera's readout (it sends its frames no faster at this size), or the drawing."""
+    if taken <= 0:
+        return "No pictures yet."
+    by_exposure = 1000.0 / max(exposure_ms * max(1, average), 1e-3)
+    if taken >= 0.85 * by_exposure:
+        why = (f"The exposure sets it: {exposure_ms:g} ms" + (f" x {average} averaged" if average > 1 else "") +
+               f" allows {by_exposure:.0f} a second; a shorter exposure (with binning, or more gain, to keep the "
+               "picture bright) gives more.")
+    else:
+        why = (f"The camera's readout sets it ({taken:.0f} a second at this size; the exposure would allow "
+               f"{by_exposure:.0f}): its frames come no faster.")
+    if shown < taken - 0.5:
+        why += (f" {shown:.0f} a second are drawn: " + (f"the drawing is capped at {draw_cap:.0f} a second (the eye "
+                                                         "sees no more; low-power mode in Settings: 15); every frame "
+                                                         "is still taken." if shown >= 0.9 * draw_cap else
+                                                         "this PC draws no faster."))
+    return why
 
 
 class CameraThread(QtCore.QThread):
@@ -48,6 +70,7 @@ class CameraThread(QtCore.QThread):
         self.binning = 1                     # n x n pixels added into one (picture.bin_sum): off at 1
         self.taken = 0                       # pictures taken (each of ``average`` frames): the frame rate's count
         self.drawing = False                 # a picture sent and not yet drawn: none other is sent meanwhile
+        self.show_every_s, self.stats_every_s = SHOW_EVERY_S, STATS_EVERY_S     # low-power mode: fewer
         self._stop = False
 
     def stop(self) -> None:
@@ -81,10 +104,11 @@ class CameraThread(QtCore.QThread):
                 now = time.monotonic()
                 # every frame the screen keeps up with (the camera's own frames came 31-47 ms apart: a fixed
                 # 33 ms gate drew every other one), never a queue of frames behind the picture
-                if not self.drawing and now - shown_at >= SHOW_EVERY_S:
+                # (80% of the interval: frames 16.7 ms apart then give 30 a second drawn, not 21 for missing by one)
+                if not self.drawing and now - shown_at >= 0.8 * self.show_every_s:
                     shown_at = now
                     stats = None
-                    if now - stats_at >= STATS_EVERY_S:
+                    if now - stats_at >= self.stats_every_s:
                         stats_at, stats = now, picture.stats(f.rgb)
                     self._send(f, stats)
         finally:
@@ -756,6 +780,7 @@ class CameraPanel(QtWidgets.QWidget):
         t = CameraThread(self.make)
         t.adjust, t.average, t.corrections = self.adjust, self.average.value(), self.corrections
         t.binning = self.binning.currentData() or 1
+        self._power(t)
         t.opened.connect(self._opened)
         t.frame.connect(self._show)
         t.captured.connect(self._captured)
@@ -768,6 +793,19 @@ class CameraPanel(QtWidgets.QWidget):
         t.start()
         self._fps_at, self._fps_taken, self._fps_shown = time.monotonic(), 0, self._shown
         self._fps_timer.start(1000)
+
+    def _power(self, t=None, on: bool | None = None) -> None:
+        """Low-power mode's limits (app.power) on the camera's drawing: ``on`` as chosen, else as kept."""
+        from .. import power
+
+        if on is None:
+            main = widgets._main_window(self)
+            on = power.enabled(main._settings() if main is not None and getattr(main, "persist", False) else None)
+        lim = power.limits(on)
+        self._min_step = lim["min_step"]
+        t = t or self._thread
+        if t is not None:
+            t.show_every_s, t.stats_every_s = 1.0 / lim["draw_fps"], lim["stats_s"]
 
     def release(self) -> None:
         self._fps_timer.stop()
@@ -838,6 +876,8 @@ class CameraPanel(QtWidgets.QWidget):
             taken = (t.taken - self._fps_taken) / dt
             shown = (self._shown - self._fps_shown) / dt
             self.fps.setText(f"{taken:.1f} fps" + (f" ({shown:.0f} shown)" if shown < taken - 0.5 else ""))
+            self.fps.setToolTip(fps_limit(taken, shown, t.exposure_ms or self.exposure.value(), t.average,
+                                          1.0 / t.show_every_s))
         self._fps_at, self._fps_taken, self._fps_shown = now, t.taken, self._shown
 
     def _show(self, frame, shown, stats=None) -> None:
@@ -863,7 +903,10 @@ class CameraPanel(QtWidgets.QWidget):
         vb = self.image.getViewBox()
         if vb is not None:
             try:
-                step = int(max(1.0, min(4.0, vb.viewPixelSize()[0])))
+                px = vb.viewPixelSize()[0]
+                step = int(max(1.0, min(4.0, px)))
+                if px > 1.0:                     # shown smaller than taken: low-power mode draws every 2nd pixel
+                    step = max(step, getattr(self, "_min_step", 1))
             except Exception:                    # the view not laid out yet
                 step = 1
         self.image.setImage(img[::step, ::step] if step > 1 else img, autoLevels=False, levels=(0, 255))

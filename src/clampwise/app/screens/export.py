@@ -90,14 +90,22 @@ class ExportScreen(Screen):
     def _write(self, what: str, write) -> Path | None:
         if self.window.project is None:
             return None
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        folder = self.window.project.folder
+
+        def work():                               # its own connection: the window goes on with its own meanwhile
+            from ...project import Project
+
+            project = Project.open(folder)
+            try:
+                return write(project)
+            finally:
+                project.close()
+
         try:
-            out = write(self.window.project)
+            out = self.window.in_background(f"Writing the {what}", work)
         except Exception as exc:                  # the folder unwritable, the disk full: say so
             self.window.say(f"The {what} could not be written: {exc}")
             return None
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
         self._last = out
         self.last.setText(f"Written: {out}")
         self.open_last.setVisible(True)

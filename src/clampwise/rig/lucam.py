@@ -275,7 +275,8 @@ class Camera:
             return None
         n = max(1, int(average))
         size = w * h * depth
-        raw = (ctypes.c_ubyte * (size * n))()
+        # the frames' memory as numpy leaves it (ctypes would first write 2.9 MB of zeros a frame, 60 a second)
+        raw = (ctypes.c_ubyte * (size * n)).from_buffer(np.empty(size * n, np.uint8))
         if not lib.LucamTakeVideo(self.handle, n, raw):
             self.status = f"no frame came (error {lib.LucamGetLastError()})"
             return None
