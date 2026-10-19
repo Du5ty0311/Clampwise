@@ -53,8 +53,7 @@ class RulesDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
-        self.setLayout(lay)
-        self.resize(820, 520)
+        widgets.resizable(self, lay, "naming_rules", (820, 520))
         self._preview()
 
     def _add(self, rule: Rule) -> None:

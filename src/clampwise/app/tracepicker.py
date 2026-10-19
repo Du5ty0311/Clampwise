@@ -52,7 +52,6 @@ class TracePicker(QtWidgets.QDialog):
         self._sources()
         self._fill_sets()
         self._preview()
-        self.resize(1250, 780)
 
     # ---------------------------------------------------------------- layout
     def _build(self) -> None:
@@ -204,7 +203,7 @@ class TracePicker(QtWidgets.QDialog):
         self.ok = widgets.primary("Use these traces", self.accept, "Draw these traces in the figure's panel")
         buttons.addWidget(self.ok)
         outer.addLayout(buttons)
-        self.setLayout(outer)
+        widgets.resizable(self, outer, "trace_picker", (1250, 780))
 
     # ---------------------------------------------------------------- the sweeps
     def _sources(self) -> None:

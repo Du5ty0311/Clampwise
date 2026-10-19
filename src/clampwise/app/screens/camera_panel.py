@@ -33,7 +33,7 @@ class CameraThread(QtCore.QThread):
     opened = QtCore.Signal(object)           # {"exposure": Setting, "gain": Setting, "serial": int}
     frame = QtCore.Signal(object, object, object)   # the frame as taken, the picture as shown (uint8), its statistics
     captured = QtCore.Signal(str, object)    # "dark", "background" or "overlay", and the picture kept
-    exposure_set = QtCore.Signal(float)      # auto exposure's choice
+    exposure_set = QtCore.Signal(float, str)  # auto exposure's choice, and a note when it could not reach it
     failed = QtCore.Signal(str)
 
     def __init__(self, make=lucam.Camera) -> None:
@@ -69,7 +69,9 @@ class CameraThread(QtCore.QThread):
                 request, self.request = self.request, None
                 if request is not None and not self._serve(cam, request, exposure):
                     break
-                f = cam.frame(self.average)
+                f = self._averaged(cam)
+                if f is False:                       # interrupted: a request, a change or the stop came first
+                    continue
                 self.taken += 1
                 if f is None:
                     self.failed.emit(cam.status)
@@ -82,29 +84,66 @@ class CameraThread(QtCore.QThread):
                     stats = None
                     if now - stats_at >= STATS_EVERY_S:
                         stats_at, stats = now, picture.stats(f.rgb)
-                    table = picture.display_table(self.corrections, self.adjust) if picture.is_grey(f.rgb) else None
-                    self.drawing = True
-                    self.frame.emit(f, (f.rgb, table) if table is not None else
-                                    picture.shown(f.rgb, self.corrections, self.adjust), stats)
+                    self._send(f, stats)
         finally:
             cam.close()
 
+    def _send(self, f, stats=None) -> None:
+        table = picture.display_table(self.corrections, self.adjust) if picture.is_grey(f.rgb) else None
+        self.drawing = True
+        self.frame.emit(f, (f.rgb, table) if table is not None else
+                        picture.shown(f.rgb, self.corrections, self.adjust), stats)
+
+    def _averaged(self, cam):
+        """One picture of ``average`` frames, taken a frame at a time so that a button pressed meanwhile is served
+        within one frame, not after the whole average: the picture, None when no frame came, False when
+        interrupted."""
+        n = max(1, int(self.average))
+        if n == 1:
+            return cam.frame()
+        want = (self.exposure_ms, self.gain, n)
+        total, last, grey = None, None, False
+        for _ in range(n):
+            last = cam.frame()
+            if last is None:
+                return None
+            if total is None:
+                grey = picture.is_grey(last.rgb)               # a monochrome camera's grey: one channel summed
+            one = last.rgb[:, :, 0] if grey else last.rgb
+            total = one.astype(np.uint32) if total is None else total + one
+            if self._stop or self.request is not None or (self.exposure_ms, self.gain, self.average) != want:
+                return False
+        mean = ((total + n // 2) // n).astype(np.uint8)
+        rgb = np.broadcast_to(mean[:, :, None], mean.shape + (3,)) if grey else mean
+        return lucam.Frame(rgb, last.exposure_ms, last.gain, n, last.serial)
+
     def _serve(self, cam, request: tuple, exposure) -> bool:
         kind = request[0]
-        if kind == "auto":                       # the brightest 0.5% to 80% of full scale, a few frames at most
+        if kind == "auto":         # the brightest 0.5% to 80% of full scale: a few steps, the picture shown meanwhile
             low, high = (exposure.low, exposure.high) if exposure is not None else (0.01, 10000.0)
+            high = min(high, max(picture.AUTO_MAX_MS, low))
+            began, note, s = time.monotonic(), "", None
             for _ in range(8):
                 f = cam.frame()
                 if f is None:
                     self.failed.emit(cam.status)
                     return False
+                if not self.drawing:
+                    self._send(f)
                 s = picture.stats(f.rgb)
-                new = picture.next_exposure(cam.exposure_ms, s["p995"], low, high, s["clipped"])
+                new = picture.next_exposure(cam.exposure_ms, s["p995"], low, high, s["clipped"], picture.AUTO_STEP)
                 if abs(new - cam.exposure_ms) <= 0.08 * cam.exposure_ms and s["clipped"] <= 0.001:
+                    break
+                if new >= high and cam.exposure_ms >= high:
+                    break
+                if self._stop or time.monotonic() - began > picture.AUTO_BUDGET_S:
                     break
                 cam.set_exposure(new)
                 self.exposure_ms = new
-            self.exposure_set.emit(cam.exposure_ms)
+            if s is not None and cam.exposure_ms >= high and s["p995"] < 0.5 * picture.TARGET:
+                note = (f" The picture is still dark at {high:g} ms: is the light on and its path open? "
+                        "(Longer exposures can be typed.)")
+            self.exposure_set.emit(cam.exposure_ms, note)
             return True
         f = cam.frame(request[1])
         if f is None:
@@ -349,7 +388,7 @@ class AdjustDialog(QtWidgets.QDialog):
         self.um.valueChanged.connect(lambda v: panel.set_calibration(v))
         self.objectives.editingFinished.connect(lambda: panel.set_objectives(self.objectives.text()))
         self.bar.toggled.connect(lambda *_: self.changed.emit())
-        self.setLayout(lay)
+        widgets.resizable(self, lay, "camera_adjust", (640, 760))
         self._busy = False
 
     # values both ways, without loops
@@ -456,7 +495,6 @@ class CameraPanel(QtWidgets.QWidget):
         self.ruler = None                                     # a line to measure with
         self.ruler_text = pg.TextItem("", color="y", anchor=(0, 1))
         self.box.addItem(self.ruler_text)
-        lay.addWidget(self.view, 1)
         controls = QtWidgets.QGridLayout()                 # captions over values, then the actions: fits a narrow view
         controls.setHorizontalSpacing(theme.SPACE["s"])
         controls.setVerticalSpacing(theme.SPACE["xs"])
@@ -503,10 +541,30 @@ class CameraPanel(QtWidgets.QWidget):
         self.fps.setToolTip("Pictures a second: as the camera takes them (the exposure and averaging set it), and as "
                             "drawn here (at most 10 a second)")
         actions.addWidget(self.fps)
-        lay.addLayout(controls)
-        lay.addLayout(actions)
         self.status = label("", "muted", wrap=True)
-        lay.addWidget(self.status)
+        # the controls under the picture, as tall as the user drags them (scrolled when made smaller than they are)
+        below = box("v", "xs")
+        below.addLayout(controls)
+        below.addLayout(actions)
+        below.addWidget(self.status)
+        below.addStretch(1)
+        holder = QtWidgets.QWidget()
+        holder.setLayout(below)
+        self.controls_area = QtWidgets.QScrollArea()
+        self.controls_area.setWidgetResizable(True)
+        self.controls_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.controls_area.setWidget(holder)
+        self.controls_area.setMinimumHeight(0)
+        self.split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.split.setChildrenCollapsible(False)
+        self.split.addWidget(self.view)
+        self.split.addWidget(self.controls_area)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        self.split.setHandleWidth(theme.SPACE["s"])
+        self.split.handle(1).setToolTip("Drag to give the controls more or less room")
+        self.split.splitterMoved.connect(lambda *_: self.save_settings())
+        lay.addWidget(self.split, 1)
         self.setLayout(lay)
         self._shown = 0                                       # pictures drawn (the frame rate's other count)
         self._fps_timer = QtCore.QTimer(self)
@@ -533,9 +591,9 @@ class CameraPanel(QtWidgets.QWidget):
         t.opened.connect(self._opened)
         t.frame.connect(self._show)
         t.captured.connect(self._captured)
-        t.exposure_set.connect(lambda ms: (self.exposure.blockSignals(True), self.exposure.setValue(ms),
-                                           self.exposure.blockSignals(False), self.status.setText(
-                                               f"Auto exposure: {ms:.2f} ms.")))
+        t.exposure_set.connect(lambda ms, note: (self.exposure.blockSignals(True), self.exposure.setValue(ms),
+                                                 self.exposure.blockSignals(False), self.status.setText(
+                                                     f"Auto exposure: {ms:.2f} ms.{note}")))
         t.failed.connect(self._failed)
         t.finished.connect(self._finished)
         self._thread = t
@@ -928,6 +986,9 @@ class CameraPanel(QtWidgets.QWidget):
                                             if 20.0 in self.objectives else 0) or 0))
         self.dialog.bar.setChecked(str(s.value("camera/scale_bar", "true")).lower() == "true")
         self.average.setValue(int(s.value("camera/average", 1) or 1))
+        split = s.value("camera/split")
+        if split is not None:
+            self.split.restoreState(split)
 
     def save_settings(self) -> None:
         if self._loading or not getattr(self.window, "persist", False):
@@ -947,3 +1008,4 @@ class CameraPanel(QtWidgets.QWidget):
         s.setValue("camera/objective_index", self.objective.value())
         s.setValue("camera/scale_bar", self.dialog.bar.isChecked())
         s.setValue("camera/average", self.average.value())
+        s.setValue("camera/split", self.split.saveState())

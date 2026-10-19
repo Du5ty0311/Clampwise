@@ -27,7 +27,6 @@ class ProtocolEditor(QtWidgets.QDialog):
     def __init__(self, parent, path: str, palette) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Edit {Path(path).stem}")
-        self.resize(1000, 720)
         self.palette_ = palette
         self.source = Path(path)
         self.edit = protocol_edit.load(path)
@@ -97,7 +96,7 @@ class ProtocolEditor(QtWidgets.QDialog):
         bottom.addWidget(widgets.primary("Save", self.save, "Save as a new protocol beside the original (the "
                                                             "original is never changed)"))
         lay.addLayout(bottom)
-        self.setLayout(lay)
+        widgets.resizable(self, lay, "protocol_editor", (1000, 720))
         self._fill()
         for w in (self.sweeps, self.interval, self.length):
             w.valueChanged.connect(self.changed)

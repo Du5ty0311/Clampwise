@@ -293,3 +293,43 @@ def test_auto_exposure_brings_the_brightest_to_80_percent_and_backs_off_when_cli
     assert picture.next_exposure(20.0, s["p995"], 0.016, 500.0) == pytest.approx(20.0 * 204 / 100)
     assert picture.next_exposure(20.0, 255.0, 0.016, 500.0, clipped=0.2) == 10.0
     assert picture.next_exposure(400.0, 10.0, 0.016, 500.0) == 500.0                 # held to the camera's range
+    assert picture.next_exposure(20.0, 2.0, 0.016, 1000.0, step=4.0) == 80.0       # a dark picture: 4x, not 100x
+
+
+class _DarkCamera:
+    """A camera in the dark (the light off): every frame black; counts its frames and the exposures set."""
+
+    def __init__(self):
+        self.exposure_ms, self.gain, self.serial, self.status, self.frames = 37.0, 1.0, 1, "", 0
+
+    def frame(self, average=1):
+        self.frames += 1
+        grey = np.zeros((6, 8), np.uint8)                                          # monochrome, as the rig's
+        return lucam.Frame(np.broadcast_to(grey[:, :, None], (6, 8, 3)), self.exposure_ms, self.gain, 1, 1)
+
+    def set_exposure(self, ms, gain=None):
+        self.exposure_ms = ms
+
+
+def test_auto_exposure_in_the_dark_stops_at_a_second_and_says_so_instead_of_hanging():
+    from types import SimpleNamespace
+
+    from clampwise.app.screens.camera_panel import CameraThread
+
+    t, cam, said = CameraThread(), _DarkCamera(), []
+    t.exposure_set.connect(lambda ms, note: said.append((ms, note)))
+    t.frame.connect(lambda *_: setattr(t, "drawing", False))
+    assert t._serve(cam, ("auto",), SimpleNamespace(low=0.016, high=15000.0))
+    assert cam.exposure_ms <= picture.AUTO_MAX_MS and cam.frames <= 8           # never 15 s frames, a few at most
+    assert said and "still dark" in said[0][1] and "light" in said[0][1]
+
+
+def test_an_averaged_picture_gives_way_to_a_button_pressed_meanwhile():
+    from clampwise.app.screens.camera_panel import CameraThread
+
+    t, cam = CameraThread(), _DarkCamera()
+    t.average = 64
+    f = t._averaged(cam)
+    assert f.averaged == 64 and picture.is_grey(f.rgb) and cam.frames == 64
+    cam.frames, t.request = 0, ("auto",)
+    assert t._averaged(cam) is False and cam.frames == 1                         # served after one frame, not 64

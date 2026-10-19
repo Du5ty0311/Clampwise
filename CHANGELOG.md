@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.5.1 — 2026-10-19
+
+- **Auto exposure no longer freezes Clampwise in the dark.** On a dark picture (the light off, a filter cube being
+  changed) it multiplied the exposure up to the camera's maximum (88 s a frame on the rig's camera) and every button
+  then waited for those frames. It now changes the exposure at most 4 times a step, goes no longer than 1 s, stops
+  after about 3 s, keeps the picture moving meanwhile, and says when the picture is still dark ("is the light
+  on?"); a longer exposure can still be typed.
+- **Buttons answer within one frame while averaging.** An averaged picture is taken a frame at a time, so a change
+  or a button pressed meanwhile is served at once instead of after all the frames.
+- **Every pop-up window can be sized freely.** Adjust..., the protocol editor, the trace picker, the naming rules,
+  the finder, the digitizer and the figure builder's small windows have a grip in their corner, scroll their content
+  when made smaller than it, and open again at the size and place they were left.
+- **The camera's controls get the room you give them.** Under the picture, the controls (exposure, gain, average,
+  objective, the buttons) sit below a divider to drag; they scroll when small, and the split is kept, in Live and in
+  the camera's own window.
+
 ## 1.5.0 — 2026-10-18
 
 - **The compass follows the slice's plane.** Horizontal (rostral-caudal and medial-lateral in the picture), coronal

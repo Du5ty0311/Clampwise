@@ -65,6 +65,54 @@ def box(direction: str = "v", spacing: str = "s", margins: str | None = None) ->
     return lay
 
 
+def _main_window(w: QtWidgets.QWidget | None):
+    """The Clampwise window ``w`` belongs to (the one that keeps the settings), or None."""
+    while w is not None and not hasattr(w, "persist"):
+        w = w.parentWidget()
+    return w
+
+
+class _KeepSize(QtCore.QObject):
+    """Saves a window's size and place under its key whenever it is moved, resized or closed."""
+
+    def __init__(self, window, key: str, parent) -> None:
+        super().__init__(parent)
+        self.window, self.key = window, key
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Move, QtCore.QEvent.Hide) and obj.isVisible():
+            self.window._settings().setValue(f"windows/{self.key}", obj.saveGeometry())
+        return False
+
+
+def resizable(window: QtWidgets.QWidget, lay: QtWidgets.QLayout, key: str = "",
+              size: tuple[int, int] | None = None) -> QtWidgets.QScrollArea:
+    """``lay`` as ``window``'s content, in a window sized freely: a grip in its corner, the content scrolled when
+    the window is made smaller than it (never a minimum size it cannot go below), and its size and place kept
+    between sessions under ``key`` (``size`` until it has one)."""
+    inner = QtWidgets.QWidget()
+    inner.setLayout(lay)
+    area = QtWidgets.QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QtWidgets.QFrame.NoFrame)
+    area.setWidget(inner)
+    outer = box("v", "xs")
+    outer.addWidget(area)
+    window.setLayout(outer)
+    window.setMinimumSize(240, 160)
+    if isinstance(window, QtWidgets.QDialog):
+        window.setSizeGripEnabled(True)
+    if size:
+        window.resize(*size)
+    main = _main_window(window.parentWidget())
+    if key and main is not None and getattr(main, "persist", False):
+        saved = main._settings().value(f"windows/{key}")
+        if saved is not None:
+            window.restoreGeometry(saved)
+        window.installEventFilter(_KeepSize(main, key, window))
+    return area
+
+
 class Badge(QtWidgets.QLabel):
     """One badge style for every flag (B0 item 15): a symbol and a short word,
     never colour alone; the full reason, limit and source in the tooltip."""

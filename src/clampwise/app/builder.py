@@ -520,9 +520,8 @@ class DigitizeDialog(QtWidgets.QDialog):
         fix.addStretch(1)
         lay.addLayout(fix)
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Z"), self, self.undo_last)
-        self.setLayout(lay)
+        widgets.resizable(self, lay, "digitize", (900, 700))
         self._mode("calibrate")
-        self.resize(900, 700)
 
     def _mode(self, mode: str) -> None:
         self.mode = mode
@@ -1654,7 +1653,7 @@ class Builder(QtWidgets.QMainWindow):
         lay.addWidget(widgets.field("Name of the values column (with units)", value))
         ok = widgets.primary("Reshape", dlg.accept)
         lay.addWidget(ok)
-        dlg.setLayout(lay)
+        widgets.resizable(dlg, lay, "reshape")
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             cols = [i.text() for i in sorted(lst.selectedItems(), key=lst.row)]
             if len(cols) >= 2:
@@ -1864,8 +1863,7 @@ class Builder(QtWidgets.QMainWindow):
         text = QtWidgets.QPlainTextEdit(self.methods_text())
         lay.addWidget(text, 1)
         lay.addWidget(widgets.button("Copy", lambda: QtWidgets.QApplication.clipboard().setText(text.toPlainText())))
-        dlg.setLayout(lay)
-        dlg.resize(700, 420)
+        widgets.resizable(dlg, lay, "methods_text", (700, 420))
         dlg.exec_()
 
     # ---------------------------------------------------------------- drawing and saving

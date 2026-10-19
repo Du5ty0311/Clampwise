@@ -607,6 +607,13 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
                                         "ML cut across")
     panel.dialog.naming.setCurrentText("Letters: A P D V M L")
     assert set(panel.compass_text) == {"D", "V", "A", "P"}
+    # sized freely: the Adjust window shrinks below its content (which then scrolls); the controls' share is dragged
+    assert panel.dialog.isSizeGripEnabled() and panel.dialog.minimumSize().height() <= 200
+    panel.dialog.resize(300, 200)
+    assert panel.dialog.height() <= 220
+    assert panel.split.count() == 2 and panel.split.widget(1) is panel.controls_area
+    panel.split.setSizes([500, 60])
+    assert panel.split.sizes()[1] <= 80
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
 

@@ -282,6 +282,9 @@ def preset_from_text(text: str) -> Adjust:
 
 LUTS = ("colour", "grey", "green", "magenta", "fire")
 TARGET = 0.80 * 255                  # auto exposure: the brightest 0.5% at 80% of full scale, nothing clipped
+AUTO_MAX_MS = 1000.0                 # auto exposure goes no longer (a longer one is typed): a dark picture is no light
+AUTO_STEP = 4.0                      # each of its steps at most 4 times longer or shorter
+AUTO_BUDGET_S = 3.0                  # and it stops trying after about this long
 
 
 @dataclass
@@ -409,10 +412,14 @@ def stats(raw: np.ndarray, bins: int = 64) -> dict:
     return {"hist": hist, "p995": p995, "mean": mean, "clipped": float(clipped), "black": float(black)}
 
 
-def next_exposure(ms: float, p995: float, low: float, high: float, clipped: float = 0.0) -> float:
-    """An exposure that brings the brightest 0.5% to 80% of full scale (halved while anything is clipped)."""
+def next_exposure(ms: float, p995: float, low: float, high: float, clipped: float = 0.0,
+                  step: float | None = None) -> float:
+    """An exposure that brings the brightest 0.5% to 80% of full scale (halved while anything is clipped), at most
+    ``step`` times longer or shorter than ``ms`` when given (a dark picture asks for 100 times more at once)."""
     if clipped > 0.001 or p995 >= 254:
         new = ms / 2
     else:
         new = ms * TARGET / max(p995, 1.0)
+    if step:
+        new = min(max(new, ms / step), ms * step)
     return float(min(max(new, low), high))
