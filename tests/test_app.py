@@ -612,8 +612,47 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     panel.dialog.resize(300, 200)
     assert panel.dialog.height() <= 220
     assert panel.split.count() == 2 and panel.split.widget(1) is panel.controls_area
-    panel.split.setSizes([500, 60])
-    assert panel.split.sizes()[1] <= 80
+    # the adjustable histogram: its handles are the levels shown black and white; Reset all puts them back
+    assert _wait(qapp, lambda: panel.levels.counts is not None)
+    panel.levels.set_levels(40, 180, 1.0)
+    assert (panel.adjust.black, panel.adjust.white) == (40.0, 180.0) and panel.levels.region.getRegion() == (40, 180)
+    assert panel.levels.mid.value() == pytest.approx(110.0)                       # mid-grey half way at gamma 1
+    panel.levels.mid.setValue(40 + 140 * 0.25)                                    # dragged left: dim parts lifted
+    assert panel.adjust.gamma == pytest.approx(2.0, abs=0.01) and panel.levels.gamma.value() == pytest.approx(2.0)
+    assert panel.controls_area.minimumHeight() >= 40                              # the buttons never squeezed away
+    panel.dialog.show_adjust(picture.Adjust(), apply=True)
+    assert (panel.adjust.black, panel.adjust.white) == (0.0, 255.0) and panel.levels.white.value() == 255
+    # binning: off unless chosen; on, the picture is half as wide and each pixel twice the um across
+    assert panel.binning.currentData() == 1
+    um = panel.scale()[0]
+    panel.binning.setCurrentIndex(panel.binning.findData(2))
+    assert panel._thread.binning == 2 and panel.scale()[0] == pytest.approx(2 * um)
+    assert _wait(qapp, lambda: panel.last is not None and panel.last.rgb.shape[:2] == (3, 4))
+    panel.binning.setCurrentIndex(0)
+    assert _wait(qapp, lambda: panel.last.rgb.shape[:2] == (6, 8))
+    # the Polygon in the patterned light view: Use here (PolyScan closed) shows its controls there
+    from test_polygon import FakeSDK
+
+    from clampwise.rig.polygon import Polygon
+
+    light, sdk = live.views["light"], FakeSDK()
+    assert not light.own and not live.patterned.polygon.connected                    # nothing taken until asked
+    live.patterned.polygon = Polygon(sdk, polyscan_running=lambda: False)
+    light.source = None
+    light.use_button.click()                                                     # found without the window waiting
+    assert light.own and live.patterned.wait() and live.patterned.polygon.connected
+    assert live.patterned.isVisibleTo(light)
+    assert light.use_button.text() == "Let go"
+    live.patterned.source.setCurrentText("Grid")
+    live.patterned.make_steps()
+    assert live.patterned.list.count() == 100 and live.patterned.list.item(0).text() == "1"
+    live.patterned.project()
+    assert live.patterned.wait() and live.patterned.polygon.shown == "1" and sdk.image is not None
+    light.use_button.click()                                                     # Let go: PolyScan can have it
+    assert not light.own and live.patterned.wait() and not live.patterned.polygon.connected
+    assert ("uninit",) in sdk.calls
+    panel.split.setSizes([500, 10])                                               # dragged right down:
+    assert panel.split.sizes()[1] == panel.controls_area.minimumHeight()          # the buttons still in view
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
 

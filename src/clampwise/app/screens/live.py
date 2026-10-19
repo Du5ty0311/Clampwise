@@ -523,6 +523,16 @@ class LiveScreen(Screen):
         self.camera = CameraPanel(window, folder=self._snapshot_folder)
         self.views["camera"].hold(self.camera, self.use_camera, self.camera.release)
         self.camera.released.connect(lambda: self.views["camera"].set_own(False))
+        from .polygon_panel import PolygonPanel
+
+        self.patterned = PolygonPanel(self.camera)         # the Polygon in Clampwise (rig.polygon), PolyScan closed
+        self.views["light"].hold(
+            self.patterned, self.use_light, self.patterned.release,
+            "Run the Polygon in Clampwise: patterns, PolyScan's sequences, shapes drawn on the camera's picture "
+            "(PolyScan must be closed)",
+            "the patterned light held by Clampwise; its light is still switched by the acquisition (Let go gives it "
+            "back)")
+        self.patterned.released.connect(lambda: self.views["light"].set_own(False))
         from .acquisition_panel import AcquisitionPanel
 
         self.recorder = AcquisitionPanel(window)           # the acquisition in Clampwise (rig.recorder)
@@ -715,6 +725,15 @@ class LiveScreen(Screen):
             return
         view.set_own(True)
         self.camera.take()
+
+    # ---- the Polygon in Clampwise (rig.polygon): taken on request while PolyScan is closed
+    def use_light(self) -> None:
+        view = self.views["light"]
+        if view.source is not None:
+            self.window.say("PolyScan is open and holds the Polygon: close it, then Use here.")
+            return
+        view.set_own(True)
+        self.patterned.take()                            # found on its own thread (25 s): the window goes on
 
     def toggle_controls(self) -> None:
         shown = not self.amp_controls.isVisible()
@@ -1028,6 +1047,9 @@ class LiveScreen(Screen):
     def shutdown(self) -> None:
         self._unfold_details()                           # the user's own choice is what is kept
         self.camera.release()                            # the camera is given back when Clampwise closes
+        if self.patterned.polygon.connected or self.patterned._opening:      # and the Polygon, for PolyScan
+            self.patterned.release()
+            self.patterned.wait(10.0)
         if self.recorder.busy:                           # a recording ends as a whole file, never cut off
             self.recorder.rec.stop()
             self.recorder.rec.wait(30)
@@ -1105,10 +1127,12 @@ class LiveScreen(Screen):
                                                  "open" if snap.clampex_open else "not open",
                                                  f"last file {f.name} ({f.outcome})" if f else "")
         light = snap.light
-        self.views["light"].set_status("ok" if snap.light_open else "muted", "open" if snap.light_open else "not open",
-                                       f"{light.sequence or 'no pattern loaded'}"
-                                       + (f", {light.regions} regions" if light and light.regions else "")
-                                       if light else "", light.describe(named=False) if light else "")
+        if not self.views["light"].own:                  # while Clampwise holds the Polygon, its view says so
+            self.views["light"].set_status(
+                "ok" if snap.light_open else "muted", "open" if snap.light_open else "not open",
+                f"{light.sequence or 'no pattern loaded'}"
+                + (f", {light.regions} regions" if light and light.regions else "")
+                if light else "", light.describe(named=False) if light else "")
         pic = snap.picture
         if not self.views["camera"].own:                 # while Clampwise holds the camera, its view says so
             self.views["camera"].set_status("ok" if snap.camera_open else "muted",

@@ -333,3 +333,33 @@ def test_an_averaged_picture_gives_way_to_a_button_pressed_meanwhile():
     assert f.averaged == 64 and picture.is_grey(f.rgb) and cam.frames == 64
     cam.frames, t.request = 0, ("auto",)
     assert t._averaged(cam) is False and cam.frames == 1                         # served after one frame, not 64
+
+
+def test_binning_adds_n_by_n_pixels_into_one_and_keeps_a_grey_frame_grey():
+    rng = np.random.default_rng(3)
+    g = rng.integers(0, 70, (9, 13), dtype=np.uint8)                              # odd edges: cut off
+    rgb = np.broadcast_to(g[:, :, None], (9, 13, 3))
+    b = picture.bin_sum(rgb, 2)
+    want = np.minimum(g[:8, :12].reshape(4, 2, 6, 2).sum(axis=(1, 3)), 255)
+    assert b.shape == (4, 6, 3) and picture.is_grey(b) and np.array_equal(b[:, :, 0], want)
+    assert picture.bin_sum(np.full((8, 8, 3), 200, np.uint8), 4).max() == 255     # clipped at full scale
+    assert picture.bin_sum(rgb, 1) is rgb                                          # off: the frame as taken
+
+
+def test_the_levels_show_the_black_point_black_and_the_white_point_white():
+    a = picture.Adjust(black=50.0, white=150.0)
+    g = np.array([[0, 50, 100, 150, 255]], np.uint8)
+    out = picture.apply(np.broadcast_to(g[:, :, None], (1, 5, 3)), a)[0, :, 0]
+    assert list(out[[0, 1, 3, 4]]) == [0, 0, 255, 255] and abs(int(out[2]) - 128) <= 1
+    table = picture.display_table(picture.Corrections(show_clipped=False), a)
+    assert table[50, 0] == 0 and table[150, 0] == 255 and not picture.Adjust().changed()
+
+
+def test_the_camera_thread_bins_what_it_takes_when_asked():
+    from clampwise.app.screens.camera_panel import CameraThread
+
+    t, cam = CameraThread(), _DarkCamera()
+    assert t._binned(cam.frame()).rgb.shape == (6, 8, 3)                          # off by default
+    t.binning = 2
+    f = t._binned(cam.frame())
+    assert f.rgb.shape == (3, 4, 3) and "2 x 2 binned" in f.notes

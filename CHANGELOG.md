@@ -1,7 +1,34 @@
 # Changelog
 
-## 1.5.1 — 2026-10-19
+## 1.6.0 — 2026-10-19
 
+- **The Polygon, from Clampwise.** Live's patterned light view, **Use here**, sets where the light goes on the
+  slice and holds it, while Clampex switches the light as your protocol says (PolyScan closed: one program holds
+  the Polygon).
+  Patterns: a full field, a spot, a numbered grid (1 at the top left along each row, as PolyScan numbers its
+  grids), a line of spots, an image file, PolyScan's own sequences (both its earlier and later files: grids, cells,
+  rectangles, ellipses and drawn polygons), or shapes drawn on the camera's picture. Its steps are shown one at a
+  time (chosen, previous and next, or the next every few seconds), each written to polygon_log.csv in the cell's
+  folder. **Test and calibrate** learns which byte lights a mirror and where the Polygon's field lies on the
+  camera's picture, from the picture itself; the steps' outlines are then drawn over it. Spots are round on the
+  slice: the mirrors are diamonds in rows half a mirror apart (a 16:10 field).
+  PolyScan4's driver is used (the newest installed; PolyScan2's older one finds no Polygon1000), and every
+  call to it runs on a thread of its own: finding the Polygon takes it about 25 s, shown with a bar and the
+  seconds while the window goes on. **Lit by 0** swaps lit and unlit by hand. The light test and calibration work
+  with the light in pulses too (the protocol playing): each test picture waits for a pulse and reads the frame it
+  lit. A region drawn over a neuron is lit alone, and dragged onto another cell it is shown there at once.
+- **An adjustable histogram under the camera's picture**, set by hand as ImageJ's Brightness & Contrast: the
+  picture's histogram (log counts, so the few bright pixels of dim fluorescence show) with a band whose edges are
+  the grey levels shown black and white (contrast), the band itself dragged to move both (brightness), and a line
+  inside it for the level shown mid-grey (gamma: dim parts lifted); the curve over it is how each level is shown.
+  Each can be typed; Auto fits black and white to the picture, Reset shows every level as taken. The buttons
+  under the picture stay in view however small the controls are made. They are kept
+  with the other adjustments (presets, the snapshot as shown); the picture saved as taken never changes.
+- **Binning, when chosen (off by default).** Binning 2 x 2 or 4 x 4 adds that many pixels into one: a dim
+  picture (a thick slice) 4 or 16 times brighter, so a quarter or a sixteenth of the exposure gives the same picture
+  and that many more pictures a second (on the rig's camera: 100 ms, 10 a second, becomes 25 ms and about 40 a
+  second), at half or a quarter of the resolution each way. Adding them costs no frame rate (62 a second, the
+  camera's most, at 10 ms). The scale bar, measuring, snapshots and the Polygon's outlines follow it.
 - **Auto exposure no longer freezes Clampwise in the dark.** On a dark picture (the light off, a filter cube being
   changed) it multiplied the exposure up to the camera's maximum (88 s a frame on the rig's camera) and every button
   then waited for those frames. It now changes the exposure at most 4 times a step, goes no longer than 1 s, stops

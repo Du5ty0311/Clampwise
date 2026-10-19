@@ -23,6 +23,8 @@ from scipy import ndimage
 class Adjust:
     """What is shown: each at its neutral value changes nothing."""
 
+    black: float = 0.0            # the levels (the histogram's handles): this grey level and below shown black,
+    white: float = 255.0          # this one and above white, those between stretched over the whole range
     brightness: float = 0.0       # -1..1: added to every pixel (a fraction of the full range)
     contrast: float = 1.0         # 0..3: stretched about mid-grey
     gamma: float = 1.0            # 0.2..5: below 1 lifts the shadows (dim fluorescence), above darkens them
@@ -58,9 +60,17 @@ def lum8(rgb: np.ndarray) -> np.ndarray:
     return (rgb.sum(axis=2, dtype=np.uint16) // 3).astype(np.uint8)
 
 
+def _levels(x: np.ndarray, a: Adjust) -> np.ndarray:
+    """``x`` (0-1, as taken) with the levels set: ``a.black`` and below to 0, ``a.white`` and above to 1."""
+    if a.black == 0.0 and a.white == 255.0:
+        return x
+    lo, hi = float(a.black) / 255.0, float(a.white) / 255.0
+    return np.clip((x - lo) / max(hi - lo, 1.0 / 255.0), 0.0, 1.0)
+
+
 def _point_lut(a: Adjust, gain: float) -> np.ndarray:
     """What ``apply`` does to one channel's 256 levels when only point operations are set."""
-    x = np.arange(256, dtype=np.float32) / 255.0 * gain
+    x = _levels(np.arange(256, dtype=np.float32) / 255.0, a) * gain
     x = np.clip((x - 0.5) * a.contrast + 0.5 + a.brightness, 0.0, 1.0)
     if a.gamma != 1.0:
         x = x ** (1.0 / a.gamma)
@@ -81,7 +91,7 @@ def apply(rgb: np.ndarray, a: Adjust) -> np.ndarray:
         for c, gain in enumerate((a.red, a.green, a.blue)):
             out[:, :, c] = _point_lut(a, gain)[rgb[:, :, c]]
         return out
-    x = rgb.astype(np.float32) / 255.0
+    x = _levels(rgb.astype(np.float32) / 255.0, a)
     x = x * np.array([a.red, a.green, a.blue], np.float32)
     if a.auto_levels:
         lo, hi = np.percentile(x, (0.5, 99.5))
@@ -409,7 +419,30 @@ def stats(raw: np.ndarray, bins: int = 64) -> dict:
         top = raw.max(axis=2)
         clipped = float(np.count_nonzero(top == 255)) / top.size
         black = float(np.count_nonzero(top == 0)) / top.size
-    return {"hist": hist, "p995": p995, "mean": mean, "clipped": float(clipped), "black": float(black)}
+    return {"hist": hist, "counts": counts, "p995": p995, "mean": mean, "clipped": float(clipped),
+            "black": float(black)}
+
+
+BINNINGS = (1, 2, 4)
+
+
+def bin_sum(rgb: np.ndarray, n: int) -> np.ndarray:
+    """``n`` x ``n`` pixels added into one, clipped at full scale: n squared times the light a pixel (a dim
+    fluorescent picture as bright at 1/n squared of the exposure, so that many times faster), at 1/n of the
+    resolution each way. Added from strided views, never a reshaped copy (3.6 ms for 2 x 2 on the rig camera's
+    2.9 MP frame; a reshape and sum took 18 ms)."""
+    if n <= 1:
+        return rgb
+    grey = is_grey(rgb)
+    x = rgb[:, :, 0] if grey else rgb
+    h, w = x.shape[0] // n * n, x.shape[1] // n * n
+    acc = x[0:h:n, 0:w:n].astype(np.uint16)
+    for i in range(n):
+        for j in range(n):
+            if i or j:
+                acc += x[i:h:n, j:w:n]
+    out = np.minimum(acc, 255).astype(np.uint8)
+    return np.broadcast_to(out[:, :, None], out.shape + (3,)) if grey else out
 
 
 def next_exposure(ms: float, p995: float, low: float, high: float, clipped: float = 0.0,

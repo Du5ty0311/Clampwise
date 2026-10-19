@@ -45,6 +45,7 @@ class CameraThread(QtCore.QThread):
         self.adjust = picture.Adjust()
         self.corrections = picture.Corrections()
         self.request: tuple | None = None    # ("dark" | "background" | "overlay", frames) or ("auto",)
+        self.binning = 1                     # n x n pixels added into one (picture.bin_sum): off at 1
         self.taken = 0                       # pictures taken (each of ``average`` frames): the frame rate's count
         self.drawing = False                 # a picture sent and not yet drawn: none other is sent meanwhile
         self._stop = False
@@ -72,6 +73,7 @@ class CameraThread(QtCore.QThread):
                 f = self._averaged(cam)
                 if f is False:                       # interrupted: a request, a change or the stop came first
                     continue
+                f = self._binned(f)
                 self.taken += 1
                 if f is None:
                     self.failed.emit(cam.status)
@@ -87,6 +89,14 @@ class CameraThread(QtCore.QThread):
                     self._send(f, stats)
         finally:
             cam.close()
+
+    def _binned(self, f):
+        """The frame with its pixels added n x n when binning is on (the corrections kept from it match it)."""
+        n = self.binning
+        if f is None or n <= 1:
+            return f
+        return lucam.Frame(picture.bin_sum(f.rgb, n), f.exposure_ms, f.gain, f.averaged, f.serial,
+                           list(f.notes) + [f"{n} x {n} binned"])
 
     def _send(self, f, stats=None) -> None:
         table = picture.display_table(self.corrections, self.adjust) if picture.is_grey(f.rgb) else None
@@ -124,7 +134,7 @@ class CameraThread(QtCore.QThread):
             high = min(high, max(picture.AUTO_MAX_MS, low))
             began, note, s = time.monotonic(), "", None
             for _ in range(8):
-                f = cam.frame()
+                f = self._binned(cam.frame())
                 if f is None:
                     self.failed.emit(cam.status)
                     return False
@@ -145,7 +155,7 @@ class CameraThread(QtCore.QThread):
                         "(Longer exposures can be typed.)")
             self.exposure_set.emit(cam.exposure_ms, note)
             return True
-        f = cam.frame(request[1])
+        f = self._binned(cam.frame(request[1]))
         if f is None:
             self.failed.emit(cam.status)
             return False
@@ -456,6 +466,147 @@ class AdjustDialog(QtWidgets.QDialog):
             self.fill_presets()
 
 
+class LevelsHistogram(QtWidgets.QWidget):
+    """The picture's histogram with its levels, as ImageJ's Brightness & Contrast sets them by hand: the band's left
+    edge is the grey level shown black, its right edge the one shown white (contrast: the band narrower is more of
+    it), the whole band dragged moves both (brightness), and the line inside it is the level shown mid-grey
+    (gamma: to its left lifts the dim parts). The curve over the histogram is how each level is shown. Each can be
+    typed too; Auto fits black and white to the picture (its darkest and brightest 0.1% left out), Reset shows every
+    level as taken. Log counts show the few bright pixels of a dim fluorescent picture beside the many dark ones."""
+
+    changed = QtCore.Signal(float, float, float)          # black, white, gamma
+
+    def __init__(self, palette) -> None:
+        super().__init__()
+        self.counts: np.ndarray | None = None
+        self._b, self._w, self._g = 0.0, 255.0, 1.0
+        self.plot = pg.PlotWidget()
+        self.plot.setMinimumHeight(90)
+        self.plot.setMouseEnabled(False, False)
+        self.plot.setMenuEnabled(False)
+        self.plot.hideAxis("left")
+        self.plot.setXRange(0, 256, padding=0.01)
+        self.plot.setToolTip("Drag the band's edges for black and white (contrast), the band itself to move both "
+                             "(brightness), the line inside it for mid-grey (gamma). What is saved as taken never "
+                             "changes.")
+        theme.style_plot(self.plot, palette)
+        self.bars = self.plot.plot([], [], stepMode="center", fillLevel=0, brush=theme.series(palette)[0])
+        self.mapping = pg.PlotCurveItem(pen=pg.mkPen((255, 220, 0), width=2))
+        self.plot.addItem(self.mapping)
+        self.region = pg.LinearRegionItem((0, 255), bounds=(0, 255), brush=pg.mkBrush(255, 220, 0, 30))
+        self.region.sigRegionChanged.connect(self._dragged)
+        self.plot.addItem(self.region)
+        self.mid = pg.InfiniteLine(127.5, movable=True, pen=pg.mkPen((255, 220, 0), width=2, style=QtCore.Qt.DashLine))
+        self.mid.sigPositionChanged.connect(self._mid_dragged)
+        self.plot.addItem(self.mid)
+        self.black, self.white = QtWidgets.QSpinBox(), QtWidgets.QSpinBox()
+        self.black.setRange(0, 254)
+        self.white.setRange(1, 255)
+        self.white.setValue(255)
+        self.black.setToolTip("Shown black: this grey level and below")
+        self.white.setToolTip("Shown white: this grey level and above")
+        self.gamma = QtWidgets.QDoubleSpinBox()
+        self.gamma.setRange(0.2, 5.0)
+        self.gamma.setSingleStep(0.05)
+        self.gamma.setDecimals(2)
+        self.gamma.setValue(1.0)
+        self.gamma.setToolTip("Gamma: above 1 lifts the dim parts (dim fluorescence), below 1 darkens them")
+        for s in (self.black, self.white, self.gamma):
+            s.valueChanged.connect(self._typed)
+        self.log = QtWidgets.QCheckBox("Log")
+        self.log.setChecked(True)
+        self.log.setToolTip("Counts on a log scale: the few bright pixels seen beside the many dark ones")
+        self.log.toggled.connect(lambda *_: self._draw())
+        row = box("h", "s")
+        for caption, w in (("Black", self.black), ("White", self.white), ("Gamma", self.gamma)):
+            row.addWidget(label(caption, "muted"))
+            row.addWidget(w)
+        row.addWidget(widgets.button("Auto", self.auto, "Fit black and white to the picture: its darkest and "
+                                                        "brightest 0.1% left out", quiet=True))
+        row.addWidget(widgets.button("Reset", lambda: self.set_levels(0, 255, 1.0), "Every level as taken (0 to "
+                                                                                  "255, gamma 1)", quiet=True))
+        row.addWidget(self.log)
+        row.addStretch(1)
+        lay = box("v", "xs")
+        lay.addWidget(self.plot, 1)
+        lay.addLayout(row)
+        self.setLayout(lay)
+        self._quiet = False
+        self._place_mid()
+
+    def set_counts(self, counts: np.ndarray) -> None:
+        self.counts = np.asarray(counts)
+        self._draw()
+
+    def _top(self) -> float:
+        if self.counts is None:
+            return 1.0
+        y = np.log10(1.0 + self.counts) if self.log.isChecked() else self.counts.astype(float)
+        return float(max(y.max(), 1e-9))
+
+    def _draw(self) -> None:
+        if self.counts is not None:
+            y = np.log10(1.0 + self.counts) if self.log.isChecked() else self.counts.astype(float)
+            self.bars.setData(np.arange(len(y) + 1, dtype=float), y)
+        x = np.linspace(0, 255, 256)
+        shown = np.clip((x - self._b) / max(self._w - self._b, 1.0), 0, 1) ** (1.0 / self._g)
+        self.mapping.setData(x, shown * self._top())
+
+    def _place_mid(self) -> None:
+        """The mid-grey line where gamma puts it: the level shown half way, between black and white."""
+        self.mid.blockSignals(True)
+        self.mid.setValue(self._b + (self._w - self._b) * 0.5 ** self._g)
+        self.mid.blockSignals(False)
+
+    def show_levels(self, black: float, white: float, gamma: float = 1.0) -> None:
+        """The handles where the adjustment has them, without a change sent back."""
+        self._quiet = True
+        try:
+            self._b, self._w, self._g = float(black), float(white), float(gamma)
+            self.region.setRegion((self._b, self._w))
+            self.black.setValue(int(round(black)))
+            self.white.setValue(int(round(white)))
+            self.gamma.setValue(float(gamma))
+            self._place_mid()
+            self._draw()
+        finally:
+            self._quiet = False
+
+    def set_levels(self, black: float, white: float, gamma: float | None = None) -> None:
+        black = float(max(0, min(black, 254)))
+        white = float(min(255, max(white, black + 1)))
+        gamma = float(min(5.0, max(0.2, self._g if gamma is None else gamma)))
+        self.show_levels(black, white, gamma)
+        self.changed.emit(black, white, gamma)
+
+    def auto(self) -> None:
+        if self.counts is None or not self.counts.sum():
+            return
+        c = np.cumsum(self.counts)
+        total = float(c[-1])
+        lo = float(np.searchsorted(c, 0.001 * total))
+        hi = float(np.searchsorted(c, 0.999 * total))
+        self.set_levels(lo, max(hi, lo + 1))
+
+    def _dragged(self) -> None:
+        if self._quiet:
+            return
+        lo, hi = self.region.getRegion()
+        self.set_levels(round(lo), round(hi))
+
+    def _mid_dragged(self) -> None:
+        """The mid-grey line dragged: the gamma that shows the level under it half way."""
+        if self._quiet:
+            return
+        f = (float(self.mid.value()) - self._b) / max(self._w - self._b, 1.0)
+        f = min(max(f, 0.01), 0.99)
+        self.set_levels(self._b, self._w, float(np.log(f) / np.log(0.5)))
+
+    def _typed(self) -> None:
+        if not self._quiet:
+            self.set_levels(self.black.value(), self.white.value(), self.gamma.value())
+
+
 class CameraPanel(QtWidgets.QWidget):
     """The live picture and its controls, inside Live's camera view while Clampwise holds the camera."""
 
@@ -514,8 +665,16 @@ class CameraPanel(QtWidgets.QWidget):
         self.objective_caption = label("Objective", "muted")
         self.objectives = list(picture.OBJECTIVES)
         self.calibrated: dict[float, float] = {}           # um a pixel, each objective measured with
+        self.binning = QtWidgets.QComboBox()                # off unless chosen
+        for n in picture.BINNINGS:
+            self.binning.addItem("Off" if n == 1 else f"{n} x {n}", n)
+        self.binning.setToolTip("Binning: n x n pixels added into one. Dim fluorescence (a thick slice) comes "
+                                "n x n times brighter, so a shorter exposure gives the same picture and many more "
+                                "pictures a second, at 1/n of the resolution each way. Off: every pixel as taken.")
+        self.binning.currentIndexChanged.connect(lambda *_: self._binning())
         for k, (caption, w) in enumerate((("Exposure (ms)", self.exposure), ("Gain", self.gain),
-                                          ("Average", self.average), (self.objective_caption, self.objective))):
+                                          ("Average", self.average), ("Binning", self.binning),
+                                          (self.objective_caption, self.objective))):
             controls.addWidget(caption if isinstance(caption, QtWidgets.QWidget) else label(caption, "muted"), 0, k)
             controls.addWidget(w, 1, k)
         self.objective.valueChanged.connect(self._objective_moved)
@@ -543,18 +702,23 @@ class CameraPanel(QtWidgets.QWidget):
         actions.addWidget(self.fps)
         self.status = label("", "muted", wrap=True)
         # the controls under the picture, as tall as the user drags them (scrolled when made smaller than they are)
+        self.levels = LevelsHistogram(window.palette)
+        self.levels.changed.connect(self._levels)
+        # the settings and the buttons always in view; the histogram and the status below them, scrolled when small
         below = box("v", "xs")
         below.addLayout(controls)
         below.addLayout(actions)
+        below.addWidget(self.levels)
         below.addWidget(self.status)
         below.addStretch(1)
         holder = QtWidgets.QWidget()
         holder.setLayout(below)
+        self._essentials_h = controls.sizeHint().height() + actions.sizeHint().height() + 3 * theme.SPACE["xs"]
         self.controls_area = QtWidgets.QScrollArea()
         self.controls_area.setWidgetResizable(True)
         self.controls_area.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.controls_area.setWidget(holder)
-        self.controls_area.setMinimumHeight(0)
+        self.controls_area.setMinimumHeight(self._essentials_h)
         self.split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.split.setChildrenCollapsible(False)
         self.split.addWidget(self.view)
@@ -575,6 +739,9 @@ class CameraPanel(QtWidgets.QWidget):
         self.set_objectives("")                                # the standard objectives until the saved ones load
         self.objective.setValue(self.objectives.index(20.0))
         self.load_settings()
+        self.levels.show_levels(self.adjust.black, self.adjust.white, self.adjust.gamma)
+        if not getattr(self.window, "persist", False) or self.window._settings().value("camera/split") is None:
+            self.split.setSizes([600, holder.sizeHint().height()])      # the first time: every control in view
         self._loading = False
 
     # ---- taking and letting go
@@ -588,6 +755,7 @@ class CameraPanel(QtWidgets.QWidget):
         self.status.setText("Opening the camera...")
         t = CameraThread(self.make)
         t.adjust, t.average, t.corrections = self.adjust, self.average.value(), self.corrections
+        t.binning = self.binning.currentData() or 1
         t.opened.connect(self._opened)
         t.frame.connect(self._show)
         t.captured.connect(self._captured)
@@ -638,6 +806,25 @@ class CameraPanel(QtWidgets.QWidget):
         if self._thread is not None:
             self._thread.average = n
 
+    def _binning(self) -> None:
+        n = self.binning.currentData() or 1
+        if self._thread is not None:
+            self._thread.binning = n
+        kept = [k for k in ("dark", "background", "overlay") if getattr(self.corrections, k) is not None]
+        self.status.setText(
+            (f"{n} x {n} binning: {n * n} times the light a pixel at 1/{n} of the resolution each way; Auto "
+             "exposure (or a shorter exposure) now gives more pictures a second." if n > 1 else
+             "Binning off: every pixel as taken.")
+            + (f" The {', '.join(kept)} kept at the other binning no longer match: capture again." if kept else ""))
+        self._place_bar()
+        self._measured()
+        self.save_settings()
+
+    def _levels(self, black: float, white: float, gamma: float) -> None:
+        """The histogram's handles moved: the grey levels shown black and white, and the gamma."""
+        self.set_adjust(dataclasses.replace(self.adjust, black=black, white=white, gamma=gamma))
+        self.dialog.show_adjust(self.adjust)                 # Adjust's gamma slider follows the handle
+
     # ---- the picture
     def _rate(self) -> None:
         """The frame rate, once a second: pictures taken by the camera, and drawn."""
@@ -685,6 +872,7 @@ class CameraPanel(QtWidgets.QWidget):
         if stats is not None:
             edges = np.linspace(0, 256, len(stats["hist"]) + 1)
             self.dialog.hist_curve.setData(edges, stats["hist"])
+            self.levels.set_counts(stats["counts"])
             if stats["clipped"] > 0.001:
                 self._clip_said = True
                 self.status.setText(f"{stats['clipped']:.1%} of the picture is clipped (at full scale): lower the "
@@ -768,6 +956,7 @@ class CameraPanel(QtWidgets.QWidget):
 
     def set_adjust(self, a: picture.Adjust) -> None:
         self.adjust = a
+        self.levels.show_levels(a.black, a.white, a.gamma)
         if self._thread is not None:
             self._thread.adjust = a
         self.save_settings()
@@ -786,9 +975,13 @@ class CameraPanel(QtWidgets.QWidget):
         return self.objectives[min(max(self.objective.value(), 0), len(self.objectives) - 1)]
 
     def scale(self) -> tuple[float, str]:
-        """um a pixel with the objective in use, and how it is known."""
-        return picture.objective_scale(self.magnification, self.calibrated, self.dialog.pixel_um.value(),
-                                       self.dialog.adapter.value())
+        """um a pixel with the objective in use (a binned pixel n pixels across), and how it is known."""
+        um, how = picture.objective_scale(self.magnification, self.calibrated, self.dialog.pixel_um.value(),
+                                          self.dialog.adapter.value())
+        n = self.binning.currentData() or 1
+        if n > 1 and um:
+            return um * n, f"{how}, {n} x {n} binned"
+        return um, how
 
     def set_objectives(self, text: str) -> None:
         keep = self.magnification if self.objectives else None
@@ -922,6 +1115,7 @@ class CameraPanel(QtWidgets.QWidget):
         um = um or None
         info = {"camera_serial": f.serial, "exposure_ms": f.exposure_ms, "gain": f.gain, "averaged": f.averaged,
                 "objective": f"{self.magnification:g}x", "um_per_px": um, "scale": how,
+                "binning": f"{self.binning.currentData()} x {self.binning.currentData()}",
                 "slice_plane": self.plane(), "orientation": self.orientation_text(),
                 "shown_with": self.adjust.changed(), "corrections_shown": self.corrections.active(),
                 "saved_by": "Clampwise", "taken": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -986,6 +1180,7 @@ class CameraPanel(QtWidgets.QWidget):
                                             if 20.0 in self.objectives else 0) or 0))
         self.dialog.bar.setChecked(str(s.value("camera/scale_bar", "true")).lower() == "true")
         self.average.setValue(int(s.value("camera/average", 1) or 1))
+        self.binning.setCurrentIndex(max(0, self.binning.findData(int(s.value("camera/binning", 1) or 1))))
         split = s.value("camera/split")
         if split is not None:
             self.split.restoreState(split)
@@ -1008,4 +1203,5 @@ class CameraPanel(QtWidgets.QWidget):
         s.setValue("camera/objective_index", self.objective.value())
         s.setValue("camera/scale_bar", self.dialog.bar.isChecked())
         s.setValue("camera/average", self.average.value())
+        s.setValue("camera/binning", self.binning.currentData())
         s.setValue("camera/split", self.split.saveState())

@@ -290,6 +290,34 @@ orientation too. The picture is the
 camera's video stream at its fastest frame rate, so the exposure alone sets the pace (37 ms: 27 pictures a second);
 the frame rate is shown beside the buttons, as taken and, when fewer, as drawn. While Clampwise holds the camera, the camera's own processing (the contrast and
 brightness its program leaves in it) is made neutral, and put back when it lets go.</p>
+<p><b>The histogram</b> under the camera's picture is adjustable by hand, as ImageJ's Brightness &amp; Contrast:
+drag the edges of its band (or type them) to set the grey level shown black and the one shown white (contrast),
+the band itself to move both (brightness), and the line inside it for the level shown mid-grey (gamma: to its
+left lifts the dim parts); the curve over the histogram is how each level is shown; <b>Auto</b> fits them
+to the picture, <b>Reset</b> shows every level, <b>Log</b>
+counts show the few bright pixels of dim fluorescence. <b>Binning</b> (off unless chosen) adds 2 x 2 or 4 x 4
+pixels into one: a dim picture 4 or 16 times brighter, so that much shorter an exposure, and that many more
+pictures a second, at half or a quarter of the resolution each way; the scale bar and measuring follow it.</p>
+<p><b>The Polygon</b> (Live's patterned light view, <b>Use here</b>) sets where the light goes on the slice and
+holds it there,
+while the light itself is switched by its LED driver, from Clampex, as your protocol says. PolyScan must be closed:
+one program at a time holds the Polygon (<b>Let go</b> gives it back, and Clampwise gives it back when it closes).
+Finding it takes PolyScan4's driver about 25 s (it looks through every USB 3 port): the window goes on meanwhile,
+and the view says when it is held.
+Make a pattern (a full field, a spot, a grid numbered from 1 at the top left along each row as PolyScan numbers
+its grids, a line of spots, a black-and-white image file, one of PolyScan's sequences, or rectangles and ellipses
+drawn on the camera's picture), then show its steps: <b>Project</b> the one chosen, <b>Previous</b> and
+<b>Next</b>, or <b>Next every</b> few seconds, timed to your protocol's sweeps; <b>Off</b> lights no mirror. Each
+step shown is written to <i>polygon_log.csv</i> in the cell's folder (when, which step, its shapes) to match to
+the recordings. The camera must be taken in Clampwise too (its view's Use here) for the calibration, drawing
+and outlines. <b>Test and calibrate</b> once, with the light on and a fluorescent slide or slice in view: the
+Polygon shows nothing and then everything, to learn which byte lights a mirror, then five spots, found on the
+camera's picture, to learn where its field lies there; drawing on the picture and the steps' outlines over it use
+that. With the light only in the protocol's pulses (<b>Light in pulses</b>, ticked), play the protocol during the
+test: each test picture waits up to 10 s for a pulse and reads the frame it lit. To light one neuron, choose
+<b>Drawn on the picture</b>, add an ellipse over it, <b>Make the steps</b> and <b>Project</b>: the protocol's pulses
+then light only that region, at every current step; dragged onto another cell, it is shown there at once. The Polygon's mirrors are diamonds in rows half a mirror apart, so its field is 16:10 and a round spot is
+drawn round on the slice.</p>
 <p><b>Recording in Clampwise.</b> The acquisition view's <b>Use here</b> records without Clampex (Clampex must be
 closed: one program at a time holds the Digidata). Choose one of your protocols (<b>Protocols...</b> picks their
 folder) and the folder to record into. Before it plays, the protocol is drawn in the scope (each sweep's command in the amplifier's present unit), and a line above the scope says what it is doing or waiting for (opening the digitizer, the sweep under way, the seconds to the next). <b>Play</b> runs the protocol, drawn and measured live, keeping nothing (as Clampex's View); <b>Record</b> runs it into a file; <b>Pause</b> ends the run once the sweep under way is complete (the digitizer queues its outputs seconds ahead, so a sweep is never cut; a gap-free run pauses at once), the file then whole, and <b>Resume</b> goes on with the next sweep in the same file, each sweep at its real time in the synch array (a gap-free run resumes into a new file, so no gap is hidden in a continuous one); <b>Stop</b> ends it. The protocol is played as Clampex plays it: its epochs,
