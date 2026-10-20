@@ -137,6 +137,7 @@ class WindowView(QtWidgets.QFrame):
         lay.addWidget(self.detail)
         lay.addStretch(1)
         self.state = label("Not open", "muted", wrap=True)
+        self.failure = ""                             # why Use here could not take the device, said until it can
         self.state.setAlignment(QtCore.Qt.AlignCenter)
         lay.addWidget(self.state)
         lay.addStretch(1)
@@ -156,7 +157,7 @@ class WindowView(QtWidgets.QFrame):
         self.source = window
         if window is None:
             self._drop()
-            self.state.setText("Not open")
+            self.state.setText("Not open" + (f"\n\nUse here could not take it: {self.failure}" if self.failure else ""))
             self.setToolTip("")
         elif window.minimized:
             self._drop()
@@ -541,7 +542,7 @@ class LiveScreen(Screen):
 
         self.camera = CameraPanel(window, folder=self._snapshot_folder)
         self.views["camera"].hold(self.camera, self.use_camera, self.camera.release)
-        self.camera.released.connect(lambda: self.views["camera"].set_own(False))
+        self.camera.released.connect(self._camera_let_go)
         from .polygon_panel import PolygonPanel
 
         self.patterned = PolygonPanel(self.camera)         # the Polygon in Clampwise (rig.polygon), PolyScan closed
@@ -745,6 +746,12 @@ class LiveScreen(Screen):
             return
         view.set_own(True)
         self.camera.take()
+
+    def _camera_let_go(self) -> None:
+        """The camera's view back to its program's window; why the camera could not be taken, if it could not."""
+        view = self.views["camera"]
+        view.failure = getattr(self.camera, "failure", "")
+        view.set_own(False)
 
     # ---- the Polygon in Clampwise (rig.polygon): taken on request while PolyScan is closed
     def use_light(self) -> None:

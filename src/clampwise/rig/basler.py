@@ -152,7 +152,16 @@ class Camera:
             _DLL_FOLDERS.append(os.add_dll_directory(str(path.parent)))      # kept found while Clampwise runs
         except (OSError, AttributeError):
             pass
-        lib = ctypes.WinDLL(str(path))
+        try:
+            lib = ctypes.WinDLL(str(path))
+        except OSError as exc:
+            self.status = f"pylon's library ({path}) could not be loaded: {exc}"
+            return None
+        missing = [n for n in [d[0] for d in _DECLARED] + list(_BOOLEAN) if not hasattr(lib, n)]
+        if missing:
+            self.status = (f"pylon's library ({path}) lacks {', '.join(missing[:5])}"
+                           + (f" and {len(missing) - 5} more" if len(missing) > 5 else ""))
+            return None
         for name, args in _DECLARED:
             fn = getattr(lib, name)
             fn.restype, fn.argtypes = c_int32, list(args)

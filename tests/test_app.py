@@ -725,6 +725,37 @@ def test_live_uses_a_basler_camera_as_it_does_the_other(qapp, window, tmp_path):
     assert not view.own and fake.calls[-1] == "terminate" and fake.features["PixelFormat"] == "Mono12"
 
 
+def test_why_the_camera_could_not_be_taken_stays_said_in_its_view(qapp, window):
+    # the library refusing (a reason given) or failing (an exception): either way the view says why, not just
+    # "Not open", until the camera is taken
+    from test_rig_basler import FakePylon
+
+    from clampwise.rig import basler
+
+    window.go("live")
+    live = window.screens["live"]
+    view, panel = live.views["camera"], live.camera
+    view.source = None
+
+    class Broken:
+        def open(self):
+            raise OSError("[WinError 126] The specified module could not be found")
+
+    for make, said in ((Broken, "OSError: [WinError 126]"),
+                       (lambda: basler.Camera(FakePylon(opens=False), owner_check=lambda: False), "pylon Viewer")):
+        panel.make = make
+        live.use_camera()
+        assert _wait(qapp, lambda: not view.own)
+        view.show_window(None)                                                 # as each look at the rig does
+        assert view.state.text().startswith("Not open") and "Use here could not take it" in view.state.text()
+        assert said in view.state.text()
+    panel.make = lambda: basler.Camera(FakePylon(), owner_check=lambda: False)
+    live.use_camera()
+    assert _wait(qapp, lambda: panel.last is not None)
+    panel.release()
+    assert view.state.text() == "Not open"                                      # taken since: nothing to say
+
+
 class FakeRecorder:
     """rig.recorder.Recorder without the digitizer: two sweeps of two inputs appear in its raw file."""
 

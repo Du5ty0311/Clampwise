@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -79,9 +80,15 @@ class CameraThread(QtCore.QThread):
         self.wait(10000)
 
     def run(self) -> None:
-        cam = self.make()
-        if not cam.open():
-            self.failed.emit(cam.status)
+        try:                                     # whatever the camera's library does, the reason is said
+            cam = self.make()
+            opened = cam.open()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("The camera could not be taken")
+            self.failed.emit(f"it could not be taken ({type(exc).__name__}: {exc})")
+            return
+        if not opened:
+            self.failed.emit(cam.status or "it could not be taken (no reason given)")
             return
         try:
             exposure = cam.setting(lucam.EXPOSURE)
@@ -114,8 +121,14 @@ class CameraThread(QtCore.QThread):
                     if now - stats_at >= self.stats_every_s:
                         stats_at, stats = now, picture.stats(f.rgb)
                     self._send(f, stats)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("The camera stopped")
+            self.failed.emit(f"it stopped ({type(exc).__name__}: {exc})")
         finally:
-            cam.close()
+            try:
+                cam.close()
+            except Exception:
+                logging.getLogger(__name__).exception("The camera could not be let go")
 
     def _binned(self, f):
         """The frame with its pixels added n x n when binning is on (the corrections kept from it match it)."""
@@ -780,6 +793,7 @@ class CameraPanel(QtWidgets.QWidget):
         if self._thread is not None:
             return
         self.status.setText("Opening the camera...")
+        self.failure = ""
         t = CameraThread(self.make)
         t.adjust, t.average, t.corrections = self.adjust, self.average.value(), self.corrections
         t.binning = self.binning.currentData() or 1
@@ -833,6 +847,7 @@ class CameraPanel(QtWidgets.QWidget):
                             "Clampwise; Let go gives it back.")
 
     def _failed(self, why: str) -> None:
+        self.failure = why                       # said in the camera's view once it is back (rig.Live)
         self.status.setText(f"The camera: {why}.")
         self.window.say(f"The camera: {why}.")
 

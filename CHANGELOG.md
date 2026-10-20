@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.1 — 2026-10-20
+
+- **When the camera cannot be taken, the camera's view says why.** In 1.7.0, a camera that Use here could not take
+  went back to "Not open", and the reason was shown only for a moment in the status bar. If the camera's library
+  failed outright, no reason was given at all. The reason now stays under "Not open" until the camera is taken,
+  and any failure is written to `clampwise-error.log`.
+- A pylon library that cannot be loaded, or that lacks a call Clampwise needs, is named with what is wrong.
+
 ## 1.7.0 — 2026-10-20
 
 - **Basler cameras.** Live's camera view takes a Basler camera (an ace such as the acA1920-40um, USB 3.0 or GigE)
