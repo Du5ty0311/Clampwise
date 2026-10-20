@@ -19,7 +19,7 @@ ROLES = {
     "amplifier": ("Amplifier", ("mc700b.exe",)),
     "acquisition": ("Acquisition", ("clampex.exe", "axoscope.exe")),
     "light": ("Patterned light", ("polyscan3.exe", "polyscan.exe", "cspolyscan2.exe")),
-    "camera": ("Camera", ("infinityanalyze.exe",)),
+    "camera": ("Camera", ("infinityanalyze.exe", "pylonviewer.exe", "pylonviewerapp.exe")),   # Infinity; pylon Viewer
 }
 # the part of a program's window shown when the user has chosen none: (left, top, right, bottom) px in from its
 # edges, or the class of the child window to follow. Infinity Analyze 7 draws the camera's picture in the panel below

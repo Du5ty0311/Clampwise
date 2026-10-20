@@ -275,6 +275,56 @@ def self_test() -> int:
     return 1 if failed else 0
 
 
+def camera_check() -> int:
+    """``--camera-check``: the camera found, taken, ten pictures taken from it and let go, each step said, to stdout
+    and to camera-check.txt in the log folder (what to send when a camera will not start); exit 0 means it worked."""
+    import time
+    import traceback
+
+    from ..rig import basler, cameras, hardware, lucam
+
+    lines, ok = [f"Clampwise {__version__}, camera check"], False
+    try:
+        listed = [(i, d) for i, d in hardware.usb_devices()
+                  if (dev := hardware.identify(i, d)) is not None and dev.role == "camera"]
+        lines.append("camera on USB: " + ("; ".join(f"{d} ({i})" for i, d in listed) or "none listed"))
+        lines.append(f"Lumenera's library: {lucam.find_library() or 'not found'}")
+        lines.append(f"pylon's C library: {basler.find_library() or 'not found'}")
+        lines.append(f"taken through: {cameras.kind()}")
+        cam = cameras.make()
+        if not cam.open():
+            lines.append(f"FAIL the camera was not taken: {cam.status}")
+        else:
+            try:
+                exp, gain = cam.setting(lucam.EXPOSURE), cam.setting(lucam.GAIN)
+                lines.append(f"taken: model {getattr(cam, 'model', '') or '?'}, serial {cam.serial}, "
+                             f"pixel format {getattr(cam, '_format', '?')}, exposure {exp}, gain {gain}")
+                t0, got = time.perf_counter(), []
+                for _ in range(10):
+                    f = cam.frame()
+                    if f is None:
+                        lines.append(f"FAIL picture {len(got) + 1}: {cam.status}")
+                        break
+                    got.append(f)
+                took = time.perf_counter() - t0
+                if got:
+                    last = got[-1].rgb
+                    lines.append(f"{len(got)} pictures of {last.shape[1]} x {last.shape[0]} px in {took:.2f} s "
+                                 f"({len(got) / max(took, 1e-6):.1f} a second; the camera's rate {cam.frame_rate:.1f}); "
+                                 f"the last one's level: mean {last.mean():.1f}, max {int(last.max())} of 255")
+                ok = len(got) == 10
+            finally:
+                cam.close()
+                lines.append("let go")
+    except Exception:
+        lines.append("FAIL " + traceback.format_exc())
+    lines.append("worked" if ok else "did not work")
+    report = "\n".join(lines)
+    print(report)
+    (log_folder() / "camera-check.txt").write_text(report + "\n", encoding="utf-8")
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     flags = {a for a in argv[1:] if a.startswith("-")}
@@ -284,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if "--self-test" in flags:
         return self_test()
+    if "--camera-check" in flags:
+        return camera_check()
     if "--update" in flags:                              # the update without a window (Settings, Updates has one)
         from .. import update
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import struct
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -136,13 +137,21 @@ def parse_objectives(text: str) -> list[float]:
 
 
 # the sensor's pixel, um, by camera model (the maker's specifications): a nominal scale before any calibration
-PIXEL_UM = {"INFINITY8-3M": 4.5}             # Sony IMX429, 1944 x 1472, 4.5 x 4.5 um (Lumenera; Edmund Optics)
+PIXEL_UM = {"INFINITY8-3M": 4.5,            # Sony IMX429, 1944 x 1472, 4.5 x 4.5 um (Lumenera; Edmund Optics)
+            # Basler ace (Basler's specifications), each for its monochrome (um, gm) and colour (uc, gc) versions
+            # and their variants (MED): Sony IMX249 and IMX174, 1920 x 1200, 5.86 um; IMX264 and IMX250,
+            # 2448 x 2048, 3.45 um; PYTHON 1300, 1280 x 1024, 4.8 um
+            "ACA1920-40": 5.86, "ACA1920-155": 5.86, "ACA2440-35": 3.45, "ACA2440-75": 3.45, "ACA1300-200": 4.8}
 
 
 def pixel_um_of(model: str) -> float:
-    """The sensor's pixel (um) for a camera model as its program names it (e.g. 'INFINITY8-3M'), else 0."""
-    key = str(model or "").upper().replace("LUMENERA", "").strip()
-    return PIXEL_UM.get(key, 0.0)
+    """The sensor's pixel (um) for a camera model as its program or the camera names it ('INFINITY8-3M',
+    'acA1920-40um', 'Basler acA1920-40umMED'), else 0."""
+    key = str(model or "").upper().replace("LUMENERA", "").replace("BASLER", "").strip()
+    if key in PIXEL_UM:
+        return PIXEL_UM[key]
+    m = re.match(r"(ACA\d+-\d+)[A-Z]", key)                  # a Basler ace: its version's letters after the model
+    return PIXEL_UM.get(m.group(1), 0.0) if m else 0.0
 
 
 def objective_scale(mag: float, calibrated: dict, pixel_um: float = 0.0, adapter: float = 1.0) -> tuple[float, str]:

@@ -9,7 +9,8 @@ The devices as they identify themselves (read on the rig PC, 2026-10-16):
 
 - Digidata 1440A: USB ``VID_09C0&PID_0145`` ("DD1440", Molecular Devices' driver)
 - MultiClamp 700B: USB ``VID_09C0&PID_0136``, its serial the device's own (``...\\00832251``)
-- the camera: USB ``VID_1724`` (Lumenera), "INFINITY USB 3.0 Camera", its serial the device's (``...\\0025050256``)
+- the camera: USB ``VID_1724`` (Lumenera), "INFINITY USB 3.0 Camera", its serial the device's (``...\\0025050256``);
+  on a rig with a Basler camera (an ace USB 3.0), USB ``VID_2676`` (Basler AG), its serial the device's
 - the Polygon's IOBox: USB ``VID_04B4&PID_0304`` ("Mightex PolyEcho IOBox")
 """
 
@@ -24,8 +25,10 @@ from dataclasses import dataclass, field
 KNOWN = (("09C0", "0145", "acquisition", "Digidata 1440A"),
          ("09C0", "0136", "amplifier", "Axon 700B"),
          ("1724", None, "camera", "Lumenera INFINITY camera"),
+         ("2676", None, "camera", "Basler camera"),
          ("04B4", "0304", "light", "Mightex IOBox"))
 ROLES = ("acquisition", "amplifier", "camera", "light")
+CAMERA_PROGRAMS = ("infinityanalyze.exe", "pylonviewer.exe", "pylonviewerapp.exe")     # Infinity Analyze, pylon Viewer
 WORDS = {"acquisition": "Digitizer", "amplifier": "Amplifier", "camera": "Camera", "light": "Patterned light"}
 
 
@@ -103,6 +106,8 @@ def identify(instance: str, description: str = "") -> Device | None:
             serial = rest if re.fullmatch(r"[0-9A-Za-z]{6,}", rest) and "&" not in rest else ""
             if role == "camera" and serial.isdigit():
                 serial = str(int(serial))                 # 0025050256 -> 25050256, as the camera reports it
+            if vid == "2676" and description.lower().startswith("basler ") and "vision" not in description.lower():
+                name = description.strip()                # its model, when Windows names it (Basler acA1920-40um)
             return Device(role, name, serial, "", instance)
     return None
 
@@ -143,9 +148,10 @@ def detect(devices=usb_devices, running=programs, read_telegraph=None, held: dic
             d.state = ("in use by Clampwise" if held.get(role) else
                        "in use by the acquisition program" if "clampex.exe" in progs else "free")
         elif role == "camera":
-            d.name = _camera_model() or d.name
+            if not d.name.startswith("Basler"):
+                d.name = _camera_model() or d.name
             d.state = ("in use by Clampwise" if held.get(role) else
-                       "in use by the camera's program" if "infinityanalyze.exe" in progs else "free")
+                       "in use by the camera's program" if progs & set(CAMERA_PROGRAMS) else "free")
         elif role == "amplifier":
             if not commander():
                 d.state = "its program is closed"

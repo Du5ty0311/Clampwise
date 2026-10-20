@@ -69,11 +69,12 @@ shown in place. On a rig with the hardware below, Clampwise can also:
 - **control the amplifier** (mode, holding, seal test, compensation, Auto buttons), with MultiClamp Commander still
   usable beside it;
 - edit a protocol's epochs in a **simple stimulus editor** (always saved under a new name);
-- use a Lumenera **camera** without Infinity Analyze, at its full frame rate, with tools for patching and a scale
-  bar that follows the objective in use.
+- use a Lumenera **camera** without Infinity Analyze, or a Basler camera without pylon Viewer, at its full frame
+  rate, with tools for patching and a scale bar that follows the objective in use.
 
 Tested with: Digidata 1440A and pCLAMP 10.7, MultiClamp 700B with Commander 2.2, Lumenera INFINITY camera with
-Infinity Analyze, Windows 10. pCLAMP and MultiClamp Commander must be installed (Clampwise uses their own libraries);
+Infinity Analyze, Windows 10. A Basler camera needs Basler's pylon installed (it comes with pylon Viewer).
+pCLAMP and MultiClamp Commander must be installed (Clampwise uses their own libraries);
 Clampex must be closed while Clampwise records, as only one program can hold the Digidata.
 
 > Recording and amplifier control drive real hardware connected to a living cell. Try them first on a model cell,

@@ -206,9 +206,9 @@ do it from Clampwise (record, the amplifier's controls, the camera); everything 
 <p><b>Hardware.</b> At the top of the cell's panel, the rig's devices as Windows lists them, found by themselves
 every few seconds (Detect looks now) and never opened to do it: the digitizer (Digidata 1440A), the amplifier
 (MultiClamp 700B, with its serial, and each channel's mode from MultiClamp Commander's telegraph when it is open),
-the camera (Lumenera INFINITY, with its serial and model) and, when connected, the Polygon's IOBox (Mightex). Each
+the camera (Lumenera INFINITY or Basler, with its serial and model) and, when connected, the Polygon's IOBox (Mightex). Each
 says who is using it, in the screen's words: the acquisition program (Clampex), the camera's program (Infinity
-Analyze), Clampwise; or that it is free.</p>
+Analyze, or pylon Viewer for a Basler camera), Clampwise; or that it is free.</p>
 <table cellpadding='4'><tr><th align='left'>Role</th><th align='left'>Program</th><th align='left'>What is read, and how</th></tr>
 <tr><td>Amplifier</td><td>MultiClamp 700B Commander</td><td>The amplifier itself, twice a second, through Commander's
 message interface (its <i>AxMultiClampMsg</i> library): the mode, the holding and whether it is on, the primary and
@@ -254,10 +254,14 @@ new cell folder begins again). <b>Replaying</b> a recorded folder as if live: <i
 &lt;recorded folder&gt; &lt;watched folder&gt; [--speed 10]</i> writes its files as Clampex would, with their original
 timing. A note typed at the bottom is kept with the project, with the time and the
 last file Clampex logged.</p>
-<p><b>The camera in Clampwise.</b> The camera view's <b>Use here</b> takes the camera itself, through Lumenera's
-own camera library (<i>lucamapi.dll</i>, installed with Infinity Analyze; its layouts as Christoph Gohlke's
-<i>lucam</i> declares them, checked on the camera). Only one program can hold the camera, so Infinity Analyze must be
-closed first; <b>Let go</b> (or closing Clampwise) gives it back. Below the picture: the exposure, the gain and the
+<p><b>The camera in Clampwise.</b> The camera view's <b>Use here</b> takes the camera itself, through its maker's
+own library: a Lumenera INFINITY through Lumenera's (<i>lucamapi.dll</i>, installed with Infinity Analyze; its layouts
+as Christoph Gohlke's <i>lucam</i> declares them, checked on the camera), a Basler camera (an ace, USB 3.0 or GigE)
+through Basler's pylon (its C library, <i>PylonC</i>, installed with pylon Viewer; as pylon C's own header declares
+it). Which camera is plugged in decides which. Only one program can hold the camera, so its own program (Infinity
+Analyze, pylon Viewer) must be closed first; what Clampwise changes on a Basler camera to take it (8-bit frames, its
+automatic exposure and gain off, its trigger off) is put back when it lets go. For a camera that will not start,
+<i>Clampwise.exe --camera-check</i> writes what happened to <i>camera-check.txt</i> in the log folder; <b>Let go</b> (or closing Clampwise) gives it back. Below the picture: the exposure, the gain and the
 frames averaged into each picture (more for dim fluorescence). <b>Adjust...</b> changes what is shown, never the
 picture saved: brightness, contrast, gamma (below 1 lifts dim parts), saturation, sharpness, clarity (local
 contrast), auto levels and the colour balance (White balance on an empty, bright field), each with its reset; a set
@@ -278,7 +282,7 @@ and <b>clipped pixels</b> are painted red, since a pixel at full scale is no lon
 <b>Measure</b> drags a line whose length is given in um once the camera is calibrated; the wheel zooms, a drag pans,
 <b>Fit</b> shows the whole picture. The <b>Objective</b> slider says which objective is in use (2.5x to 63x; the list
 is set in Adjust...), and the scale bar and Measure follow it; the size of one pixel in um is shown beside it. Before
-any calibration it is nominal: the camera's own pixel (4.5 um on the INFINITY8-3M, filled in from its model) over the
+any calibration it is nominal: the camera's own pixel (4.5 um on the INFINITY8-3M, 5.86 um on a Basler acA1920-40, filled in from its model) over the
 objective's magnification times the camera adapter's (Adjust..., Length calibration; the adapter is printed on it,
 often 1x, 0.63x or 0.5x). To measure it instead: under Adjust..., Length calibration,
 type the um a pixel for the objective in use, or drag the Measure line along a stage micrometer and choose From the

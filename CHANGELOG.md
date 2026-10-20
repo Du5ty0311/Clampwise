@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.7.0 — 2026-10-20
+
+- **Basler cameras.** Live's camera view takes a Basler camera (an ace such as the acA1920-40um, USB 3.0 or GigE)
+  as it takes the Lumenera INFINITY: **Use here** with pylon Viewer closed, the live picture at the camera's full
+  frame rate, exposure (ms) and gain (dB, as Basler counts it), frames averaged, every adjustment, snapshot, scale
+  bar and the patterned light's calibration. It goes through Basler's own pylon library, installed with pylon
+  Viewer (nothing is added to Clampwise). Which camera is plugged in decides which library is used. What Clampwise
+  changes on the camera to take it (8-bit frames, its automatic exposure and gain off, its trigger off) is put back
+  when it lets go, so pylon Viewer finds the camera as it left it.
+- The camera's pixel is filled in from its model (5.86 um on the acA1920-40), so the scale bar is nominal until you
+  calibrate. Hardware detection finds a Basler camera, and pylon Viewer counts as the camera's program.
+- **Clampwise.exe --camera-check** takes the camera, ten pictures from it and lets it go, and writes each step to
+  `camera-check.txt` in `%LOCALAPPDATA%\Clampwise`: the file to send if a camera will not start.
+- A gain of 0 is set when asked (it was taken as "unchanged", and Basler cameras count their gain from 0 dB).
+
 ## 1.6.1 — 2026-10-19
 
 - **The patterned light lights only the steps you chose.** In 1.6.0, after several steps were chosen with

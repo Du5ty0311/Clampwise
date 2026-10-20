@@ -1,5 +1,6 @@
 """The camera in Clampwise: Live's camera view can take the camera itself while the camera's
-own program is closed (rig.lucam), show its live picture, change the exposure, gain and frames averaged, adjust
+own program is closed (rig.cameras: a Lumenera INFINITY through rig.lucam, a Basler through rig.basler), show its
+live picture, change the exposure, gain and frames averaged, adjust
 what is shown (rig.picture: brightness, contrast, gamma, saturation, sharpness, clarity, levels, colour balance;
 each with its reset, sets of them kept by name), draw a scale bar from the length calibration, and save a snapshot
 into the cell's folder. Frames are taken and adjusted off the window's thread; the camera is let go with one click
@@ -16,7 +17,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from ...rig import lucam, picture
+from ...rig import cameras, lucam, picture
 from .. import theme, widgets
 from ..widgets import box, label
 
@@ -52,13 +53,13 @@ def fps_limit(taken: float, shown: float, exposure_ms: float, average: int, draw
 class CameraThread(QtCore.QThread):
     """Takes frames until stopped; the camera is opened and closed in this thread."""
 
-    opened = QtCore.Signal(object)           # {"exposure": Setting, "gain": Setting, "serial": int}
+    opened = QtCore.Signal(object)           # {"exposure": Setting, "gain": Setting, "serial": int, "model": str}
     frame = QtCore.Signal(object, object, object)   # the frame as taken, the picture as shown (uint8), its statistics
     captured = QtCore.Signal(str, object)    # "dark", "background" or "overlay", and the picture kept
     exposure_set = QtCore.Signal(float, str)  # auto exposure's choice, and a note when it could not reach it
     failed = QtCore.Signal(str)
 
-    def __init__(self, make=lucam.Camera) -> None:
+    def __init__(self, make=cameras.make) -> None:
         super().__init__()
         self.make = make
         self.exposure_ms: float | None = None
@@ -84,10 +85,12 @@ class CameraThread(QtCore.QThread):
             return
         try:
             exposure = cam.setting(lucam.EXPOSURE)
-            self.opened.emit({"exposure": exposure, "gain": cam.setting(lucam.GAIN), "serial": cam.serial})
+            self.opened.emit({"exposure": exposure, "gain": cam.setting(lucam.GAIN), "serial": cam.serial,
+                              "model": getattr(cam, "model", "")})
             shown_at = stats_at = 0.0
             while not self._stop:
-                want = (self.exposure_ms or cam.exposure_ms, self.gain or cam.gain)
+                want = (cam.exposure_ms if self.exposure_ms is None else self.exposure_ms,     # a gain of 0 dB is
+                        cam.gain if self.gain is None else self.gain)                          # a gain asked for
                 if want != (cam.exposure_ms, cam.gain):
                     cam.set_exposure(*want)
                 request, self.request = self.request, None
@@ -400,8 +403,8 @@ class AdjustDialog(QtWidgets.QDialog):
         self.pixel_um.setSingleStep(0.05)
         self.pixel_um.setSpecialValueText("unknown")
         self.pixel_um.setSuffix(" um camera pixel")
-        self.pixel_um.setToolTip("The sensor's pixel, from the camera's specifications (INFINITY8-3M: 4.5 um, filled "
-                                 "in by itself)")
+        self.pixel_um.setToolTip("The sensor's pixel, from the camera's specifications (INFINITY8-3M: 4.5 um, Basler "
+                                 "acA1920-40: 5.86 um; filled in by itself)")
         self.adapter = QtWidgets.QDoubleSpinBox()
         self.adapter.setRange(0.1, 5.0)
         self.adapter.setDecimals(3)
@@ -636,7 +639,7 @@ class CameraPanel(QtWidgets.QWidget):
 
     released = QtCore.Signal()
 
-    def __init__(self, window, folder=lambda: "", make=lucam.Camera) -> None:
+    def __init__(self, window, folder=lambda: "", make=cameras.make) -> None:
         super().__init__()
         self.window, self.folder, self.make = window, folder, make
         self.adjust = picture.Adjust()
@@ -823,7 +826,11 @@ class CameraPanel(QtWidgets.QWidget):
                 spin.setRange(s.low, s.high)
                 spin.setValue(s.value)
                 spin.blockSignals(False)
-        self.status.setText(f"The camera (serial {info.get('serial')}) is held by Clampwise; Let go gives it back.")
+        model = info.get("model") or ""
+        if model and self.dialog.pixel_um.value() == 0 and picture.pixel_um_of(model) > 0:
+            self.dialog.pixel_um.setValue(picture.pixel_um_of(model))       # the nominal scale from the camera's own
+        self.status.setText(f"The camera ({model + ', ' if model else ''}serial {info.get('serial')}) is held by "
+                            "Clampwise; Let go gives it back.")
 
     def _failed(self, why: str) -> None:
         self.status.setText(f"The camera: {why}.")

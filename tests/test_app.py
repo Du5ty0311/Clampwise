@@ -698,6 +698,33 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
 
 
+def test_live_uses_a_basler_camera_as_it_does_the_other(qapp, window, tmp_path):
+    # a rig whose camera is Basler's: taken through pylon, its pixel from its model, a gain of 0 dB set as asked
+    from test_rig_basler import FakePylon
+
+    from clampwise.rig import basler
+
+    window.go("live")
+    live = window.screens["live"]
+    view, panel = live.views["camera"], live.camera
+    fake = FakePylon()
+    fake.features["Gain"] = 6.0
+    panel.make = lambda: basler.Camera(fake, owner_check=lambda: False)
+    panel.folder = lambda: str(tmp_path)
+    panel.dialog.pixel_um.setValue(0.0)
+    view.source = None
+    live.use_camera()
+    assert _wait(qapp, lambda: panel.last is not None)
+    assert panel.image.image.shape[:2] == (6, 8) and fake.features["PixelFormat"] == "Mono8"
+    assert panel.dialog.pixel_um.value() == pytest.approx(5.86)                  # an acA1920-40um's pixel
+    assert "acA1920-40um" in panel.status.text() and panel.gain.value() == 6.0
+    panel.gain.setValue(0.0)
+    panel._exposure()
+    assert _wait(qapp, lambda: fake.features["Gain"] == 0.0)
+    panel.release()
+    assert not view.own and fake.calls[-1] == "terminate" and fake.features["PixelFormat"] == "Mono12"
+
+
 class FakeRecorder:
     """rig.recorder.Recorder without the digitizer: two sweeps of two inputs appear in its raw file."""
 
