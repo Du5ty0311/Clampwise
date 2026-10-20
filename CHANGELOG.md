@@ -20,6 +20,13 @@
 - **The patterned light's calibration, checked and kept per objective.** A map is kept for each objective (and
   camera adapter) and refused at another; after the fit a check grid of 8 spots it did not use reports how far each
   lands, in um (target under 5 um), drawn on the picture.
+- **One cell of a grid, or several, lit alone.** A grid can tile the camera's picture rather than the whole field
+  (the default once calibrated), so a field larger than the picture still gives cells you can see. Choose cells in
+  the list or by clicking them on the picture (Ctrl+click for more); Project lights them together and nothing else,
+  logged as one step (`1 + 57`) with each cell's shape. The picture shows the chosen steps (yellow), what the
+  patterned light shows now (filled blue), the field's edge (dashed) and an image file's mirrors. The calibration
+  finds a field larger than the picture (spots nearer the centre when the outer ones fall off it; the check grid
+  laid over the picture).
 - **Regions for one cell, and their controls.** Click the cell's centre to place a round region of a diameter typed
   in um; name it; add a control region of the same size a set distance away (for light scattered onto the cell);
   keep the regions with the cell and draw them again later.

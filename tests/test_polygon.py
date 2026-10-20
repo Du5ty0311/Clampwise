@@ -218,9 +218,9 @@ class SimRig:
     """A Polygon under a camera: the camera's picture lit where the mirrors shown light the slide. The field lies
     turned round and mirrored (as nothing guarantees otherwise), and a mirror lights with ``on``."""
 
-    def __init__(self, on: int):
+    def __init__(self, on: int, to_field=None):
         self.on = on
-        self.cal = patterns.Calibration(to_field=[[-1 / 170, 0.0, 190 / 170], [0.0, -1 / 120, 140 / 120]])
+        self.cal = patterns.Calibration(to_field=to_field or [[-1 / 170, 0.0, 190 / 170], [0.0, -1 / 120, 140 / 120]])
         self.h, self.w = 160, 200
 
     def picture(self, image: np.ndarray | None) -> np.ndarray:
@@ -283,6 +283,7 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     assert sdk.image is not None and not (sdk.image == on).any()                 # left with nothing lit
     # a grid's step 1 projected lands where the field's top-left cell is under the camera
     dlg.source.setCurrentText("Grid")
+    dlg.grid_on_picture.setChecked(False)                                        # over the whole field
     dlg.rows.setValue(2)
     dlg.cols.setValue(2)
     dlg.make_steps()
@@ -779,3 +780,139 @@ def test_a_recording_s_end_leaves_nothing_lit(qapp, tmp_path):
     dlg.project()
     dlg.after_run([])
     assert dlg.wait() and (sdk.image == 255).all()                               # unticked: left as it is
+
+
+# ------------------------------------------------------------------ a field larger than the picture; cells chosen
+
+# the rig's case: every mirror lit covers the whole picture; the picture sees the middle 0.4 of the field, mirrored
+OVERFILLED = [[-0.002, 0.0, 0.7], [0.0, 0.0025, 0.3]]
+
+
+def test_steps_lit_together_a_grid_over_the_picture_and_what_overfills_it():
+    cal = patterns.Calibration(to_field=OVERFILLED, camera_size=(200, 160))
+    assert patterns.picture_outside_field(cal, (200, 160)) is False
+    assert patterns.picture_outside_field(patterns.Calibration(to_field=SimRig(255).cal.to_field), (200, 160))
+    cells = patterns.grid_on_picture(10, 10, cal, (200, 160))
+    assert [c.name for c in cells[:3]] == ["1", "2", "3"] and len(cells) == 100
+    u, v = cal.field_of(np.array([130.0]), np.array([88.0]))                     # row 6, column 7 of the picture
+    assert [c.name for c in cells if c.covers(u[0], v[0])] == ["57"]
+    both = patterns.together([cells[0], cells[56]])
+    assert both.name == "1 + 57" and len(both.shapes) == 2
+    assert both.mirrors().sum() == cells[0].mirrors().sum() + cells[56].mirrors().sum()
+    image = patterns.Step("picture", mask=np.zeros((patterns.ROWS, patterns.COLUMNS), bool))
+    image.mask[:10] = True
+    assert patterns.together([image, cells[0]]).mirrors().sum() == image.mask.sum() + cells[0].mirrors().sum()
+    assert patterns.spread_px([[0, 0], [10, 10], [20, 20]]) < 1e-6 < patterns.spread_px([[0, 0], [10, 0], [0, 10]])
+
+
+def _sim_panel(rig, sdk, tmp_path):
+    from types import SimpleNamespace
+
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtWidgets
+
+    from clampwise.app.screens import polygon_panel
+    from clampwise.rig import lucam
+
+    panel = QtWidgets.QWidget()
+    panel.box = pg.ViewBox()
+    panel.window = SimpleNamespace(say=lambda *_: None)
+    panel.folder = lambda: str(tmp_path)
+    panel.exposure = SimpleNamespace(value=lambda: 1.0)
+    panel._thread = SimpleNamespace(exposure_ms=1.0, average=1)
+    panel._shown = 0
+
+    def frame():
+        g = rig.picture(sdk.image).astype(np.uint8)
+        panel.last = lucam.Frame(np.broadcast_to(g[:, :, None], g.shape + (3,)), 1.0, 1.0)
+        panel._shown += 1
+
+    frame()
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
+    dlg.take()
+    assert dlg.wait()
+    return dlg, frame
+
+
+def test_the_calibration_finds_a_field_larger_than_the_picture(qapp, monkeypatch, tmp_path):
+    from clampwise.app.screens import polygon_panel
+
+    monkeypatch.setattr(polygon_panel, "SETTLE_S", 0.0)
+    rig, sdk = SimRig(255, OVERFILLED), FakeSDK()
+    dlg, frame = _sim_panel(rig, sdk, tmp_path)
+    dlg.pulsed.setChecked(False)
+    dlg.calibrate()
+    for _ in range(300):
+        if dlg._cal is None:
+            break
+        dlg.wait()
+        frame()
+        frame()
+        dlg._calibration_tick()
+    dlg.wait()
+    text = dlg.cal_status.text()
+    assert dlg._cal is None and "Calibrated with 5 spots" in text, text      # the centre, then a closer ring of 4
+    assert np.allclose(dlg.calibration.to_field, OVERFILLED, atol=0.002)
+    assert "Check: 8 of 8 spots found" in text and dlg.calibration.check_errors_px().max() < 2.0
+    assert not (sdk.image == 255).any()
+    dlg.release()
+    assert dlg.wait()
+
+
+def test_cells_of_a_grid_chosen_on_the_picture_are_lit_together_and_nothing_else(qapp, tmp_path):
+    from clampwise.rig import light_record as lr
+
+    rig, sdk = SimRig(255, OVERFILLED), FakeSDK()
+    dlg, frame = _sim_panel(rig, sdk, tmp_path)
+    dlg.calibration = patterns.Calibration(255, True, OVERFILLED, (rig.w, rig.h), 0.1)
+    dlg.show()
+    dlg.source.setCurrentText("Grid")
+    dlg.make_steps()                                                             # 10 x 10 over the picture
+    assert len(dlg.steps) == 100 and "Over the camera's picture" in dlg.pattern_note.text()
+    assert dlg.step_at(10, 8) == 0 and dlg.step_at(130, 88) == 56
+    dlg.choose_at(0)                                                             # a click on cell 1
+    dlg.choose_at(56, add=True)                                                  # Ctrl+click on cell 57
+    assert dlg._chosen_rows() == [0, 56]
+    dlg.project()
+    assert dlg.wait()
+    lit = rig.picture(sdk.image) > 100
+    cell1, cell57 = np.zeros_like(lit), np.zeros_like(lit)
+    cell1[0:16, 0:20], cell57[80:96, 120:140] = True, True
+    near = np.zeros_like(lit)
+    near[0:17, 0:21], near[79:97, 119:141] = True, True
+    assert lit[cell1].mean() > 0.8 and lit[cell57].mean() > 0.8                  # both cells lit
+    assert not lit[~near].any()                                                  # and nothing else
+    assert dlg._lit == {"1", "57"}
+    filled = [i for i in dlg.outline_items if type(i).__name__ == "QGraphicsPolygonItem"]
+    assert len(filled) == 2                                                      # drawn as lit on the picture
+    shown = [e for e in lr.read(tmp_path / lr.LOG_NAME) if e.event == "shown"][-1]
+    assert shown.step == "1 + 57" and [d["step"] for d in shown.shapes] == ["1", "57"]
+    assert shown.field_fraction == pytest.approx(2 * 0.04 * 0.04, rel=0.15)     # two cells of a 0.4 x 0.4 picture
+    dlg.choose_at(56, add=True)                                                  # Ctrl+click again: taken out
+    assert dlg._chosen_rows() == [0]
+    dlg.off()
+    assert dlg.wait() and dlg._lit == set() and not (sdk.image == 255).any()
+    dlg.release()
+    assert dlg.wait()
+
+
+def test_an_image_step_is_laid_over_the_picture_where_its_mirrors_light(qapp, tmp_path):
+    from pyqtgraph.Qt import QtCore
+
+    rig, sdk = SimRig(255, OVERFILLED), FakeSDK()
+    dlg, _ = _sim_panel(rig, sdk, tmp_path)
+    dlg.calibration = patterns.Calibration(255, True, OVERFILLED, (rig.w, rig.h), 0.1)
+    dlg.show()
+    mask = np.zeros((patterns.ROWS, patterns.COLUMNS), bool)
+    mask[::2, ::2] = True
+    dlg.steps = [patterns.Step("picture", mask=mask)]
+    dlg.list.addItems(["picture"])
+    dlg.list.setCurrentRow(0)
+    images = [i for i in dlg.outline_items if type(i).__name__ == "ImageItem"]
+    assert len(images) == 1
+    for (c, r), (u, v) in (((0, 0), (0.0, 0.0)), ((456, 570), (1.0, 1.0)), ((228, 285), (0.5, 0.5))):
+        p = images[0].mapToParent(QtCore.QPointF(c, r))
+        x, y = dlg.calibration.camera_of(np.array([u]), np.array([v]))
+        assert (p.x(), p.y()) == pytest.approx((x[0], y[0]), abs=0.5)
+    dlg.release()
+    assert dlg.wait()

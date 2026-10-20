@@ -6,8 +6,9 @@ shape is given in the field's own coordinates, ``u`` across and ``v`` down, each
 regions), and lit where the centres of the mirrors fall inside it; a round spot is round on the slice.
 
 A pattern is a list of steps, each a name and the shapes lit together: a full field, a spot, a numbered grid of
-spots (1 at the top left, along the rows), a line of spots, an image file, a PolyScan sequence (``*.seq``: its
-regions of interest, ROI1, ROI2...), or shapes drawn on the camera's picture.
+spots (1 at the top left, along the rows) over the field or over the camera's picture, a line of spots, an image
+file, a PolyScan sequence (``*.seq``: its regions of interest, ROI1, ROI2...), or shapes drawn on the camera's
+picture. Several steps can be lit together as one.
 """
 
 from __future__ import annotations
@@ -109,6 +110,16 @@ class Step:
             lit |= s.contains(u, v)
         return lit
 
+    def covers(self, u: float, v: float) -> bool:
+        """Whether the point (u, v) of the field is in this step: in one of its shapes, or on a lit mirror of its
+        image (the mirror nearest the point)."""
+        if self.mask is not None:
+            r = int(np.clip(round(v * (FIELD_H + 0.5) * 2 - 1), 0, ROWS - 1))
+            c = int(np.clip(round(u * (FIELD_W + 0.5) - 0.5 - 0.5 * (r % 2)), 0, COLUMNS - 1))
+            return bool(self.mask[r, c])
+        a, b = np.array([float(u)]), np.array([float(v)])
+        return any(bool(s.contains(a, b)[0]) for s in self.shapes)
+
     def describe(self) -> str:
         if self.mask is not None:
             return f"{self.name}: an image ({self.mask.mean():.1%} of the mirrors)"
@@ -154,6 +165,54 @@ def grid(rows: int, columns: int, region: tuple[float, float, float, float] = (0
             steps.append(Step(str(i * columns + j + 1),
                               [Shape("ellipse" if round_spots else "rect", (cu - hw, cv - hh, cu + hw, cv + hh))]))
     return steps
+
+
+def grid_on_picture(rows: int, columns: int, cal: "Calibration", size: tuple[int, int], fill: float = 1.0,
+                    round_spots: bool = False) -> list[Step]:
+    """``rows`` x ``columns`` cells tiling the camera's picture (``size``: its width and height, ``cal`` the map at
+    that size) rather than the whole field, numbered as ``grid`` numbers them (1 at the picture's top left, along
+    each row): when the field is larger than the picture, every cell is one the camera sees. Each cell is a shape on
+    the field through the map; a round spot is round on the picture, and so on the slice."""
+    w, h = size
+    cw, ch = w / columns, h / rows
+    t = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+    steps = []
+    for i in range(rows):
+        for j in range(columns):
+            cx, cy = (j + 0.5) * cw, (i + 0.5) * ch
+            hw, hh = cw * fill / 2, ch * fill / 2
+            if round_spots:
+                r = min(hw, hh)
+                pts = np.column_stack([cx + r * np.cos(t), cy + r * np.sin(t)])
+            else:
+                pts = np.array([[cx - hw, cy - hh], [cx + hw, cy - hh], [cx + hw, cy + hh], [cx - hw, cy + hh]])
+            u, v = cal.field_of(pts[:, 0], pts[:, 1])
+            steps.append(Step(str(i * columns + j + 1),
+                              [Shape("polygon", tuple(np.column_stack([u, v]).ravel().tolist()))]))
+    return steps
+
+
+def picture_outside_field(cal: "Calibration", size: tuple[int, int]) -> bool:
+    """Whether part of the camera's picture (``size``, ``cal`` the map at that size) lies outside the field: what is
+    drawn there cannot be lit."""
+    w, h = size
+    u, v = cal.field_of(np.array([0.0, w, w, 0.0]), np.array([0.0, 0.0, h, h]))
+    return bool((u < -0.005).any() or (u > 1.005).any() or (v < -0.005).any() or (v > 1.005).any())
+
+
+def together(steps: list[Step]) -> Step:
+    """Several steps lit at once, as one step named by theirs joined with " + " (``3 + 17``): their shapes kept
+    (each region in the log), an image's mirrors joined to the others'."""
+    if len(steps) == 1:
+        return steps[0]
+    name = " + ".join(s.name for s in steps)
+    shapes = [sh for s in steps for sh in s.shapes]
+    if any(s.mask is not None for s in steps):
+        lit = np.zeros((ROWS, COLUMNS), bool)
+        for s in steps:
+            lit |= s.mirrors()
+        return Step(name, shapes, mask=lit)
+    return Step(name, shapes)
 
 
 def line(u0: float, v0: float, u1: float, v1: float, spots: int, diameter: float) -> list[Step]:
@@ -412,9 +471,43 @@ class Calibrations:
 
 CALIBRATION_SPOTS = ((0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75), (0.5, 0.5))
 CALIBRATION_DIAMETER = 0.06
+# a field larger than the camera's picture puts the outer spots off it: rings of spots nearer the centre then, each
+# its corners this far from the centre (field units), smaller spots with them
+CLOSER_RINGS = (0.1, 0.04)
 # after the fit, a check grid of spots not used by it: how far each lands from where the map puts it
 CHECK_SPOTS = tuple((u, v) for v in (0.35, 0.5, 0.65) for u in (0.35, 0.5, 0.65) if (u, v) != (0.5, 0.5))
 CHECK_TARGET_UM = 5.0
+
+
+def ring(d: float) -> tuple[tuple[tuple[float, float], ...], float]:
+    """Four calibration spots at the corners of a square ``d`` from the field's centre, and their diameter."""
+    return ((0.5 - d, 0.5 - d), (0.5 + d, 0.5 - d), (0.5 - d, 0.5 + d), (0.5 + d, 0.5 + d)), \
+        min(CALIBRATION_DIAMETER, 0.4 * d)
+
+
+def spread_px(points: np.ndarray) -> float:
+    """How far points spread across their narrowest direction (camera pixels, the root mean square): near 0 when
+    they lie on one line, which cannot fix a map."""
+    p = np.asarray(points, float).reshape(-1, 2)
+    if len(p) < 3:
+        return 0.0
+    return float(np.linalg.svd(p - p.mean(0), compute_uv=False)[-1] / np.sqrt(len(p)))
+
+
+def check_spots_on_picture(cal: Calibration, size: tuple[int, int]) -> tuple[list[tuple[float, float]], float]:
+    """The check grid laid over the camera's picture rather than the field (3 x 3 at a quarter, half and three
+    quarters of it, less its centre), so every check spot is one the camera can see when the field is larger than
+    the picture; those outside the field left out. And their diameter: a twentieth of the picture's width."""
+    w, h = size
+    xs = np.array([fx * w for fy in (0.25, 0.5, 0.75) for fx in (0.25, 0.5, 0.75) if (fx, fy) != (0.5, 0.5)])
+    ys = np.array([fy * h for fy in (0.25, 0.5, 0.75) for fx in (0.25, 0.5, 0.75) if (fx, fy) != (0.5, 0.5)])
+    u, v = cal.field_of(xs, ys)
+    (u0, u1), (v0, v1) = cal.field_of(np.array([0.0, w]), np.array([h / 2, h / 2]))
+    width = float(np.hypot(u1 - u0, (v1 - v0) * FIELD_H / FIELD_W))           # the picture's width, field widths
+    diameter = float(np.clip(0.05 * width, 0.01, CALIBRATION_DIAMETER))
+    r = diameter / 2
+    spots = [(float(a), float(b)) for a, b in zip(u, v) if r <= a <= 1 - r and r <= b <= 1 - r]
+    return spots, diameter
 
 
 def shape_area(shape: Shape) -> float:

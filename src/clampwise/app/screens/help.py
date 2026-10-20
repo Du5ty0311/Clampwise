@@ -323,6 +323,16 @@ test: each test picture waits up to 10 s for a pulse and reads the frame it lit.
 <b>Drawn on the picture</b>, add an ellipse over it, <b>Make the steps</b> and <b>Project</b>: the protocol's pulses
 then light only that region, at every current step; dragged onto another cell, it is shown there at once. The Polygon's mirrors are diamonds in rows half a mirror apart, so its field is 16:10 and a round spot is
 drawn round on the slice.</p>
+<p><b>Lighting one cell of a grid, or several.</b> A grid is laid <b>over the camera's picture</b> once the field is
+calibrated (ticked by default; unticked, over the whole field as PolyScan lays its grids), so when the field is
+larger than the picture every cell is one you can see. Choose a cell in the list or click it on the picture;
+Ctrl+click (or Ctrl and Shift in the list) chooses more, and Ctrl+click again takes one out. <b>Project</b> lights
+the cells chosen together and nothing else, logged as one step named by them (<i>1 + 57</i>) with each cell's shape.
+Double-clicking a cell on the picture shows it at once. On the picture the chosen steps are outlined in yellow,
+what the Polygon shows now is filled in blue (lit whenever the LED is on), and the field's edge is dashed; an image
+file's step is drawn as its mirrors. With several steps chosen, <b>Step on each trigger</b> steps through those
+only. When the field is larger than the picture, the calibration's outer spots fall off it: it then tries spots
+nearer the field's centre, and lays its check grid over the picture.</p>
 <p><b>The calibration is kept for each objective</b> (and camera adapter) it was measured with: each objective
 centres the field a little differently, so with another objective the regions are refused until it is calibrated
 too (which byte lights a mirror is the Polygon's own and is kept for all). After the fit, a <b>check grid</b> of 8
