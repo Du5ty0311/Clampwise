@@ -916,3 +916,37 @@ def test_an_image_step_is_laid_over_the_picture_where_its_mirrors_light(qapp, tm
         assert (p.x(), p.y()) == pytest.approx((x[0], y[0]), abs=0.5)
     dlg.release()
     assert dlg.wait()
+
+
+def test_a_plain_click_or_next_after_several_chosen_lights_that_step_alone(qapp, tmp_path):
+    """Found by the end-to-end check of 1.6.0: after a Ctrl+click, a plain click, a double-click or Next kept the
+    earlier steps chosen and lit them too (1 + 57 chosen, Next lit 1 + 58)."""
+    import pyqtgraph as pg
+
+    rig, sdk = SimRig(255, OVERFILLED), FakeSDK()
+    dlg, _ = _sim_panel(rig, sdk, tmp_path)
+    dlg.calibration = patterns.Calibration(255, True, OVERFILLED, (rig.w, rig.h), 0.1)
+    picture = pg.ImageItem(np.zeros((rig.h, rig.w), np.uint8))
+    dlg.panel.box.addItem(picture)
+    dlg.show()
+    dlg.source.setCurrentText("Grid")
+    dlg.make_steps()
+    dlg.choose_at(0)
+    dlg.choose_at(56, add=True)
+    dlg.choose_at(44)                                                            # a plain click on cell 45
+    assert dlg._chosen_rows() == [44]
+    dlg.choose_at(0)
+    dlg.choose_at(56, add=True)
+    dlg.step_by(1)                                                               # Next
+    assert dlg.wait() and dlg._chosen_rows() == [57] and dlg._lit == {"58"}
+    lit = rig.picture(sdk.image) > 100
+    assert not lit[0:17, 0:21].any()                                             # cell 1 no longer lit
+    # the camera's picture enlarged hides this panel: what is lit stays drawn while the patterned light is held
+    dlg.hide()
+    assert any(type(i).__name__ == "QGraphicsPolygonItem" for i in dlg.outline_items)
+    # Fit fits the picture, not the field larger than it (the field's edge is not counted)
+    dlg.panel.box.autoRange(padding=0)
+    (x0, x1), (y0, y1) = dlg.panel.box.viewRange()
+    assert x1 - x0 < 1.2 * rig.w or y1 - y0 < 1.2 * rig.h
+    dlg.release()
+    assert dlg.wait() and not dlg.outline_items                                  # let go: nothing drawn

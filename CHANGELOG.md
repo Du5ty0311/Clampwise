@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.6.1 — 2026-10-19
+
+- **The patterned light lights only the steps you chose.** In 1.6.0, after several steps were chosen with
+  Ctrl+click, a plain click, a double-click, Previous, Next or Next every kept the earlier ones chosen and lit them
+  too (cells 1 and 57 chosen, Next lit 1 and 58). Each now chooses that step alone; Ctrl+click still adds.
+- **The steps stay drawn while the camera's picture is enlarged** (the patterned light's view hidden) as long as
+  the patterned light is held, and clicking a cell on the picture still chooses it.
+- **Fit fits the camera's picture**, not the patterned light's field when it is larger than the picture.
+- A grid's numbers are drawn for every cell only up to 25 cells; beyond that, for the chosen and lit ones (100
+  numbers ran together). The field's edge reads on light and dark backgrounds; the patterned light's temperature
+  is given in degrees C.
+
 ## 1.6.0 — 2026-10-19
 
 - **The Polygon, from Clampwise.** Live's patterned light view, **Use here**, sets where the light goes on the

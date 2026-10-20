@@ -421,7 +421,7 @@ class PolygonPanel(QtWidgets.QWidget):
         if self._opening:
             return
         t = self.temperature_c if self.polygon.connected else None
-        self.device_status.setText(self.polygon.status + (f"; {t} inside" if t is not None else ""))
+        self.device_status.setText(self.polygon.status + (f"; {t} °C inside" if t is not None else ""))
 
     # ---------------------------------------------------------------- the pattern
     def make_steps(self) -> None:
@@ -469,7 +469,7 @@ class PolygonPanel(QtWidgets.QWidget):
         self.list.clear()
         self.list.addItems([s.name for s in steps])
         if steps:
-            self.list.setCurrentRow(0)
+            self.list.setCurrentRow(0, QtCore.QItemSelectionModel.ClearAndSelect)
         self.pattern_note.setText(f"{len(steps)} step(s). {note}".strip())
         self.save()
         self.draw_outlines()
@@ -593,7 +593,7 @@ class PolygonPanel(QtWidgets.QWidget):
             self.auto.setChecked(False)
             self.shown_label.setText(self.shown_label.text() + " The last step was shown: stepping stopped.")
             return
-        self.list.setCurrentRow(row % n)
+        self.list.setCurrentRow(row % n, QtCore.QItemSelectionModel.ClearAndSelect)     # that step alone, not added to those chosen
         self.project()
 
     def off(self) -> None:
@@ -717,7 +717,7 @@ class PolygonPanel(QtWidgets.QWidget):
             self.place_at(p.x(), p.y())
             event.accept()
             return
-        if event.button() != QtCore.Qt.LeftButton or not (self.isVisible() and self.outlines.isChecked()):
+        if event.button() != QtCore.Qt.LeftButton or not (self._overlaid() and self.outlines.isChecked()):
             return
         row = self.step_at(p.x(), p.y())
         if row is None:
@@ -740,7 +740,7 @@ class PolygonPanel(QtWidgets.QWidget):
     def choose_at(self, row: int, add: bool = False) -> None:
         """Step ``row`` chosen alone, or (``add``) added to those chosen, or taken from them when it was."""
         if not add:
-            self.list.setCurrentRow(row)
+            self.list.setCurrentRow(row, QtCore.QItemSelectionModel.ClearAndSelect)
             return
         item = self.list.item(row)
         self.list.blockSignals(True)
@@ -896,13 +896,13 @@ class PolygonPanel(QtWidgets.QWidget):
         for item in self.outline_items:
             self.panel.box.removeItem(item)
         self.outline_items = []
-        if not (self.outlines.isChecked() and self.calibration.ready and self.isVisible()):
+        if not (self.outlines.isChecked() and self.calibration.ready and self._overlaid()):
             return
         cal = self.calibration.at_size(self._frame_size())     # the picture's binning now
         add = self._overlay
         # the field's edge, dashed (outside the picture when the field is larger than it: seen zoomed out)
         x, y = cal.camera_of(np.array([0.0, 1.0, 1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0, 1.0, 0.0]))
-        add(pg.PlotCurveItem(x, y, pen=pg.mkPen((200, 200, 200, 160), width=1, style=QtCore.Qt.DashLine)))
+        add(pg.PlotCurveItem(x, y, pen=pg.mkPen((128, 128, 128, 220), width=1, style=QtCore.Qt.DashLine)))
         for x0, y0, x1, y1 in (cal.check if self._show_check else []):   # the check: where each spot fell (+), from
             add(pg.ScatterPlotItem([x1], [y1], symbol="o", size=10, pen=pg.mkPen((0, 255, 255), width=1),
                                    brush=None))                # where the map put it (o)
@@ -931,15 +931,21 @@ class PolygonPanel(QtWidgets.QWidget):
                     add(item)
                 else:
                     add(pg.PlotCurveItem(x, y, pen=pen))
-            if step.shapes and len(self.steps) <= 100:
+            if step.shapes and (len(self.steps) <= 25 or bright or lit):
                 cu, cv = step.shapes[0].centre()
                 x, y = cal.camera_of(np.array([cu]), np.array([cv]))
                 text = pg.TextItem(step.name, color=colour if bright or lit else colour + (140,), anchor=(0.5, 0.5))
                 text.setPos(float(x[0]), float(y[0]))
                 add(text)
 
+    def _overlaid(self) -> bool:
+        """Whether the steps are drawn over the picture: while this panel is shown, or while the patterned light is
+        held (its view hidden so the camera's picture can be enlarged, the picture is where steps are chosen)."""
+        return self.isVisible() or self.polygon.connected
+
     def _overlay(self, item) -> None:
-        self.panel.box.addItem(item)
+        # not counted in the picture's bounds: Fit fits the picture, not a field larger than it
+        self.panel.box.addItem(item, ignoreBounds=True)
         self.outline_items.append(item)
 
     def _mask_overlay(self, step: patterns.Step, cal: patterns.Calibration, colour) -> pg.ImageItem:
@@ -1250,9 +1256,7 @@ class PolygonPanel(QtWidgets.QWidget):
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
-        for item in self.outline_items:
-            self.panel.box.removeItem(item)
-        self.outline_items = []
+        self.draw_outlines()                          # kept while the patterned light is held, else taken away
 
     def release(self) -> None:
         """Lets the Polygon go (Let go, or Clampwise closing): PolyScan can take it again."""
