@@ -105,6 +105,8 @@ READINGS = (
     Reading("meter_irms_on", "MCCMSG_GetMeterIrmsEnable", "b", "Irms meter on", modes=VC),
 )
 METERS = (0, 1, 2, 3)          # MCCMSG_METER1 .. METER4: channel 1 V and I, channel 2 V and I, in V and A (meter_words)
+METER_SAMPLES, METER_GAP_S = 10, 0.01   # each meter read this often, this far apart, and averaged: Commander's meter is
+                                        # an instant's value, which an open pipette's noise makes jump +-10-20 pA
 METER_GETTER = "MCCMSG_GetMeterValue"
 GETTERS = tuple(dict.fromkeys(r.getter for r in READINGS)) + (METER_GETTER,)
 FORBIDDEN = ("Set", "Auto", "Zap", "Buzz", "Pulse", "Reset", "QuickSelect", "Toggle", "Clear")
@@ -358,11 +360,17 @@ class Commander:
             state.values[r.key], state.units[r.key] = self._shown(r, value, state.mode)
             state.raw[r.key] = value
         if meters and not state.status:
-            for m in METERS:
-                value = ctypes.c_double(math.nan)
-                err = ctypes.c_int(0)
-                if self._lib(METER_GETTER, self._handle, ctypes.byref(value), ctypes.c_uint(m), ctypes.byref(err)):
-                    state.meters[m] = float(value.value)
+            seen: dict[int, list[float]] = {}
+            for k in range(METER_SAMPLES):
+                if k:
+                    time.sleep(METER_GAP_S)
+                for m in METERS:
+                    value = ctypes.c_double(math.nan)
+                    err = ctypes.c_int(0)
+                    if self._lib(METER_GETTER, self._handle, ctypes.byref(value), ctypes.c_uint(m),
+                                 ctypes.byref(err)):
+                        seen.setdefault(m, []).append(float(value.value))
+            state.meters = {m: sum(v) / len(v) for m, v in seen.items()}
         return state
 
     def _get(self, r: Reading) -> tuple[Any, str]:

@@ -252,7 +252,12 @@ The camera's and the patterned light's <b>Use here</b> (and <b>Let go</b>) are o
 the patterned light's section is folded, its <b>All mirrors off</b>.</p>
 <p><b>The cell.</b> The amplifier's readings are shown large; its Rs and Cm are the whole-cell compensation's
 settings, marked "compensation off" when it is off (then they estimate nothing). The four meters are channel 1's
-potential and current, then channel 2's, as Commander shows them. <b>From the recorded trace:</b> the newest file in the
+potential and current, then channel 2's, as Commander shows them. Each is read ten times a tenth of a second apart and
+averaged, and the large V and I are the mean of the last two seconds of those: Commander's meter is an instant's
+value, which an open pipette's noise makes jump by 10 to 20 pA. That mean begins again whenever anything is changed on
+the amplifier (the mode, the holding, an Auto pipette offset, the seal test), so a new zero shows at once; a current
+that then creeps away from zero is the electrode or the bath ground drifting. The <b>pipette offset</b> set by the
+Auto offset is shown with the other readings. <b>From the recorded trace:</b> the newest file in the
 folder Clampex writes to (or the watched project's folder) is read while it is written, each sweep once complete
 (opened with read, write and delete sharing and closed at once, never mapped; a partial last sweep waits), and its
 test step measured as the Membrane test analysis measures one: Rs, Rm, Cm and the holding current, with the noise;
@@ -282,7 +287,11 @@ during the patterned light's calibration, and unticked leaves the exposure as ty
 video stream at its fastest, so the exposure sets the pace (37 ms: 27 pictures a second); hovering the frame rate
 says what limits it. <b>Snapshot</b> saves the picture as taken, a TIFF in the folder the acquisition writes to
 (else the open project's), with the exposure, gain and objective in its description and the scale as its
-resolution (ImageJ and Fiji read it). <b>Measure</b> drags a line whose length is given in um once the camera is
+resolution (ImageJ and Fiji read it). <b>Picture display</b> (folded under the buttons; its header says how many
+settings differ from the raw picture) changes how the picture is drawn on screen and nothing else: brightness,
+contrast (20% to 20 times, as taken in the middle) and gamma (above 1 lifts dim parts); <b>Auto</b> fits the
+contrast to the picture once (its darkest and brightest 0.1%), <b>Raw</b> puts it back as taken. These are applied as
+the screen draws, so they cost the camera no frames, and what is taken and saved stays raw. <b>Measure</b> drags a line whose length is given in um once the camera is
 calibrated; the wheel zooms, a drag pans, <b>Fit</b> shows the whole picture. The <b>Objective</b> slider says which
 objective is in use, and the scale bar, Measure and the patterned light's calibration follow it; the size of one
 pixel in um is shown beside it. <b>Scale &amp; slice...</b> sets that scale: before any calibration it is nominal, the camera's

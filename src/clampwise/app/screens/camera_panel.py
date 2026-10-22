@@ -24,6 +24,12 @@ from ..widgets import box, label
 
 SHOW_EVERY_S = 1 / 30                # at most 30 redraws a second (smooth to the eye; 60 doubled the drawing for
                                      # nothing seen), and only once the last one is drawn
+# the picture's display (screen only): brightness in %, contrast as 10 ** (value / 100) (even steps from 20% to 20x,
+# as taken in the middle), gamma in hundredths; at RAW, as taken
+DISPLAY = (("brightness", "Brightness", -100, 100, "Lighter or darker on screen (the levels moved together)"),
+           ("contrast", "Contrast", -70, 130, "More or less contrast on screen (100%: as taken; 20% to 20 times)"),
+           ("gamma", "Gamma", 20, 300, "Above 1 lifts the dim parts (dim fluorescence), below 1 darkens them"))
+RAW = {"brightness": 0, "contrast": 0, "gamma": 100}
 FPS_SHARE = 0.97                     # of each frame's time, the exposure (the rest: the camera reading the sensor out)
 FOLLOW_EVERY_S = 0.5                 # auto exposure, on: how often it looks at the picture and corrects the exposure
 FOLLOW_STEP = 2.0                    # each correction at most twice or half the exposure (no jumping about)
@@ -307,7 +313,11 @@ class CameraPanel(QtWidgets.QWidget):
         self._thread: CameraThread | None = None
         lay = box("v", "xs")
         self.view = pg.GraphicsLayoutWidget()
+        self.view.setFrameShape(QtWidgets.QFrame.NoFrame)   # the picture to the view's edge: no frame, no margin
+        edge = 0                                          # not a spacing of the theme's: the picture's own edge
+        self.view.ci.setContentsMargins(edge, edge, edge, edge)
         self.box = self.view.addViewBox(lockAspect=True, invertY=True, enableMenu=False)
+        self.box.setDefaultPadding(0.0)
         self.image = pg.ImageItem(axisOrder="row-major")
         self.box.addItem(self.image)
         self.bar_line = pg.PlotCurveItem(pen=pg.mkPen("w", width=4))
@@ -379,7 +389,7 @@ class CameraPanel(QtWidgets.QWidget):
         self.gain.editingFinished.connect(self._exposure)
         actions = box("h", "s")
         actions.addWidget(widgets.button("Snapshot", self.snapshot, "Save the picture as taken into the cell's folder"))
-        actions.addWidget(widgets.button("Scale & slice...", self.open_scale, "um a pixel at each objective (the "
+        actions.addWidget(widgets.button("Scale && slice...", self.open_scale, "um a pixel at each objective (the "
                                          "scale bar, Measure, the patterned light's regions in um); the slice's plane "
                                          "and orientation for the compass"))
         tools = actions
@@ -396,11 +406,42 @@ class CameraPanel(QtWidgets.QWidget):
                                        quiet=True))
         tools.addStretch(1)
         self.status = label("", "muted", wrap=True)
+        # how the picture is drawn: brightness, contrast, gamma (the screen's only: the frames and snapshots stay raw)
+        self.display = widgets.Advanced("Picture display")
+        self.display.header.setToolTip("Brightness, contrast and gamma of the picture on screen; what is taken and "
+                                       "saved stays as the camera gives it")
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(theme.SPACE["s"])
+        grid.setVerticalSpacing(theme.SPACE["xs"])
+        self.tone: dict[str, tuple[QtWidgets.QSlider, QtWidgets.QLabel]] = {}
+        for row, (key, caption, low, high, tip) in enumerate(DISPLAY):
+            slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            slider.setRange(low, high)
+            slider.setValue(RAW[key])
+            slider.setToolTip(tip)
+            value = label("", "muted")
+            value.setMinimumWidth(48)
+            slider.valueChanged.connect(lambda *_: self._display_changed())
+            grid.addWidget(label(caption, "muted"), row, 0)
+            grid.addWidget(slider, row, 1)
+            grid.addWidget(value, row, 2)
+            self.tone[key] = (slider, value)
+        grid.setColumnStretch(1, 1)
+        self.display.body_layout.addLayout(grid)
+        tone_buttons = box("h", "s")
+        tone_buttons.addWidget(widgets.button("Auto", self.auto_display, "Contrast fitted to the picture now: its "
+                                              "darkest 0.1% black, its brightest 0.1% white", quiet=True))
+        tone_buttons.addWidget(widgets.button("Raw", self.raw_display, "Every level as the camera gives it",
+                                              quiet=True))
+        tone_buttons.addStretch(1)
+        self.display.body_layout.addLayout(tone_buttons)
+        self._levels, self._lut = (0.0, 255.0), None
         # the controls apart from the picture: Live puts them in its side panel's Camera section, so they stay in
         # reach while the picture is enlarged or in a window of its own
         below = box("v", "xs")
         below.addLayout(controls)
         below.addLayout(actions)
+        below.addWidget(self.display)
         below.addWidget(self.status)
         self.controls = QtWidgets.QWidget()
         self.controls.setLayout(below)
@@ -417,6 +458,7 @@ class CameraPanel(QtWidgets.QWidget):
         self.objective.setValue(self.objectives.index(20.0))
         self.load_settings()
         self.exposure.setEnabled(not self.auto.isChecked())    # typed only while auto exposure is off
+        self._display_changed()                               # the display as kept (raw at first)
         self._loading = False
 
     # ---- taking and letting go
@@ -552,6 +594,55 @@ class CameraPanel(QtWidgets.QWidget):
                                           1.0 / t.show_every_s))
         self._fps_at, self._fps_taken, self._fps_shown = now, t.taken, self._shown
 
+    def display_levels(self) -> tuple[tuple[float, float], float]:
+        """The grey levels drawn black and white, and the gamma, from the sliders: brightness moves both levels,
+        contrast narrows or widens them about their middle."""
+        b = self.tone["brightness"][0].value() / 100.0
+        c = 10.0 ** (self.tone["contrast"][0].value() / 100.0)
+        g = self.tone["gamma"][0].value() / 100.0
+        middle, width = 127.5 - b * 127.5, 255.0 / c
+        return (middle - width / 2, middle + width / 2), g
+
+    def _display_changed(self) -> None:
+        (black, white), g = self.display_levels()
+        self._levels = (black, white)
+        self._lut = None if g == 1.0 else np.round((np.linspace(0.0, 1.0, 256) ** (1.0 / g)) * 255).astype(np.uint8)
+        self.image.setLookupTable(self._lut)
+        if self.image.image is not None:
+            self.image.setLevels(self._levels)
+        for key, (slider, value) in self.tone.items():
+            v = slider.value()
+            value.setText(f"{v / 100:.2f}" if key == "gamma" else f"{v:+d}%" if key == "brightness" else
+                          f"{10.0 ** (v / 100.0) * 100:.0f}%")
+        self.display.set_changed(sum(slider.value() != RAW[k] for k, (slider, _) in self.tone.items()))
+        self.save_settings()
+
+    def raw_display(self) -> None:
+        """The picture drawn as the camera gives it."""
+        for key, (slider, _) in self.tone.items():
+            slider.blockSignals(True)
+            slider.setValue(RAW[key])
+            slider.blockSignals(False)
+        self._display_changed()
+
+    def auto_display(self) -> None:
+        """Brightness and contrast fitted to the picture now: its darkest 0.1% drawn black, its brightest 0.1% white
+        (looked at once, on every 4th pixel: nothing is computed on each frame)."""
+        if self.last is None:
+            self.window.say("No picture yet: take the camera first.")
+            return
+        lo, hi = np.percentile(self.last.rgb[::4, ::4, 0], (0.1, 99.9))
+        hi = max(float(hi), float(lo) + 1.0)
+        middle, width = (lo + hi) / 2.0, hi - lo
+        values = {"brightness": int(round((127.5 - middle) / 127.5 * 100)),
+                  "contrast": int(round(100.0 * np.log10(255.0 / width)))}
+        for key, v in values.items():
+            slider = self.tone[key][0]
+            slider.blockSignals(True)
+            slider.setValue(min(max(v, slider.minimum()), slider.maximum()))
+            slider.blockSignals(False)
+        self._display_changed()
+
     def _show(self, frame) -> None:
         self._shown += 1
         try:
@@ -575,7 +666,7 @@ class CameraPanel(QtWidgets.QWidget):
                     step = max(step, getattr(self, "_min_step", 1))
             except Exception:                    # the view not laid out yet
                 step = 1
-        self.image.setImage(img[::step, ::step] if step > 1 else img, autoLevels=False, levels=(0, 255))
+        self.image.setImage(img[::step, ::step] if step > 1 else img, autoLevels=False, levels=self._levels)
         self.image.setRect(QtCore.QRectF(0, 0, img.shape[1], img.shape[0]))
         self._place_bar()
 
@@ -820,6 +911,12 @@ class CameraPanel(QtWidgets.QWidget):
         self.dialog.bar.setChecked(str(s.value("camera/scale_bar", "true")).lower() == "true")
         self.auto.setChecked(str(s.value("camera/auto_exposure", "true")).lower() == "true")
         self.frame_rate.setValue(float(s.value("camera/fps", 0.0) or 0.0))
+        try:
+            kept = json.loads(str(s.value("camera/display", "{}") or "{}"))
+        except ValueError:
+            kept = {}
+        for key, (slider, _) in self.tone.items():
+            slider.setValue(int(kept.get(key, RAW[key])))
 
     def save_settings(self) -> None:
         if self._loading or not getattr(self.window, "persist", False):
@@ -838,3 +935,4 @@ class CameraPanel(QtWidgets.QWidget):
         s.setValue("camera/medial_right", self.dialog.medial.currentIndex() == 0)
         s.setValue("camera/auto_exposure", self.auto.isChecked())
         s.setValue("camera/fps", self.frame_rate.value())
+        s.setValue("camera/display", json.dumps({k: slider.value() for k, (slider, _) in self.tone.items()}))

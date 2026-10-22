@@ -137,6 +137,26 @@ def test_the_four_meters_are_each_channel_s_potential_and_current():
     assert mc.meter_words(mc.AmplifierState()) == ""
 
 
+def test_each_meter_is_the_mean_of_several_readings_not_one_instant(monkeypatch):
+    # an open pipette's current, read alone, jumps +-10-20 pA (the rig, 2026-10-22: -8 to -26 pA): read ten times and
+    # averaged, it is steady
+    monkeypatch.setattr(mc, "METER_GAP_S", 0.0)
+    fake = FakeCommander(VC_STATE)
+    noise = iter([-8e-12, -26e-12] * mc.METER_SAMPLES)
+    answer = fake._answer
+
+    def noisy(name, args):
+        ok = answer(name, args)
+        if name == "MCCMSG_GetMeterValue" and (args[2].value if hasattr(args[2], "value") else args[2]) == 1:
+            args[1]._obj.value = next(noise)
+        return ok
+
+    fake._answer = noisy
+    s = _commander(fake).read()
+    assert s.meters[1] == pytest.approx(-17e-12) and fake.calls.count("MCCMSG_GetMeterValue") == 4 * mc.METER_SAMPLES
+    assert s.meters[0] == pytest.approx(1.5e9)                                  # a steady one as it is
+
+
 def test_a_busy_commander_stops_the_reading_instead_of_waiting_on_every_call():
     fake = FakeCommander(VC_STATE, errors={"MCCMSG_GetHolding": mc.TIMED_OUT})
     s = _commander(fake).read()

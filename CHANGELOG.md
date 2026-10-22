@@ -38,11 +38,23 @@
     during the patterned light's calibration.
   - Snapshot (the picture as taken), Measure, the slice **Compass** (switched beside Measure), Fit, the Objective
     slider, and **Scale & slice...** (the length calibration, and the slice's plane and orientation for the compass).
-- **Removed from the camera:** the histogram and its levels; Adjust... (brightness, contrast, gamma, sharpness,
-  clarity, saturation, colour balance, auto levels, presets, colour scales, clipped pixels in red, crosshair);
+  - **Picture display**, folded: brightness, contrast and gamma, Auto and Raw. They change only how the screen draws
+    the picture, so they cost the camera no frames, and snapshots stay raw.
+  - **Full screen**, the picture alone (Esc leaves), and **Picture only** for the docked view: no title, status line
+    or border. The picture itself has no frame or margin.
+- **Removed from the camera:** the histogram; Adjust... (sharpness, clarity, saturation, colour balance, auto
+  levels, presets, colour scales, clipped pixels in red, crosshair);
   background and dark-frame corrections; the fluorescence overlay; frame averaging; binning. A colour camera's picture is shown grey.
 - Hardware's Detect button is gone (it looks every 5 s anyway), as are the patterned light's second Off and its
   "Nothing shown" line.
+- **The patterned light's window shows its field as the mirrors show it**: what is lit now in white, the steps
+  outlined and numbered, a click to choose one, a double-click to light it, with Mirrors ON/off and the two buttons
+  above. It works without the calibration.
+- **The amplifier's meters are steady and show the real zero.** Each meter is read ten times a tenth of a second
+  apart and averaged, and the large V and I show the mean of the last 2 seconds. Before, one instant's reading jumped
+  by 10 to 20 pA with an open pipette, so a zeroed pipette never looked zero. The mean begins again on any change at
+  the amplifier (an Auto pipette offset, the mode, the holding, the seal test), so the new zero shows at once. The
+  **pipette offset** is shown among the amplifier's readings.
 - `tools/rigtest/polygon_calibrate.py`: calibrates at the rig from a console (`--keep` keeps it), with
   `--focus` (a checkerboard and a sharpness reading to focus by) and `--spots-only`.
 

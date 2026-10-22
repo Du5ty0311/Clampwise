@@ -25,6 +25,7 @@ from .. import theme, widgets
 from ..widgets import box, label
 from .base import Screen
 
+METER_LOOKS = 4                        # the meters shown: their mean over this many looks (2 s at two a second)
 RS_CHANGE = 0.20                       # B19: a badge when Rs moves more than 20% from where watching began
 HISTORY_S = 3 * 3600
 ORDER = ("acquisition", "camera", "amplifier", "light")
@@ -94,6 +95,7 @@ class WindowView(QtWidgets.QFrame):
     enlarge = QtCore.Signal(str)
     hide_me = QtCore.Signal(str)
     pop = QtCore.Signal(str)                          # out into a window of its own, or back
+    fullscreen = QtCore.Signal(str)                   # full screen, the picture alone (Esc leaves), or back
     fill_changed = QtCore.Signal(str, bool)
     part_chosen = QtCore.Signal(str, object)          # role, (left, top, right, bottom) px in from the edges, or WHOLE
     own_changed = QtCore.Signal(str, bool)            # role, Clampwise's own panel shown (Use here) or not
@@ -105,6 +107,10 @@ class WindowView(QtWidgets.QFrame):
         self.panel: QtWidgets.QWidget | None = None   # Clampwise's own picture in place of the program's window
         self.own = False
         self.popped = False                           # a window of its own
+        self.bare = False                             # the picture alone: no title row, status line or border
+        self.bare_chosen = False                      # ... as chosen for the view (full screen is always bare)
+        self.full_popped = False                      # out of Live only to go full screen: put back when left
+        self._shown_before: dict = {}
         self.fill = role in FILL                      # the picture stretched to the frame's shape, or kept in proportion
         self._band: QtWidgets.QRubberBand | None = None
         self._from: QtCore.QPoint | None = None
@@ -239,9 +245,33 @@ class WindowView(QtWidgets.QFrame):
         self._fit_head()
         self._place()
 
+    def set_bare(self, on: bool) -> None:
+        """The picture alone (on): the title row, the status line, the border and the margins hidden; or all back,
+        as they were."""
+        parts = [w for w in (self.name, self.badge, self.detail, self.enlarge_button, self.hide_button,
+                             self.pop_button, getattr(self, "use_button", None)) if w is not None]
+        if on and not self.bare:
+            self._shown_before = {w: not w.isHidden() for w in parts}
+            for w in parts:
+                w.setVisible(False)
+        elif not on and self.bare:
+            for w in parts:
+                w.setVisible(self._shown_before.get(w, True))
+        self.bare = on
+        m = 0 if on else theme.SPACE["s"]
+        self.layout().setContentsMargins(m, m, m, m)
+        self.layout().setSpacing(0 if on else theme.SPACE["xs"])
+        self.setObjectName("bare" if on else "desk")             # no border drawn round it
+        self.style().unpolish(self)
+        self.style().polish(self)
+        if not on:
+            self._fit_head()
+
     def _fit_head(self) -> None:
         """A narrow view keeps its name and its Use here (or Let go) readable: the status word gives way first,
         then the enlarge and hide buttons (pop out stays: a window of its own is as large as wanted)."""
+        if self.bare:
+            return
         tools_allowed = not self.popped and not getattr(self, "_free", False)
         use = getattr(self, "use_button", None)
         need = self.name.minimumWidth() + self.pop_button.sizeHint().width() + 40
@@ -284,7 +314,7 @@ class WindowView(QtWidgets.QFrame):
 
     def fit_to_source(self) -> None:
         """A popped-out view in the shape of what it shows, as large as its screen allows (stretchable after)."""
-        if not self.popped or self._thumb is None:
+        if not self.popped or self._thumb is None or self.isFullScreen():
             return
         pw, ph = self._thumb.part_size(self.shown_part())
         if pw <= 0 or ph <= 0:
@@ -343,11 +373,12 @@ class WindowView(QtWidgets.QFrame):
                 a.setCheckable(True)
                 a.setChecked(abs(self.windowOpacity() * 100 - pct) < 1)
                 a.triggered.connect(lambda _=False, v=pct: self.setWindowOpacity(v / 100))
-            menu.addAction("Normal size" if self.isFullScreen() else "Full screen (Esc leaves)",
-                           lambda: self.showNormal() if self.isFullScreen() else self.showFullScreen())
+            menu.addAction("Leave full screen (Esc)" if self.isFullScreen() else "Full screen, the picture alone "
+                           "(Esc leaves)", lambda: self.fullscreen.emit(self.role))
             menu.addAction("Fit to the program's shape (as large as the screen)", self.fit_to_source)
             menu.addSeparator()
         else:
+            menu.addAction("Full screen, the picture alone (Esc leaves)", lambda: self.fullscreen.emit(self.role))
             menu.addAction("Pop out into a window of its own", lambda: self.pop.emit(self.role))
             menu.addAction("Show all the views again" if self.enlarged else "Enlarge this view",
                            lambda: self.enlarge.emit(self.role))
@@ -390,8 +421,8 @@ class WindowView(QtWidgets.QFrame):
         if self._choosing() and event.key() == QtCore.Qt.Key_Escape:
             self._end_choice()
             return
-        if self.popped and event.key() == QtCore.Qt.Key_Escape and self.isFullScreen():
-            self.showNormal()
+        if event.key() == QtCore.Qt.Key_Escape and self.isFullScreen():
+            self.fullscreen.emit(self.role)
             return
         super().keyPressEvent(event)
 
@@ -527,6 +558,7 @@ class LiveScreen(Screen):
             self.views[role].hide_me.connect(lambda r: self.set_view_shown(r, False))
             self.views[role].part_chosen.connect(self.set_part)
             self.views[role].pop.connect(self.toggle_popped)
+            self.views[role].fullscreen.connect(self.toggle_fullscreen)
             self.views[role].fill_changed.connect(lambda *_: self._save_layout())
         self.grid = views
         tidy = QtWidgets.QWidget()
@@ -545,15 +577,14 @@ class LiveScreen(Screen):
         self.camera = CameraPanel(window, folder=self._snapshot_folder)
         self.views["camera"].hold(self.camera, self.use_camera, self.camera.release)
         self.camera.released.connect(self._camera_let_go)
-        from .polygon_panel import PolygonPanel
+        from .polygon_panel import FieldView, PolygonPanel
 
         self.patterned = PolygonPanel(self.camera)         # the Polygon in Clampwise (rig.polygon), PolyScan closed
-        # its controls are in the side panel beside the camera's; its view says where they went
-        light_note = label("Held by Clampwise. Its controls are in the Patterned light section, at the right, beside "
-                           "the camera's; regions are drawn and chosen on the camera's picture.", "muted", wrap=True)
-        light_note.setAlignment(QtCore.Qt.AlignCenter)
+        # its view: the field as its mirrors show it, steps chosen and lit there (no calibration needed); its other
+        # controls in the side panel beside the camera's
+        self.light_field = FieldView(self.patterned)
         self.views["light"].hold(
-            light_note, self.use_light, self.patterned.release,
+            self.light_field, self.use_light, self.patterned.release,
             "Run the Polygon in Clampwise: patterns, PolyScan's sequences, shapes drawn on the camera's picture "
             "(PolyScan must be closed)",
             "the patterned light held by Clampwise; its light is still switched by the acquisition (Let go gives it "
@@ -618,6 +649,17 @@ class LiveScreen(Screen):
         self.held_notes["camera"] = label("", "muted", wrap=True)
         cam.add(self.held_notes["camera"])
         cam.add(self.camera.controls)
+        view_row = box("h", "s")
+        self.full_button = widgets.button("Full screen", lambda: self.toggle_fullscreen("camera"),
+                                          "The camera's picture alone, full screen (Esc leaves)", quiet=True)
+        self.picture_only = QtWidgets.QCheckBox("Picture only")
+        self.picture_only.setToolTip("The camera's view without its title row, status line and border: more room for "
+                                     "the picture")
+        self.picture_only.toggled.connect(self.set_picture_only)
+        view_row.addWidget(self.full_button)
+        view_row.addWidget(self.picture_only)
+        view_row.addStretch(1)
+        self.camera.controls.layout().addLayout(view_row)
         # the patterned light's, under the camera's: its regions are drawn on that picture, its calibration reads it,
         # its map follows the objective chosen there. Off stays on the header: in reach with the section folded
         light = sections.add(widgets.Section("light", "Patterned light"))
@@ -640,7 +682,8 @@ class LiveScreen(Screen):
         self.channel_name = label("Amplifier", "heading")
         top.addWidget(self.channel_name, 1)
         self.readouts = {k: Readout(c) for k, c in (
-            ("mode", "Mode"), ("holding", "Holding"), ("rs", "Rs"), ("cm", "Cm"), ("rs_comp", "Rs compensation"),
+            ("mode", "Mode"), ("holding", "Holding"), ("pipette_offset", "Pipette offset"), ("rs", "Rs"), ("cm", "Cm"),
+            ("rs_comp", "Rs compensation"),
             ("bridge", "Bridge balance"), ("output", "Primary output"), ("filter", "Low-pass"),
             ("seal", "Seal test"), ("telegraph", "Telegraph"))}
         top.addWidget(self.readouts["mode"].value)
@@ -735,6 +778,9 @@ class LiveScreen(Screen):
         self._split_set = False
         self._details_folded = False
         self._load_layout()
+        self.picture_only.blockSignals(True)               # as kept
+        self.picture_only.setChecked(self.views["camera"].bare_chosen)
+        self.picture_only.blockSignals(False)
         self._apply_views()
         for role in self.held_buttons:                     # nothing held yet: each section says how to take it
             self._held_changed(role, False)
@@ -974,6 +1020,40 @@ class LiveScreen(Screen):
             view._drop()
             view._attach()
 
+    def toggle_fullscreen(self, role: str) -> None:
+        """A view full screen, its picture alone (popped out of Live for it, on the screen Live is on), or back to
+        where it was (Esc)."""
+        view = self.views[role]
+        if view.isFullScreen():
+            view.showNormal()
+            view.set_bare(view.bare_chosen)
+            if view.full_popped:
+                view.full_popped = False
+                self.toggle_popped(role)
+        else:
+            if not view.popped:
+                self.toggle_popped(role)
+                view.full_popped = True
+            screen = self.window.windowHandle().screen() if self.window.windowHandle() is not None else None
+            if screen is not None and view.windowHandle() is not None:
+                view.windowHandle().setScreen(screen)
+                view.setGeometry(screen.geometry())
+            view.set_bare(True)
+            view.showFullScreen()
+            view.setFocus()
+        if role == "camera":                             # the picture fitted to its new size
+            QtCore.QTimer.singleShot(150, lambda: self.camera.box.autoRange(padding=0))
+        self.full_button.setText("Leave full screen" if view.isFullScreen() else "Full screen")
+
+    def set_picture_only(self, on: bool) -> None:
+        """The camera's view without its title row, status line and border, chosen (kept)."""
+        view = self.views["camera"]
+        view.bare_chosen = on
+        if not view.isFullScreen():
+            view.set_bare(on)
+        QtCore.QTimer.singleShot(150, lambda: self.camera.box.autoRange(padding=0))
+        self._save_layout()
+
     def toggle_popped(self, role: str) -> None:
         """A view out into a window of its own (resized, maximized, laid over another), or back into Live."""
         view = self.views[role]
@@ -1038,6 +1118,10 @@ class LiveScreen(Screen):
                     view.part = tuple(int(x) for x in saved.split(","))
                 except ValueError:
                     view.part = None
+        for role, view in self.views.items():
+            view.bare_chosen = str(s.value(f"live/bare/{role}", "false")).lower() == "true"
+            if view.bare_chosen:
+                view.set_bare(True)
         state = s.value("live/split")
         if state is not None:
             self._split_set = self.split.restoreState(state)
@@ -1051,6 +1135,7 @@ class LiveScreen(Screen):
         s.setValue("live/hidden", sorted(self._hidden))
         for role, view in self.views.items():
             s.setValue(f"live/fill/{role}", view.fill)
+            s.setValue(f"live/bare/{role}", view.bare_chosen)
             s.setValue(f"live/part/{role}", WHOLE if view.part == WHOLE else
                        ",".join(str(x) for x in view.part) if view.part else "")
         s.setValue("live/split", self.split.saveState())
@@ -1260,6 +1345,7 @@ class LiveScreen(Screen):
                            "it; Clampwise records with these scales")
         r["mode"].set(amp.mode_name, src)
         r["holding"].set(amp.shown("holding") + ("" if amp.values.get("holding_on", True) else " (off)"), src)
+        r["pipette_offset"].set(amp.shown("pipette_offset"), src + "; the Auto pipette offset sets it")
         on = amp.values.get("whole_cell_on")
         off = "" if on else " (off)"
         why = "the amplifier's whole-cell compensation" + ("" if on else ": off, so these are its dials' settings, "
@@ -1277,9 +1363,10 @@ class LiveScreen(Screen):
         self.meters.setText(f"Meters: {words}" if words else "")
         number = amp.device.channel if amp.device is not None else 1
         self.channel_name.setText(f"Channel {number}")
-        v, i = amp.meters.get(2 * (number - 1)), amp.meters.get(2 * (number - 1) + 1)
+        v, i = self._steady_meters(amp, number)
         self.meter_v.setText(f"{v * 1e3:.1f}" if v is not None and math.isfinite(v) else "–")
-        self.meter_i.setText(f"{i * 1e12:.1f}" if i is not None and math.isfinite(i) else "–")
+        self.meter_i.setText((f"{i * 1e12:.0f}" if abs(i) >= 10e-12 else f"{i * 1e12:.1f}")
+                             if i is not None and math.isfinite(i) else "–")
         rs = amp.values.get("rs") if vc and amp.values.get("whole_cell_on") else None
         if rs is not None and math.isfinite(rs) and rs > 0:
             self._history.append((snap.at, rs, amp.values.get("cm", math.nan), amp.values.get("holding", math.nan)))
@@ -1295,6 +1382,23 @@ class LiveScreen(Screen):
             self.rs_badge.set("warn" if abs(change) > RS_CHANGE else "ok",
                               f"Rs {change:+.0%} since the readout began",
                               f"{self._first_rs:.1f} to {rs:.1f} MOhm; a change over {RS_CHANGE:.0%} is flagged (B19)")
+
+    def _steady_meters(self, amp, channel: int) -> tuple:
+        """The channel's potential and current as the meters read them, averaged over the last METER_LOOKS looks
+        (each already the mean of several readings): steady as Commander's own meter, not an instant's noise. Begun
+        again when anything is changed on the amplifier (the mode, the holding, an Auto offset, the seal test), so a
+        new zero shows at once."""
+        v, i = amp.meters.get(2 * (channel - 1)), amp.meters.get(2 * (channel - 1) + 1)
+        key = (channel, amp.mode, amp.values.get("holding"), amp.values.get("holding_on"),
+               amp.values.get("pipette_offset"), amp.values.get("test_signal_on"))
+        if key != getattr(self, "_meter_key", None):
+            self._meter_key, self._meter_looks = key, []
+        if v is not None and i is not None and math.isfinite(v) and math.isfinite(i):
+            self._meter_looks = (self._meter_looks + [(v, i)])[-METER_LOOKS:]
+        if not self._meter_looks:
+            return v, i
+        n = len(self._meter_looks)
+        return sum(x[0] for x in self._meter_looks) / n, sum(x[1] for x in self._meter_looks) / n
 
     def _trace(self, snap) -> None:
         """Each sweep's test pulse from the file being written: its numbers, Rs on the plot, the badge."""

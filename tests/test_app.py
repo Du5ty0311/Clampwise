@@ -609,9 +609,24 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     panel.frame_rate.setValue(0.0)                                               # the exposure alone sets it
     panel._frame_rate()
     assert panel.exposure.maximum() == pytest.approx(500.0) and panel._thread.max_exposure_ms is None
+    # the picture's display: raw at first; brightness, contrast and gamma change only how it is drawn
+    assert tuple(panel.image.levels) == (0, 255) and panel.image.lut is None and panel.display._changed == 0
+    panel.tone["contrast"][0].setValue(30)                                       # twice the contrast (10 ** 0.3)
+    assert tuple(panel.image.levels) == pytest.approx((63.75, 191.25), abs=0.5) and panel.display._changed == 1
+    assert panel.tone["contrast"][1].text() == "200%"
+    panel.tone["gamma"][0].setValue(200)
+    assert panel.image.lut is not None and panel.image.lut[64] > 64             # the dim parts lifted
+    raw = panel.last.rgb.copy()
     path = panel.snapshot()
     assert path is not None and path.parent == tmp_path and path.suffix == ".tif"
     assert [p.name for p in tmp_path.iterdir()] == [path.name]                   # the picture as taken, alone
+    assert (panel.last.rgb == raw).all()                                          # what is taken is never changed
+    panel.auto_display()                                                          # fitted to the picture
+    lo, hi = np.percentile(panel.last.rgb[::4, ::4, 0], (0.1, 99.9))
+    black, white = panel.image.levels                                            # the picture's range all shown,
+    assert black <= lo + 1 and white >= hi - 1 and white - black < 255 / 5       # stretched as far as allowed
+    panel.raw_display()
+    assert tuple(panel.image.levels) == (0, 255) and panel.image.lut is None and panel.display._changed == 0
     panel.toggle_measure()
     assert panel.ruler is not None and "px (not calibrated)" in panel.ruler_text.toPlainText()
     # the objective's slider and the calibration (Scale...): one objective measured, the others by magnification
@@ -668,6 +683,19 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     live.toggle_enlarged("camera")
     assert panel.controls.isVisibleTo(live) and panel.exposure.isVisibleTo(live)
     live.toggle_enlarged("camera")
+    # full screen: the picture alone (no title row, status line, border or margin); Esc puts it back where it was
+    live.full_button.click()
+    assert view.isFullScreen() and view.bare and not view.name.isVisibleTo(view) and not view.detail.isVisibleTo(view)
+    assert view.layout().contentsMargins().left() == 0 and live.full_button.text() == "Leave full screen"
+    from pyqtgraph.Qt import QtGui
+    QtWidgets.QApplication.sendEvent(view, QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Escape,
+                                                           QtCore.Qt.NoModifier))
+    assert not view.isFullScreen() and not view.popped and not view.bare and view.name.isVisibleTo(view)
+    assert view.use_button.isVisibleTo(view) and live.full_button.text() == "Full screen"
+    live.picture_only.setChecked(True)                                           # chosen: the picture alone, docked
+    assert view.bare and not view.popped and not view.name.isVisibleTo(view)
+    live.picture_only.setChecked(False)
+    assert not view.bare and view.name.isVisibleTo(view)
     live._summaries()                                                             # as each look at the rig does
     status, words, _ = live.sections.sections["camera"].badge._shown
     assert status == "ok" and "20x" in words                                      # its header, folded or not
@@ -707,8 +735,19 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     live.patterned.project()
     assert live.patterned.wait() and live.patterned.polygon.shown == "1" and sdk.image is not None
     assert p.state.objectName() == "badge_warn" and "Mirrors ON: 1." in p.state.text()
+    # the patterned light's own window: the field as its mirrors show it, the steps chosen and lit there
+    fv = live.light_field
+    assert fv.isVisibleTo(light) and fv.image.image.max() == 255 and fv.state.text() == p.state.text()
+    assert fv.image.image[:20, :20].all() and not fv.image.image[-20:, -20:].any()     # cell 1: the top left lit
     p.off_button.click()
     assert p.wait() and "Mirrors off" in p.state.text() and not p._lit
+    assert fv.image.image.max() == 0 and "Mirrors off" in fv.state.text()
+    assert fv.click_at(0.05, 0.05) == 0 and p._chosen_rows() == [0]                  # a click chooses the step
+    assert fv.click_at(0.95, 0.95, add=True) == 99 and p._chosen_rows() == [0, 99]   # Ctrl+click adds one
+    fv.click_at(0.95, 0.95, light_it=True)                                            # a double-click lights it
+    assert p.wait() and p.polygon.shown == "100" and "Mirrors ON: 100." in fv.state.text()
+    fv.off_button.click()
+    assert p.wait() and fv.image.image.max() == 0
     # the calibration, step by step: ready (the camera and the light held), Start and Stop
     p.open_calibration()
     win = p.calibration_window
@@ -983,6 +1022,30 @@ def test_live_keeps_a_note_with_the_project_and_is_a_feature(qapp, window, folde
     window.project.set_feature("live_experiment", False)
     window.project_changed()
     assert not window.frame.sidebar.buttons["live"].isVisibleTo(window)
+
+
+def test_live_s_meters_are_steady_and_begin_again_after_a_pipette_offset(qapp, window):
+    # the current shown is the mean of the last looks (each a mean of several readings), like Commander's own meter;
+    # an Auto pipette offset (or any change on the amplifier) begins it again, so the new zero shows at once
+    from clampwise.rig import multiclamp
+
+    window.go("live")
+    live = window.screens["live"]
+
+    def amp(i_pa, offset_mv):
+        return multiclamp.AmplifierState(device=multiclamp.Device(1, "", 0, 0, 1), connected=True, mode=0,
+                                         values={"holding": -65.0, "holding_on": False, "pipette_offset": offset_mv},
+                                         units={"pipette_offset": "mV"}, meters={0: 0.0, 1: i_pa * 1e-12})
+
+    for i in (-8.0, -26.0, -10.0, -24.0):
+        v, cur = live._steady_meters(amp(i, 20.0), 1)
+    assert cur == pytest.approx(-17e-12)
+    v, cur = live._steady_meters(amp(-400.0, 20.0), 1)                       # the oldest look left out
+    assert cur == pytest.approx((-26 - 10 - 24 - 400) / 4 * 1e-12)
+    v, cur = live._steady_meters(amp(-2.0, 35.5), 1)                          # Auto pipette offset: begun again
+    assert cur == pytest.approx(-2e-12)
+    live._amplifier(type("Snap", (), {"amplifier": amp(-2.0, 35.5), "telegraph": None, "at": 0.0})())
+    assert live.readouts["pipette_offset"].value.text() == "35.5 mV" and live.meter_i.text() == "-2.0"
 
 
 def test_live_shows_the_cell_s_health_from_its_best_source(qapp, window):
