@@ -584,24 +584,37 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     live.use_camera()
     assert view.own and view.use_button.text() == "Let go" and panel.isVisibleTo(view)
     assert _wait(qapp, lambda: panel.last is not None)
-    assert panel.image.image.shape == (6, 8, 3)
+    # the picture raw and grey: a colour camera's brightness, its 256 levels as taken, nothing computed on it
+    assert panel.image.image.shape == (6, 8) and picture.is_grey(panel.last.rgb)
+    assert tuple(panel.image.levels) == (0, 255) and panel.image.lut is None
     panel._fps_at -= 1.0                                                         # a second's frames: the rate
     panel._rate()
     assert panel.fps.text().split()[1] == "fps" and float(panel.fps.text().split()[0]) > 0
-    panel.dialog.show_adjust(picture.Adjust(gamma=0.6), apply=True)
+    # auto exposure on at first, following the light (the exposure greyed); off, the exposure stays as typed
+    assert panel.auto.isChecked() and panel._thread.follow and not panel.exposure.isEnabled()
+    panel.auto.setChecked(False)
+    assert not panel._thread.follow and panel.exposure.isEnabled()
+    # the frame rate typed: the exposure kept short enough for it, the gain raised to keep the picture as bright
+    panel.exposure.setValue(22.0)
+    panel.gain.setValue(1.0)
+    panel._exposure()
+    panel.frame_rate.setValue(50.0)
+    panel._frame_rate()
+    assert panel.exposure.value() == pytest.approx(19.4) and panel.exposure.maximum() == pytest.approx(19.4)
+    assert panel.gain.value() == pytest.approx(22.0 / 19.4, abs=0.01) and "as bright" in panel.status.text()
+    assert panel._thread.max_exposure_ms == pytest.approx(19.4)
+    panel.frame_rate.setValue(100.0)                                             # the gain at its highest (1.2)
+    panel._frame_rate()
+    assert panel.exposure.value() == pytest.approx(9.7) and "times dimmer" in panel.status.text()
+    panel.frame_rate.setValue(0.0)                                               # the exposure alone sets it
+    panel._frame_rate()
+    assert panel.exposure.maximum() == pytest.approx(500.0) and panel._thread.max_exposure_ms is None
     path = panel.snapshot()
     assert path is not None and path.parent == tmp_path and path.suffix == ".tif"
-    assert path.with_name(path.stem + "_as_shown.png").is_file()                 # the original kept as taken
-    panel.capture("background")
-    assert _wait(qapp, lambda: panel.corrections.background is not None)
-    assert panel.corrections.mode == "subtract" and panel.dialog.bg_state.text() == "kept"
-    panel.capture("overlay")
-    assert _wait(qapp, lambda: panel.corrections.overlay is not None)
-    panel.auto_exposure()
-    assert _wait(qapp, lambda: panel.status.text().startswith("Auto exposure:"))
+    assert [p.name for p in tmp_path.iterdir()] == [path.name]                   # the picture as taken, alone
     panel.toggle_measure()
     assert panel.ruler is not None and "px (not calibrated)" in panel.ruler_text.toPlainText()
-    # the objective's slider and the calibration: one objective measured, the others by their magnification
+    # the objective's slider and the calibration (Scale...): one objective measured, the others by magnification
     assert panel.magnification == 20.0 and not panel.bar_line.isVisible()
     panel.dialog.um.setValue(0.2)                                                 # 20x measured: 0.2 um a pixel
     assert panel.calibrated == {20.0: 0.2} and panel.bar_line.isVisible() and "um" in panel.ruler_text.toPlainText()
@@ -618,9 +631,10 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert panel.objective_caption.text() == "Objective 20x  (0.225 um/px)" and panel.bar_line.isVisible()
     panel.dialog.adapter.setValue(0.5)
     assert panel.scale()[0] == pytest.approx(0.45) and "(0.45 um/px)" in panel.objective_caption.text()
-    # the slice's compass: rostral, caudal, medial, lateral over the picture, turned as the slice lies
+    # the slice's compass: Compass beside Measure; the plane and orientation in Scale & slice...
     assert not panel.compass_lines["Rostral"].isVisible()
-    panel.dialog.compass.setChecked(True)
+    panel.compass.click()
+    assert panel.dialog.compass.isChecked()                                      # one switch, in two places
     assert all(panel.compass_text[k].isVisible() for k in ("Rostral", "Caudal", "Medial", "Lateral"))
     (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Rostral"].getData()]
     assert x1 == pytest.approx(x0) and y1 < y0                                    # rostral up
@@ -638,20 +652,16 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert set(panel.compass_text) == {"Dorsal", "Ventral", "Medial", "Lateral"}
     assert panel.compass_text["Dorsal"].toPlainText() == "Dorsal" and panel.dialog.up_label.text() == "Dorsal points"
     assert panel.dialog.out_of_plane.text() == "RC is cut across"
-    (x0, x1), (y0, y1) = [list(v) for v in panel.compass_lines["Dorsal"].getData()]
-    assert x1 > x0 and y1 == pytest.approx(y0)                                    # dorsal where rostral was
     panel.dialog.plane.setCurrentIndex(panel.dialog.plane.findData("sagittal"))
     panel.dialog.naming.setCurrentText("Anterior, posterior")
     assert set(panel.compass_text) == {"Dorsal", "Ventral", "Anterior", "Posterior"}
-    assert panel.dialog.medial.currentText() == "Anterior to the left of dorsal"
     assert panel.orientation_text() == ("sagittal slice: dorsal 90 deg clockwise from up, anterior to its left; "
                                         "ML cut across")
-    panel.dialog.naming.setCurrentText("Letters: A P D V M L")
-    assert set(panel.compass_text) == {"D", "V", "A", "P"}
-    # sized freely: the Adjust window shrinks below its content (which then scrolls); the controls' share is dragged
-    assert panel.dialog.isSizeGripEnabled() and panel.dialog.minimumSize().height() <= 200
-    panel.dialog.resize(300, 200)
-    assert panel.dialog.height() <= 220
+    panel.compass.click()
+    assert not panel.dialog.compass.isChecked() and not panel.compass_lines["Dorsal"].isVisible()
+    panel.open_scale()
+    assert panel.dialog.isVisible() and panel.dialog.isSizeGripEnabled()
+    panel.dialog.close()
     # the controls in the side panel's Camera section, the picture alone in the view: in reach with it enlarged
     assert live.sections.sections["camera"].isAncestorOf(panel.controls) and not view.isAncestorOf(panel.controls)
     assert panel.controls.isVisibleTo(live) and live.held_buttons["camera"].text() == "Let go"
@@ -661,23 +671,6 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     live._summaries()                                                             # as each look at the rig does
     status, words, _ = live.sections.sections["camera"].badge._shown
     assert status == "ok" and "20x" in words                                      # its header, folded or not
-    # the adjustable histogram: its handles are the levels shown black and white; Reset all puts them back
-    assert _wait(qapp, lambda: panel.levels.counts is not None)
-    panel.levels.set_levels(40, 180, 1.0)
-    assert (panel.adjust.black, panel.adjust.white) == (40.0, 180.0) and panel.levels.region.getRegion() == (40, 180)
-    assert panel.levels.mid.value() == pytest.approx(110.0)                       # mid-grey half way at gamma 1
-    panel.levels.mid.setValue(40 + 140 * 0.25)                                    # dragged left: dim parts lifted
-    assert panel.adjust.gamma == pytest.approx(2.0, abs=0.01) and panel.levels.gamma.value() == pytest.approx(2.0)
-    panel.dialog.show_adjust(picture.Adjust(), apply=True)
-    assert (panel.adjust.black, panel.adjust.white) == (0.0, 255.0) and panel.levels.white.value() == 255
-    # binning: off unless chosen; on, the picture is half as wide and each pixel twice the um across
-    assert panel.binning.currentData() == 1
-    um = panel.scale()[0]
-    panel.binning.setCurrentIndex(panel.binning.findData(2))
-    assert panel._thread.binning == 2 and panel.scale()[0] == pytest.approx(2 * um)
-    assert _wait(qapp, lambda: panel.last is not None and panel.last.rgb.shape[:2] == (3, 4))
-    panel.binning.setCurrentIndex(0)
-    assert _wait(qapp, lambda: panel.last.rgb.shape[:2] == (6, 8))
     # the Polygon in the patterned light view: Use here (PolyScan closed) shows its controls there
     from test_polygon import FakeSDK
 
@@ -697,6 +690,9 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert live.side.widget().width() <= live.side.viewport().width()
     live.sections.sections["light"].set_open(False)
     assert not live.patterned.isVisibleTo(live) and live.light_off.isVisibleTo(live)
+    live.sections.sections["light"].set_open(True)                               # unfolded: its own buttons
+    assert not live.light_off.isVisibleTo(live)
+    live.sections.sections["light"].set_open(False)
     live._summaries()
     assert live.sections.sections["light"].badge._shown[0] == "warn"               # not calibrated: said folded
     live.sections.sections["light"].set_open(True)
@@ -704,14 +700,75 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     live.patterned.source.setCurrentText("Grid")
     live.patterned.make_steps()
     assert live.patterned.list.count() == 100 and live.patterned.list.item(0).text() == "1"
+    p = live.patterned                                                           # what the mirrors do, in words
+    assert p.camera_ready.text() == "✓ Camera held" and p.camera_button.isHidden()
+    assert "Not calibrated at 20x" in p.cal_ready.text() and p.cal_button.text() == "Calibrate..."
+    assert p.state.objectName() == "badge_ok" and "Mirrors off" in p.state.text()
     live.patterned.project()
     assert live.patterned.wait() and live.patterned.polygon.shown == "1" and sdk.image is not None
+    assert p.state.objectName() == "badge_warn" and "Mirrors ON: 1." in p.state.text()
+    p.off_button.click()
+    assert p.wait() and "Mirrors off" in p.state.text() and not p._lit
+    # the calibration, step by step: ready (the camera and the light held), Start and Stop
+    p.open_calibration()
+    win = p.calibration_window
+    assert win.isVisible() and win.title.text().startswith("Calibrate at 20x") and win.needs.isHidden()
+    assert win.led.currentData() == "auto" and win.start.isEnabled() and not win.stop.isEnabled()
+    win.board.click()                                                            # a checkerboard to focus by
+    assert p.wait() and "Mirrors ON: checkerboard" in p.state.text()
+    win.board.click()
+    assert p.wait() and "Mirrors off" in p.state.text()
+    panel.auto.setChecked(True)                                                  # the exposure following the light
+    win.start.click()
+    assert p._cal is not None and win.stop.isEnabled() and "Calibrating" in p.state.text()
+    assert p._cal["plan"][0][0] == "expose" and not panel._thread.follow_paused  # the exposure set first, then held
+    win.stop.click()
+    assert p.wait() and p._cal is None and "Stopped" in win.doing.text() and win.outcome.objectName() == "badge_bad"
+    win.close()
     live.held_buttons["light"].click()                                           # Let go from the section's header
     assert not light.own and live.patterned.wait() and not live.patterned.polygon.connected
     assert ("uninit",) in sdk.calls and not live.patterned.isVisibleTo(live) and not live.light_off.isVisibleTo(live)
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
     assert live.held_buttons["camera"].text() == "Use here" and not panel.controls.isVisibleTo(live)
+
+
+def test_auto_exposure_follows_the_light_within_the_frame_rate():
+    # more light, a shorter exposure (more pictures a second); less, a longer one: at most twice or half at a time,
+    # never longer than the frame rate allows; nothing changed once the picture is right
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from clampwise.app.screens.camera_panel import CameraThread
+    from clampwise.rig import lucam
+
+    class Cam:
+        exposure_ms, gain, set = 10.0, 1.0, []
+
+        def set_exposure(self, ms, gain=None):
+            self.exposure_ms = ms
+            self.set.append(ms)
+
+    def frame(level):
+        g = np.full((40, 40), level, np.uint8)
+        return lucam.Frame(np.broadcast_to(g[:, :, None], (40, 40, 3)), 10.0, 1.0)
+
+    t, cam, rng = CameraThread(), Cam(), SimpleNamespace(low=0.02, high=500.0)
+    said = []
+    t.exposure_set.connect(lambda ms, note: said.append((ms, note)))
+    t._follow(cam, frame(255), rng)                                              # clipped: half the exposure
+    assert cam.exposure_ms == 5.0
+    t._follow(cam, frame(40), rng)                                               # dim: twice, not five times
+    assert cam.exposure_ms == 10.0 and said[-1] == (10.0, "")
+    t.max_exposure_ms = 12.0                                                     # 80 fps asked for
+    t._follow(cam, frame(20), rng)
+    assert cam.exposure_ms == 12.0 and "the frame rate allows" in said[-1][1]
+    n = len(cam.set)
+    t.max_exposure_ms = None
+    cam.exposure_ms = 10.0
+    t._follow(cam, frame(204), rng)                                              # right: left alone
+    assert len(cam.set) == n
 
 
 def test_live_uses_a_basler_camera_as_it_does_the_other(qapp, window, tmp_path):
@@ -728,12 +785,14 @@ def test_live_uses_a_basler_camera_as_it_does_the_other(qapp, window, tmp_path):
     panel.make = lambda: basler.Camera(fake, owner_check=lambda: False)
     panel.folder = lambda: str(tmp_path)
     panel.dialog.pixel_um.setValue(0.0)
+    panel.auto.setChecked(False)                                                 # the gain and exposure as set
     view.source = None
     live.use_camera()
     assert _wait(qapp, lambda: panel.last is not None)
     assert panel.image.image.shape[:2] == (6, 8) and fake.features["PixelFormat"] == "Mono8"
     assert panel.dialog.pixel_um.value() == pytest.approx(5.86)                  # an acA1920-40um's pixel
     assert "acA1920-40um" in panel.status.text() and panel.gain.value() == 6.0
+    assert panel.gain_kind == "db" and panel.image.image.ndim == 2                # grey, as taken
     panel.gain.setValue(0.0)
     panel._exposure()
     assert _wait(qapp, lambda: fake.features["Gain"] == 0.0)

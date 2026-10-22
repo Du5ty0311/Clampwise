@@ -138,7 +138,6 @@ def main() -> int:
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--cores", type=int, default=0, help="only this many cores (a cheaper PC)")
     p.add_argument("--low-priority", action="store_true")
-    p.add_argument("--binning", type=int, default=1, choices=(1, 2, 4))
     p.add_argument("--exposure", type=float, default=0.0, help="ms (0: as the camera is)")
     p.add_argument("--stacks", action="store_true", help="also where each thread spends its time")
     p.add_argument("--low-power-mode", action="store_true", help="Clampwise's low-power mode on (Settings)")
@@ -163,9 +162,8 @@ def main() -> int:
             print(f"the camera gave no picture: {live.camera.status.text()}")
         else:
             cam = live.camera
-            if args.binning > 1:
-                cam.binning.setCurrentIndex(cam.binning.findData(args.binning))
             if args.exposure:
+                cam.auto.setChecked(False)             # the exposure as asked, not as the light would have it
                 cam.exposure.setValue(args.exposure)
                 cam._exposure()                        # as typed: editingFinished applies it
             _common.pump(2.0)

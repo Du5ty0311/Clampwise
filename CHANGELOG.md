@@ -17,6 +17,34 @@
 - **Each patterned-light calibration says when it was measured.** From two days old, it says to check it again
   before relying on regions of one cell: the map holds only while the camera and the Polygon stay where they were.
 - The side panel is never narrower than its controls need, so nothing is cut off at its right edge.
+- **The patterned light says what its mirrors do.** A line at the top of its section always reads **Mirrors ON**
+  (and which steps) or **Mirrors off**, beside the two buttons that change it: **Mirrors on** (was Project) and
+  **All mirrors off** (was Off). Under it, **1 · Set up** shows whether the camera is held and whether the
+  objective in use is calibrated (when, how closely), each with its button; then **2 · Pattern** and **3 · Steps**.
+  Rarely changed options (Next every, after each recording, Trig In stepping, outlines, lit by 0) are under
+  **More options**. Use here on the patterned light takes the camera too.
+- **Calibrate... is a guided window.** It covers what to put under the objective (a mirror or a fluorescent
+  slide) and how the LED is on: **Automatic** works out steady or pulsed by itself. Then Start and Stop, a progress
+  bar, and the outcome in a word. A new half-field test picture catches a camera that is out of focus where the
+  pattern forms, and says so, instead of only "no spots found".
+- **The camera is simple and fast.** The picture is shown raw and grey, exactly as the camera gives it, nothing
+  computed on it. Display processing was costing frames: on the rig, saved display settings (auto levels and a colour
+  balance on the grey camera) held it to 1 to 1.5 frames a second; raw, it takes 61 at 10 ms and 27 at 37 ms. The
+  controls left:
+  - The frame rate the camera gives now, live, and a **Frame rate** box: type the pictures a second you want, and
+    the exposure is kept short enough, with the gain raised to keep the picture as bright.
+  - Exposure, gain, and **Auto exposure**, which now follows the light twice a second, as the camera's own program
+    does: more light, a shorter exposure, more frames a second. It stays within the frame rate typed, and holds still
+    during the patterned light's calibration.
+  - Snapshot (the picture as taken), Measure, the slice **Compass** (switched beside Measure), Fit, the Objective
+    slider, and **Scale & slice...** (the length calibration, and the slice's plane and orientation for the compass).
+- **Removed from the camera:** the histogram and its levels; Adjust... (brightness, contrast, gamma, sharpness,
+  clarity, saturation, colour balance, auto levels, presets, colour scales, clipped pixels in red, crosshair);
+  background and dark-frame corrections; the fluorescence overlay; frame averaging; binning. A colour camera's picture is shown grey.
+- Hardware's Detect button is gone (it looks every 5 s anyway), as are the patterned light's second Off and its
+  "Nothing shown" line.
+- `tools/rigtest/polygon_calibrate.py`: calibrates at the rig from a console (`--keep` keeps it), with
+  `--focus` (a checkerboard and a sharpness reading to focus by) and `--spots-only`.
 
 ## 1.7.1 — 2026-10-20
 

@@ -37,6 +37,11 @@ SOURCES = ("Full field", "Spot", "Grid", "Line of spots", "Image file", "Sequenc
 POLYSCAN_DATA = Path.home() / "Documents" / "Mightex" / "PolyScan3" / "User Data"
 SETTLE_S = 0.4                 # after a pattern is sent, before a picture of it is used (at least 3 exposures)
 PULSE_WAIT_S = 10.0            # pulsed light: how long each test picture waits for a pulse of the protocol
+EXPOSE_STEADY_S = 2.0          # the calibration's own exposure: unchanged this long counts as settled
+EXPOSE_MAX_S = 15.0            # (or after this long, settled or not)
+LOOK_S = 1.5                   # not knowing how the LED is on: how long the first test pictures are watched for a pulse
+LED_MODES = {"auto": "Find out by itself (Automatic)", "steady": "On steadily (switched on at its driver)",
+             "pulsed": "Only in a protocol's pulses (play it during the calibration)"}
 FLASH_GREY = 4.0               # a frame this much brighter (mean grey) than the darkest one caught a pulse
 CHOSEN = (255, 220, 0)         # the steps chosen, outlined on the picture
 LIT = (90, 170, 255)           # the steps the patterned light shows now (lit whenever the LED is on), filled
@@ -82,10 +87,23 @@ class PolygonPanel(QtWidgets.QWidget):
         self._lit: set[str] = set()                   # the names of the steps the patterned light shows now
         self._mask_images: dict = {}                  # an image step's mirrors as a picture to lay over the camera's
         lay = box("v", "s")                           # in a section of Live's side panel, which has the margins
-        lay.addWidget(label("Clampwise sets where the light goes and holds it; the light itself is switched by "
-                            "its LED driver, from the acquisition program, as your protocol says.", "muted", wrap=True))
-        self.device_status = label(self.polygon.status, "muted", wrap=True)
-        lay.addWidget(self.device_status)
+        # what the mirrors do now, always in view, and the two buttons that change it: the light itself is still
+        # switched by its LED driver, from the acquisition program, as the protocol says
+        self.state = widgets.Badge("muted", "Not held")
+        self.state.setWordWrap(True)
+        self.state.setToolTip("What the mirrors show. Mirrors on: the slice is lit there whenever the LED fires (the "
+                              "LED is switched by its driver, from the acquisition, as your protocol says). Mirrors "
+                              "off: nothing is lit, whatever the LED does.")
+        lay.addWidget(self.state)
+        mirrors = box("h", "s")
+        self.on_button = widgets.primary("Mirrors on", self.project, "The chosen step(s) on the mirrors (lit whenever "
+                                                                     "the LED fires); a double-click on a step does it "
+                                                                     "too")
+        self.off_button = widgets.button("All mirrors off", self.off, "No mirror lit: nothing reaches the slice")
+        mirrors.addWidget(self.on_button)
+        mirrors.addWidget(self.off_button)
+        mirrors.addStretch(1)
+        lay.addLayout(mirrors)
         # while the patterned light is found or let go (25 s, 4 s): a bar and the seconds, the controls greyed
         self.busy_box = QtWidgets.QWidget()
         busy = box("v", "xs")
@@ -102,44 +120,31 @@ class PolygonPanel(QtWidgets.QWidget):
         self._busy_timer = QtCore.QTimer(self)
         self._busy_timer.setInterval(200)
         self._busy_timer.timeout.connect(self._busy_tick)
-        # the calibration
-        lay.addWidget(label("Light test and calibration", "section"))
-        cal = box("h", "s")
-        self.cal_button = widgets.button("Test and calibrate", self.calibrate,
-                                         "With the light on and a fluorescent slide or slice in view: which byte "
-                                         "lights a mirror, then where its field lies on the picture")
-        cal.addWidget(self.cal_button)
-        cal.addStretch(1)
-        lay.addLayout(cal)
-        cal = box("h", "s")                           # a row each: the side panel is narrow
-        self.pulsed = QtWidgets.QCheckBox("Light in pulses (play the protocol)")
-        self.pulsed.setChecked(True)
-        self.pulsed.setToolTip("The light is on only in the protocol's pulses: play the protocol during the test, and "
-                               "each test picture waits for a pulse (up to 10 s) and reads the frame it lit. "
-                               "Unticked: the light is on all the time")
-        cal.addWidget(self.pulsed)
-        cal.addStretch(1)
-        lay.addLayout(cal)
-        cal = box("h", "s")
-        self.outlines = QtWidgets.QCheckBox("Outlines on the picture")
-        self.outlines.setChecked(True)
-        self.outlines.setToolTip("The steps' shapes drawn over the camera's picture (the one shown brighter)")
-        self.outlines.toggled.connect(lambda *_: self.draw_outlines())
-        cal.addWidget(self.outlines)
-        cal.addStretch(1)
-        lay.addLayout(cal)
-        cal = box("h", "s")
-        self.swap = QtWidgets.QCheckBox("Lit by 0 (swap lit and unlit)")
-        self.swap.setToolTip("Which byte turns a mirror onto the slice: the light test finds it; set it here by hand "
-                             "when the test cannot run (the light only on in the protocol's pulses). Shown again at once.")
-        self.swap.toggled.connect(self._swapped)
-        cal.addWidget(self.swap)
-        cal.addStretch(1)
-        lay.addLayout(cal)
-        self.cal_status = label("", "muted", wrap=True)
-        lay.addWidget(self.cal_status)
-        # the pattern
-        lay.addWidget(label("Pattern", "section"))
+        # 1, what the regions need: the camera's picture, and a calibration at the objective in use
+        lay.addWidget(label("1 · Set up", "section"))
+        ready = QtWidgets.QGridLayout()
+        ready.setHorizontalSpacing(theme.SPACE["s"])
+        ready.setVerticalSpacing(theme.SPACE["xs"])
+        ready.setColumnStretch(0, 1)
+        self.camera_ready = widgets.Badge("muted", "Camera")
+        self.camera_ready.setWordWrap(True)
+        self.camera_button = widgets.button("Use the camera", self._take_camera, "Regions are drawn on its picture "
+                                            "and the calibration reads it", quiet=True)
+        self.cal_ready = widgets.Badge("muted", "Not calibrated")
+        self.cal_ready.setWordWrap(True)
+        self.cal_button = widgets.button("Calibrate...", self.open_calibration, "Where the mirrors' field lies on "
+                                         "the camera's picture, at this objective: a few minutes with a fluorescent "
+                                         "slide", quiet=True)
+        ready.addWidget(self.camera_ready, 0, 0)
+        ready.addWidget(self.camera_button, 0, 1)
+        ready.addWidget(self.cal_ready, 1, 0)
+        ready.addWidget(self.cal_button, 1, 1)
+        lay.addLayout(ready)
+        self.take_camera = None                       # set by Live: takes the camera (its Use here)
+        self.cal_status = label("", "muted", wrap=True)          # the calibration's words (its window shows them)
+        self.cal_status.hide()
+        # 2, the pattern
+        lay.addWidget(label("2 · Pattern", "section"))
         src = box("h", "s")
         self.source = QtWidgets.QComboBox()
         self.source.addItems(SOURCES)
@@ -149,29 +154,35 @@ class PolygonPanel(QtWidgets.QWidget):
         lay.addLayout(src)
         self.pages = QtWidgets.QStackedWidget()
         self._build_pages()
-        self.source.currentIndexChanged.connect(self.pages.setCurrentIndex)
+        self.source.currentIndexChanged.connect(self._page)
         lay.addWidget(self.pages)
         self.pattern_note = label("", "muted", wrap=True)
         lay.addWidget(self.pattern_note)
-        # the steps
-        lay.addWidget(label("Steps", "section"))
+        # 3, the steps: chosen here or on the picture, put on the mirrors
+        lay.addWidget(label("3 · Steps", "section"))
         self.list = QtWidgets.QListWidget()
         self.list.setMinimumHeight(90)
+        self.list.setMaximumHeight(180)
         self.list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.list.setToolTip("Ctrl+click or Shift+click to choose several steps: Project lights them together")
+        self.list.setToolTip("Ctrl+click or Shift+click to choose several: Mirrors on lights them together. "
+                             "A double-click puts a step on the mirrors.")
         self.list.itemDoubleClicked.connect(lambda *_: self.project())
         self.list.itemSelectionChanged.connect(self.draw_outlines)
-        lay.addWidget(self.list, 1)
-        lay.addWidget(label("On the picture: yellow, chosen (click a step there to choose it, Ctrl+click for more, "
-                            "double-click to show it); blue and filled, what the patterned light shows now (lit "
-                            "whenever the LED is on); dashed, the edge of its field.", "muted", wrap=True))
+        lay.addWidget(self.list)
         go = box("h", "s")
-        go.addWidget(widgets.button("Previous", lambda: self.step_by(-1), "The step before, shown", quiet=True))
-        go.addWidget(widgets.primary("Project", self.project, "Show the chosen step (lit while the LED is on)"))
-        go.addWidget(widgets.button("Next", lambda: self.step_by(1), "The next step, shown", quiet=True))
-        go.addWidget(widgets.button("Off", self.off, "No mirror lit"))
+        go.addWidget(widgets.button("< Previous", lambda: self.step_by(-1), "The step before, on the mirrors",
+                                    quiet=True))
+        go.addWidget(widgets.button("Next >", lambda: self.step_by(1), "The next step, on the mirrors", quiet=True))
         go.addStretch(1)
         lay.addLayout(go)
+        legend = label("On the picture: yellow, chosen (click one to choose it, Ctrl+click for more, double-click to "
+                       "light it); blue and filled, on the mirrors now; dashed, the edge of the field.", "muted",
+                       wrap=True)
+        lay.addWidget(legend)
+        self.shown_label = label("", "muted", wrap=True)     # the last change's details (the banner says the state)
+        lay.addWidget(self.shown_label)
+        # what is rarely changed, folded
+        more = widgets.Advanced("More options")
         go = box("h", "s")
         self.auto = QtWidgets.QCheckBox("Next every")
         self.auto.setToolTip("Step on by itself (time it to your protocol's sweeps); unticked: by hand")
@@ -183,35 +194,47 @@ class PolygonPanel(QtWidgets.QWidget):
         go.addWidget(self.auto)
         go.addWidget(self.every)
         go.addStretch(1)
-        lay.addLayout(go)
-        self.off_after = QtWidgets.QCheckBox("Off after each recording")
+        more.body_layout.addLayout(go)
+        self.off_after = QtWidgets.QCheckBox("All mirrors off after each recording")
         self.off_after.setChecked(True)
         self.off_after.setToolTip("When a recording made here ends, no mirror is left lit: the next run never "
                                   "lights the slice with a pattern left from this one")
-        lay.addWidget(self.off_after)
-        trig = box("h", "s")
+        more.add(self.off_after)
         self.on_trigger = QtWidgets.QCheckBox("Step on each trigger (Trig In)")
-        self.on_trigger.setToolTip("Project loads every step into the patterned light, and each TTL at its Trig In "
+        self.on_trigger.setToolTip("Mirrors on loads every step into the patterned light, and each TTL at its Trig In "
                                    "shows the next one: pulse 1 of a sweep on one region, pulse 2 on another, timed "
-                                   "by the protocol's digital output (sent a few ms before each light pulse). Off "
-                                   "stops it. Needs the digitizer's digital output wired to Trig In.")
-        trig.addWidget(self.on_trigger)
-        trig.addStretch(1)
-        lay.addLayout(trig)
+                                   "by the protocol's digital output (sent a few ms before each light pulse). All "
+                                   "mirrors off stops it. Needs the digitizer's digital output wired to Trig In.")
+        more.add(self.on_trigger)
         trig = box("h", "s")
         self.held_ms = _pct(50.0, 1.0, 10000.0, 5.0, " ms")
         self.held_ms.setToolTip("How long each step stays after its trigger: longer than the light pulse")
         trig.addWidget(label("Each step held", "muted"))
         trig.addWidget(self.held_ms)
         trig.addStretch(1)
-        lay.addLayout(trig)
-        self.shown_label = label("Nothing shown.", "muted", wrap=True)
-        lay.addWidget(self.shown_label)
+        more.body_layout.addLayout(trig)
+        self.outlines = QtWidgets.QCheckBox("Outlines on the picture")
+        self.outlines.setChecked(True)
+        self.outlines.setToolTip("The steps' shapes drawn over the camera's picture (the one shown brighter)")
+        self.outlines.toggled.connect(lambda *_: self.draw_outlines())
+        more.add(self.outlines)
+        self.swap = QtWidgets.QCheckBox("Lit by 0 (swap lit and unlit)")
+        self.swap.setToolTip("Which byte turns a mirror onto the slice: the calibration finds it; set it here by hand "
+                             "only when it cannot run. Shown again at once.")
+        self.swap.toggled.connect(self._swapped)
+        more.add(self.swap)
+        self.device_status = label(self.polygon.status, "muted", wrap=True)
+        more.add(self.device_status)
+        lay.addWidget(more)
         self.setLayout(lay)                           # in Live's side panel, which scrolls (no scroll area inside it)
+        self.calibration_window: CalibrationWindow | None = None
         self._poll = QtCore.QTimer(self)
         self._poll.setInterval(50)
         self._poll.timeout.connect(self._calibration_tick)
+        self.led = "auto"                             # how the LED is on while calibrating: found out, or as said
         self.load()
+        self._page(0)
+        self.show_state()
         objective = getattr(panel, "objective", None)
         if objective is not None:                     # another objective: its own calibration (or none)
             objective.valueChanged.connect(lambda *_: self._use_objective())
@@ -413,11 +436,85 @@ class PolygonPanel(QtWidgets.QWidget):
                  QtWidgets.QLineEdit)
         for w in self.findChildren(kinds):
             w.setEnabled(on)
-        if on and self._cal is not None:
-            self.cal_button.setEnabled(False)
+        self.show_state()
 
     def busy(self) -> bool:
         return self.busy_box.isVisibleTo(self)
+
+    # ---------------------------------------------------------------- what the mirrors do, and what is ready
+    def _set_lit(self, names: set[str]) -> None:
+        self._lit = set(names)
+        self.draw_outlines()
+        self.show_state()
+
+    def show_state(self) -> None:
+        """The mirrors' state in words (on, and which; off; calibrating; not held) and the set-up's two rows: the
+        camera held, the objective in use calibrated (when, how well)."""
+        if self._opening:
+            self.state.set("muted", "Finding the patterned light (about 25 s)...")
+        elif not self.polygon.connected:
+            self.state.set("muted", "Not held: Use here, on this section's header")
+        elif self._cal is not None:
+            self.state.set("warn", "Calibrating: test patterns on the mirrors")
+        elif self._lit:
+            names = sorted(self._lit)
+            words = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+            self.state.set("warn", f"Mirrors ON: {words}. Lit whenever the LED fires.")
+        else:
+            self.state.set("ok", "Mirrors off: nothing is lit")
+        held = self.polygon.connected
+        self.on_button.setEnabled(held and self._cal is None and not self.busy())
+        self.off_button.setEnabled(held and not self.busy())
+        camera = getattr(self.panel, "_thread", None) is not None
+        self.camera_ready.set("ok" if camera else "warn", "Camera held" if camera else "Camera not held")
+        self.camera_button.setVisible(not camera)
+        status, words = self.calibration_words()
+        self.cal_ready.set(status, words, self._cal_text())
+        self.cal_button.setText("Calibrate again..." if self.calibration.ready else "Calibrate...")
+
+    def calibration_words(self) -> tuple[str, str]:
+        """The objective in use's calibration in a few words: ok (checked within the target), warn (none, off the
+        target, or old enough to check again)."""
+        c, key = self.calibration, self._objective() or "this objective"
+        if not c.ready:
+            return "warn", f"Not calibrated at {key}"
+        age = patterns.age_words(c.measured)
+        words = f"Calibrated at {key}" + (f", {age.split(' (')[0]}" if age else "")
+        if c.check and c.um_per_px:
+            worst = float(c.check_errors_px().max() * c.um_per_px)
+            words += f", within {worst:.1f} um"
+            if worst > patterns.CHECK_TARGET_UM:
+                return "warn", words + f" (over {patterns.CHECK_TARGET_UM:g} um: calibrate again)"
+        return ("warn" if "check it again" in age else "ok"), words
+
+    def _take_camera(self) -> None:
+        if self.take_camera is not None:
+            self.take_camera()
+
+    def _page(self, index: int) -> None:
+        """The chosen pattern's settings, the stack as tall as they are (not as the tallest page)."""
+        for k in range(self.pages.count()):
+            self.pages.widget(k).setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred
+                                               if k == index else QtWidgets.QSizePolicy.Ignored)
+        self.pages.setCurrentIndex(index)
+        self.pages.adjustSize()
+
+    def open_calibration(self) -> None:
+        if self.calibration_window is None:
+            self.calibration_window = CalibrationWindow(self)
+        self.calibration_window.refresh()
+        self.calibration_window.show()
+        self.calibration_window.raise_()
+        self.calibration_window.activateWindow()
+
+    def calibration_progress(self) -> tuple[int, int]:
+        """The calibration's test pictures done and to do (the plan grows as it goes: spots nearer the centre, the
+        check grid), (0, 0) when none is under way."""
+        c = self._cal
+        if c is None:
+            return 0, 0
+        to_do = len(c["plan"]) + (0 if "checks" in c else len(patterns.CHECK_SPOTS))
+        return max(c["k"], 0), max(to_do, len(c["plan"]), 1)
 
     def summary(self) -> tuple[str, str, str]:
         """How the patterned light stands in a few words (status, words, detail): what a folded section's header
@@ -439,7 +536,7 @@ class PolygonPanel(QtWidgets.QWidget):
         if self.polygon.connected:
             return True
         self.panel.window.say("The patterned light is still being found (about 25 s)..." if self._opening else
-                              "Use here first (the patterned light view): it is not held.")
+                              "Use here first (on the Patterned light section): it is not held.")
         return False
 
     def _said(self) -> None:
@@ -563,7 +660,7 @@ class PolygonPanel(QtWidgets.QWidget):
                                          f"{time.strftime('%H:%M:%S')}." +
                                          ("" if self._calibrated_light() else
                                           " The light test has not been done: lit and unlit may be swapped."))
-                self._lit = {p.name for p in parts}
+                self._set_lit({p.name for p in parts})
                 self._log(e)
                 self.draw_outlines()
             else:
@@ -599,8 +696,8 @@ class PolygonPanel(QtWidgets.QWidget):
         def done(e):
             if isinstance(e, light_record.Shown):
                 self.shown_label.setText(f"Stepping through {len(steps)} step(s) on each trigger since "
-                                         f"{time.strftime('%H:%M:%S')}: {e.step}. Off stops it.")
-                self._lit = {s.name for s in steps}
+                                         f"{time.strftime('%H:%M:%S')}: {e.step}. All mirrors off stops it.")
+                self._set_lit({s.name for s in steps})
                 self._log(e)
                 self.draw_outlines()
             else:
@@ -634,7 +731,7 @@ class PolygonPanel(QtWidgets.QWidget):
         def done(e):
             if isinstance(e, light_record.Shown):
                 self.shown_label.setText(f"Off since {time.strftime('%H:%M:%S')}: no mirror lit.")
-                self._lit = set()
+                self._set_lit(set())
                 self._log(e)
                 self.draw_outlines()
 
@@ -1009,8 +1106,15 @@ class PolygonPanel(QtWidgets.QWidget):
         # each test picture: its name, the image sent and, for a spot, where it is on the field
         plan = [("none", np.zeros((patterns.ROWS, patterns.COLUMNS), np.uint8), None),
                 ("all", np.full((patterns.ROWS, patterns.COLUMNS), 255, np.uint8), None)]
-        self._cal = {"plan": plan, "k": -1, "pictures": {}, "spots": [], "off": None, "ring": 0}
-        self.cal_button.setEnabled(False)
+        following = getattr(getattr(self.panel, "auto", None), "isChecked", lambda: False)()
+        if following:                                 # the exposure first, for every mirror on (a mirror sends back
+            every = np.ones((patterns.ROWS, patterns.COLUMNS), bool)        # far more than a cell), then held
+            plan.insert(0, ("expose", patterns.image(every, self.calibration.on_value), None))
+        else:                                         # the test pictures are compared: one exposure for them all
+            self._hold_exposure(True)
+        self._cal = {"plan": plan, "k": -1, "pictures": {}, "spots": [], "off": None, "ring": 0,
+                     "pulsed": {"steady": False, "pulsed": True}.get(self.led)}       # None: found out
+        self.show_state()
         self.cal_status.setText("Light test: nothing shown, then everything...")
         self._next_picture()
         self._poll.start()
@@ -1052,15 +1156,24 @@ class PolygonPanel(QtWidgets.QWidget):
         if time.monotonic() - c["sent_at"] < self._settle() or self.panel._shown < c["frames_at"] + 2:
             return
         name, _, uv = c["plan"][c["k"]]
-        if self.pulsed.isChecked():
-            picture = self._pulse_picture(c)
-            if picture is None:
+        if name == "expose":                          # auto exposure settling on every mirror on: then held
+            ms, now = self.panel.exposure.value(), time.monotonic()
+            if ms != c.get("exposure_ms"):
+                c["exposure_ms"], c["exposure_at"] = ms, now
+            if now - c["exposure_at"] < EXPOSE_STEADY_S and now - c["sent_at"] < EXPOSE_MAX_S:
+                self.cal_status.setText(f"Setting the camera's exposure with every mirror on: {ms:.3g} ms...")
                 return
-        else:
-            picture = self.panel.last.rgb[:, :, 0].astype(np.float32)
+            self._hold_exposure(True)
+            self._next_picture()
+            return
+        picture = self._test_picture(c, name)
+        if picture is None:
+            return
         c["pictures"][name] = picture
         if name == "all":
             self._light_tested()
+        elif name == "half":
+            c["sharpness"] = patterns.sharpness(picture - c["off"])
         elif name.startswith("spot"):
             found = patterns.find_spot(c["pictures"][name], c["off"])
             if found is not None:
@@ -1068,7 +1181,7 @@ class PolygonPanel(QtWidgets.QWidget):
         elif name.startswith("check"):
             found = patterns.find_spot(c["pictures"][name], c["off"])
             c["checks"].append((found, uv))
-        if name not in ("none", "all"):
+        if name not in ("none", "all"):                 # "half" too: only its sharpness is kept
             c["pictures"].pop(name, None)             # a picture is 11 MB in floats: only the dark one is kept
         if self._cal is None:
             return
@@ -1079,6 +1192,35 @@ class PolygonPanel(QtWidgets.QWidget):
                 self._fit()
             return
         self._next_picture()
+
+    def _test_picture(self, c: dict, name: str) -> np.ndarray | None:
+        """The picture of the test pattern on the mirrors, None while waiting for it. The LED on steadily: the frame
+        once the pattern has settled. In the protocol's pulses: the frame a pulse lit. Not known (Automatic): the
+        frames watched for LOOK_S; a flash means pulses; a steady picture means steady (for everything shown, once it
+        differs from nothing shown: until then a pulse may still come, the protocol not yet playing)."""
+        last = self.panel.last.rgb[:, :, 0].astype(np.float32)
+        if c["pulsed"] is False:
+            return last
+        picture = self._pulse_picture(c)
+        if c["pulsed"] is True:
+            return picture
+        if picture is not None and c.get("flashed"):
+            c["pulsed"] = True                        # a pulse seen: the LED follows the protocol
+            return picture
+        looked = time.monotonic() - c["sent_at"] >= LOOK_S and self.panel._shown >= c["frames_at"] + 3
+        if looked and not c.get("flashed"):
+            if name == "none":
+                return last
+            if name == "all" and self._light_changed(last, c["pictures"]["none"]):
+                c["pulsed"] = False                   # lit and steady: the LED is on all the time
+                return last
+        return picture                                # waited its longest: the light test then says so
+
+    @staticmethod
+    def _light_changed(lit: np.ndarray, unlit: np.ndarray) -> bool:
+        """Whether everything shown changed the picture from nothing shown (beyond its noise)."""
+        noise = float(np.std(unlit - unlit.mean())) * 0.05 + 1.0
+        return abs(patterns.lit_difference(lit, unlit)) >= max(2.0, noise)
 
     def _pulse_picture(self, c: dict) -> np.ndarray | None:
         """Pulsed light: every new frame looked at, the brightest kept; the picture once a frame clearly brighter than
@@ -1096,11 +1238,14 @@ class PolygonPanel(QtWidgets.QWidget):
                 c["dim"] = m
         waited = time.monotonic() - c["sent_at"]
         caught = c["best"] is not None and c["best"][0] - c["dim"] > FLASH_GREY and c.get("after", 0) >= 1
+        c["flashed"] = caught
         if caught or waited > PULSE_WAIT_S:
             return c["best"][1] if c["best"] is not None else self.panel.last.rgb[:, :, 0].astype(np.float32)
         step = c["k"] + 1
-        self.cal_status.setText(f"Test picture {step} of {len(c['plan'])}: waiting for a pulse of the protocol "
-                                f"({waited:.0f} s of at most {PULSE_WAIT_S:.0f} s)...")
+        what = ("waiting for a pulse of the protocol" if c["pulsed"] else
+                "watching for the LED (on steadily, or in the protocol's pulses)")
+        self.cal_status.setText(f"Test picture {step} of {len(c['plan'])}: {what} ({waited:.0f} s of at most "
+                                f"{PULSE_WAIT_S:.0f} s)...")
         return None
 
     def _light_tested(self) -> None:
@@ -1108,10 +1253,13 @@ class PolygonPanel(QtWidgets.QWidget):
         change = patterns.lit_difference(c["pictures"]["all"], c["pictures"]["none"])
         noise = float(np.std(c["pictures"]["none"] - c["pictures"]["none"].mean())) * 0.05 + 1.0
         if abs(change) < max(2.0, noise):
-            self._end_calibration("No change on the picture between nothing and everything shown: is the "
-                                  "LED on (with the light in pulses: the protocol playing meanwhile), the light "
-                                  "path open and a fluorescent sample in view?")
+            self._end_calibration("No change on the picture between all mirrors off and all on. Is the LED on "
+                                  "(switched on at its driver, or a protocol that pulses it playing during the "
+                                  "calibration), the light path to the slice open, and a fluorescent sample in "
+                                  "focus?")
             return
+        if c["pulsed"] is None:
+            c["pulsed"] = False                       # it changed and no pulse was seen: on steadily
         on = 255 if change > 0 else 0
         self.calibration.on_value = on
         self.swap.blockSignals(True)
@@ -1121,6 +1269,11 @@ class PolygonPanel(QtWidgets.QWidget):
         self.cal_status.setText(f"Light test: a mirror is lit by {on} (the picture {abs(change):.0f} grey levels "
                                 "brighter with everything shown). Now the spots...")
         self.calibration.light_tested = True
+        # the field's left half: sharp-edged on the picture when the camera is focused where the pattern forms, an
+        # even glow when not (then no spot can be seen: said so if none is found)
+        half = np.zeros((patterns.ROWS, patterns.COLUMNS), bool)
+        half[:, : patterns.COLUMNS // 2] = True
+        c["plan"].append(("half", patterns.image(half, on), None))
         self._plan_spots(patterns.CALIBRATION_SPOTS, patterns.CALIBRATION_DIAMETER)
 
     def _plan_spots(self, spots, diameter: float, kind: str = "spot") -> None:
@@ -1144,10 +1297,14 @@ class PolygonPanel(QtWidgets.QWidget):
             return
         if patterns.spread_px(cam_found) < 3.0:
             planned = sum(1 for name, _, _ in c["plan"] if name.startswith("spot"))
+            why = ("Half the field lit gave an even glow over the whole picture, not a lit half: the camera is not "
+                   "focused where the pattern forms. Show a Grid (Mirrors on) and focus on the mirror or slide until "
+                   "its squares are sharp, then calibrate again." if c.get("sharpness", 1.0) < patterns.SHARP else
+                   "Is the picture in focus on the mirror or fluorescent sample, and the light bright enough? Then "
+                   "calibrate again.")
             self._end_calibration(f"Only {len(c['spots'])} of {planned} spots were found on the picture, too few "
-                                  "to place the field: the light test is kept, the field's place is not. Is the "
-                                  "picture in focus on the fluorescent sample, and the light bright enough? Then "
-                                  "calibrate again.", keep_light=True)
+                                  "to place the field: the light test is kept, the field's place is not. " + why,
+                                  keep_light=True)
             return
         cam = np.array([p for p, _ in c["spots"]])
         uv = np.array([q for _, q in c["spots"]])
@@ -1204,15 +1361,42 @@ class PolygonPanel(QtWidgets.QWidget):
                     f"(mean {err.mean():.1f} px); calibrate the camera's length to read it in um.")
         self._end_calibration(base + text, keep_light=True)
 
+    def _hold_exposure(self, on: bool) -> None:
+        hold = getattr(self.panel, "hold_exposure", None)
+        if hold is not None:
+            hold(on)
+
+    def show_checkerboard(self, on: bool) -> None:
+        """A 4 x 4 checkerboard on the mirrors to focus by (sharp squares on the camera's picture: the camera is
+        focused where the pattern forms; an even glow: it is not), or all mirrors off."""
+        if not on:
+            self.off()
+            return
+        if not self._held():
+            return
+        r = (np.arange(patterns.ROWS) * 4 // patterns.ROWS)[:, None]
+        k = (np.arange(patterns.COLUMNS) * 4 // patterns.COLUMNS)[None, :]
+        board = patterns.image((r + k) % 2 == 0, self.calibration.on_value)
+        self.auto.setChecked(False)
+        self._wanted += 1
+
+        def done(ok):
+            if ok is True:
+                self.shown_label.setText(f"Checkerboard since {time.strftime('%H:%M:%S')}: focus until its squares "
+                                         "are sharp on the camera's picture.")
+                self._set_lit({"checkerboard"})
+
+        self._async(lambda: self.polygon.send(board), done)
+
     def _end_calibration(self, text: str, keep_light: bool = False) -> None:
         self._poll.stop()
+        self._hold_exposure(False)
         on = self.calibration.on_value
         self._cal = None
         if self.polygon.connected:
             self._async(lambda: self.polygon.off(on))
             self.shown_label.setText("Off: no mirror lit.")
-            self._lit = set()
-        self.cal_button.setEnabled(True)
+            self._set_lit(set())
         self.cal_status.setText(text)
         if keep_light:
             self.calibrations.keep(self.calibration)
@@ -1221,6 +1405,7 @@ class PolygonPanel(QtWidgets.QWidget):
                 self.make_steps()                     # the grid laid over the picture now that it can be
         self.draw_outlines()
         self._said()
+        self.show_state()
 
     # ---------------------------------------------------------------- kept for the user
     def _cal_text(self) -> str:
@@ -1251,6 +1436,7 @@ class PolygonPanel(QtWidgets.QWidget):
         self.cal_status.setText(("The objective changed during the calibration: stopped. " if stopped else "")
                                 + self._cal_text())
         self.draw_outlines()
+        self.show_state()
 
     def load(self) -> None:
         main = widgets._main_window(self.panel)
@@ -1260,6 +1446,8 @@ class PolygonPanel(QtWidgets.QWidget):
                     "polygon/calibration", "{}") or "{}")))
             except (ValueError, TypeError, AttributeError):
                 self.calibrations = patterns.Calibrations()
+            led = str(main._settings().value("polygon/led", "auto") or "auto")
+            self.led = led if led in LED_MODES else "auto"
         self.calibration = self.calibrations.at(self._objective())
         self.cal_status.setText(self._cal_text())
         self.swap.blockSignals(True)
@@ -1278,6 +1466,7 @@ class PolygonPanel(QtWidgets.QWidget):
         main = widgets._main_window(self.panel)
         if main is not None and getattr(main, "persist", False):
             main._settings().setValue("polygon/calibration", json.dumps(self.calibrations.to_dict()))
+            main._settings().setValue("polygon/led", self.led)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1294,7 +1483,6 @@ class PolygonPanel(QtWidgets.QWidget):
         self._poll.stop()
         if self._cal is not None:
             self._cal = None
-            self.cal_button.setEnabled(True)
         self._wanted += 1
         if self.polygon.connected or self._opening:
             self.device_status.setText("")
@@ -1310,8 +1498,7 @@ class PolygonPanel(QtWidgets.QWidget):
 
             def done(result):
                 self._busy_end()
-                self._lit = set()
-                self.draw_outlines()
+                self._set_lit(set())
                 off, when = result if isinstance(result, tuple) else (False, time.time())
                 if off:
                     self._log(light_record.entry("off", on_value=on, when=when))
@@ -1320,3 +1507,139 @@ class PolygonPanel(QtWidgets.QWidget):
 
             self._async(work, done)
         self.released.emit()
+
+
+class CalibrationWindow(QtWidgets.QDialog):
+    """The calibration, step by step: what to put under the objective, how the LED is on, Start and Stop, how far
+    it has gone, and the outcome in a word (within the target, or what to do)."""
+
+    HELP = {"auto": "Switch the LED on at its driver, or play a protocol that pulses it: Clampwise sees which.",
+            "steady": "Switch the LED on at its driver (its continuous or manual mode) before Start.",
+            "pulsed": "Press Start, then play a protocol that pulses the LED; each test picture waits for a pulse "
+                      "(up to 10 s)."}
+
+    def __init__(self, light: PolygonPanel) -> None:
+        super().__init__(light)
+        self.light = light
+        self.setWindowTitle("Calibrate the patterned light")
+        self.setModal(False)
+        lay = box("v", "s", "m")
+        self.title = label("", "heading", wrap=True)
+        lay.addWidget(self.title)
+        lay.addWidget(label("Where the mirrors' field lies on the camera's picture, so regions drawn on the picture "
+                            "land on the slice where they are drawn. Once for each objective; again whenever the "
+                            "camera or the patterned light is moved.", "muted", wrap=True))
+        self.needs = widgets.Badge("muted", "")
+        self.needs.setWordWrap(True)
+        lay.addWidget(self.needs)
+        lay.addWidget(label("1. Put a mirror (the pattern seen reflected) or a fluorescent slide under the objective, "
+                            "only the patterned light's LED on (the transmitted lamp and any other light source off). "
+                            "Show the checkerboard and focus until its squares are sharp on the camera's picture; an "
+                            "even glow means the pattern is not forming there, and no spot can be found.", "",
+                            wrap=True))
+        board = box("h", "s")
+        self.board = widgets.button("Checkerboard on the mirrors", None, "A 4 x 4 checkerboard to focus by; again: "
+                                    "all mirrors off", quiet=True)
+        self.board.setCheckable(True)
+        self.board.toggled.connect(light.show_checkerboard)
+        board.addWidget(self.board)
+        board.addStretch(1)
+        lay.addLayout(board)
+        lay.addWidget(label("2. How is the LED on?", "", wrap=True))
+        self.led = QtWidgets.QComboBox()
+        for key, words in LED_MODES.items():
+            self.led.addItem(words, key)
+        self.led.currentIndexChanged.connect(self._led_chosen)
+        lay.addWidget(self.led)
+        self.led_help = label("", "muted", wrap=True)
+        lay.addWidget(self.led_help)
+        lay.addWidget(label("3. Start. The mirrors show test patterns: all off, all on, then a few spots, then a "
+                            "check grid. About a minute (longer with pulses).", "", wrap=True))
+        go = box("h", "s")
+        self.start = widgets.primary("Start", self._start, "Calibrate at the objective in use")
+        self.stop = widgets.button("Stop", self._stop, "Stop the calibration; all mirrors off")
+        go.addWidget(self.start)
+        go.addWidget(self.stop)
+        go.addStretch(1)
+        lay.addLayout(go)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setTextVisible(False)
+        lay.addWidget(self.bar)
+        self.doing = label("", "muted", wrap=True)
+        lay.addWidget(self.doing)
+        self.outcome = widgets.Badge("muted", "")
+        self.outcome.setWordWrap(True)
+        lay.addWidget(self.outcome)
+        lay.addStretch(1)
+        widgets.resizable(self, lay, "polygon_calibration", (460, 520))
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self.refresh)
+        self._ran = False                             # Start pressed since the window opened: the outcome is said
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.led.blockSignals(True)
+        self.led.setCurrentIndex(max(0, self.led.findData(self.light.led)))
+        self.led.blockSignals(False)
+        self.led_help.setText(self.HELP[self.light.led])
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def _led_chosen(self) -> None:
+        self.light.led = self.led.currentData()
+        self.led_help.setText(self.HELP[self.light.led])
+        self.light.save()
+
+    def missing(self) -> str:
+        """What the calibration needs and lacks, in words ("" when ready)."""
+        p = self.light
+        lacks = []
+        if getattr(p.panel, "_thread", None) is None or p.panel.last is None:
+            lacks.append("the camera taken, its picture showing")
+        if not p.polygon.connected:
+            lacks.append("the patterned light held")
+        return " and ".join(lacks)
+
+    def _start(self) -> None:
+        if self.missing():
+            return
+        self.board.blockSignals(True)                 # the calibration shows its own patterns
+        self.board.setChecked(False)
+        self.board.blockSignals(False)
+        self._ran = True
+        self.light.calibrate()
+        self.refresh()
+
+    def _stop(self) -> None:
+        if self.light._cal is not None:
+            self.light._end_calibration("Stopped before it finished: all mirrors off. Start again to calibrate.")
+        self.refresh()
+
+    def refresh(self) -> None:
+        p = self.light
+        self.title.setText(f"Calibrate at {p._objective() or 'the objective in use'}")
+        running = p._cal is not None
+        lacks = self.missing()
+        self.needs.setVisible(bool(lacks) and not running)
+        self.needs.set("warn", f"Needs {lacks} first (Use here on their sections)." if lacks else "")
+        self.start.setEnabled(not running and not lacks)
+        self.board.setEnabled(not running and p.polygon.connected)
+        self.stop.setEnabled(running)
+        self.led.setEnabled(not running)
+        done, total = p.calibration_progress()
+        self.bar.setVisible(running)
+        if running:
+            self.bar.setRange(0, total)
+            self.bar.setValue(done)
+        self.doing.setText(p.cal_status.text())
+        if running or not self._ran:
+            self.outcome.setVisible(False)
+            return
+        status, words = p.calibration_words()
+        self.outcome.setVisible(True)
+        self.outcome.set(status if p.calibration.ready else "bad", words if p.calibration.ready else
+                         "Not calibrated: see above, then Start again.")

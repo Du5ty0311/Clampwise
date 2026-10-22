@@ -36,7 +36,6 @@ def test_the_frame_rate_says_what_limits_it():
     from clampwise.app.screens.camera_panel import fps_limit
 
     assert "exposure sets it" in fps_limit(9.8, 9.8, 100.0, 1, 60.0)                 # 100 ms: 10 a second
-    assert "x 4 averaged" in fps_limit(2.4, 2.4, 100.0, 4, 60.0)
     assert "readout sets it" in fps_limit(27.0, 27.0, 5.0, 1, 60.0)                   # 5 ms allows 200
     assert "capped at 15 a second" in fps_limit(60.0, 15.0, 10.0, 1, 15.0)
     assert "capped at 30 a second" in fps_limit(60.0, 30.0, 10.0, 1, 30.0)
@@ -63,7 +62,7 @@ def test_settings_applies_it_to_the_camera_at_once(monkeypatch):
     s._keep_low_power(False)
     assert cam._thread.show_every_s == pytest.approx(1 / 30) and cam._min_step == 1
     s.low_power.setChecked(True)
-    assert cam._thread.show_every_s == pytest.approx(1 / 15) and cam._thread.stats_every_s == 1.0
+    assert cam._thread.show_every_s == pytest.approx(1 / 15)
     assert cam._min_step == 2
     cam._thread = None
     w.close()

@@ -109,6 +109,7 @@ class Camera:
         self.serial = 0
         self.exposure_ms = 20.0
         self.gain = 1.0
+        self.gain_kind = "linear"                                  # a multiplier: 2 is twice as bright
         self._streaming = False
         self.mono = False
         self.frame_rate = 0.0

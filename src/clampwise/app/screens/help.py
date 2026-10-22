@@ -42,8 +42,8 @@ header.</li>
 <p>Quality flags are informational: a value is never altered or excluded because of a flag. Every analysis reports
 which pulse, window or baseline was used for the recording, and why.</p>
 <p><b>Low-power mode</b> (Settings, Performance) keeps Clampwise light on a cheaper PC: the camera's picture is drawn
-at most 15 times a second (every frame is still taken, for snapshots and averages), every second pixel while it is
-shown smaller than taken, its histogram once a second, and the rig's programs are looked at once a second. It is on
+at most 15 times a second (every frame is still taken, for snapshots), every second pixel while it is shown
+smaller than taken, and the rig's programs are looked at once a second. It is on
 by default on a PC with fewer than 4 cores or less than 8 GB. Otherwise the picture is drawn up to 30 times a
 second. The camera's frame rate, hovered, says what sets it: the exposure, the camera's readout, or the drawing.</p>
 <p><b>Updates.</b> When Clampwise starts it asks GitHub whether a newer version has been released (Settings,
@@ -204,7 +204,7 @@ LIVE = """<h2>The Live screen</h2>
 these are the programs behind them on this rig, and what is read from each. Nothing on the rig is changed unless you
 do it from Clampwise (record, the amplifier's controls, the camera); everything else is <b>read</b>.</p>
 <p><b>Hardware.</b> At the top of the cell's panel, the rig's devices as Windows lists them, found by themselves
-every few seconds (Detect looks now) and never opened to do it: the digitizer (Digidata 1440A), the amplifier
+every few seconds and never opened to do it: the digitizer (Digidata 1440A), the amplifier
 (MultiClamp 700B, with its serial, and each channel's mode from MultiClamp Commander's telegraph when it is open),
 the camera (Lumenera INFINITY or Basler, with its serial and model) and, when connected, the Polygon's IOBox (Mightex). Each
 says who is using it, in the screen's words: the acquisition program (Clampex), the camera's program (Infinity
@@ -248,8 +248,8 @@ right-click folds all but that one, folds or unfolds them all, or moves it up or
 kept for the next time. A folded section's header still says how it stands: the camera's exposure, frame rate and
 objective; what the patterned light shows now, or that it is not calibrated at the objective in use; the amplifier's
 mode and holding; and what is outside the cell's quality limits, in amber, so a warning is never hidden by a fold.
-The camera's and the patterned light's <b>Use here</b> (and <b>Let go</b>) are on their headers too, and the
-patterned light's <b>Off</b>, in reach whether the section is folded or not.</p>
+The camera's and the patterned light's <b>Use here</b> (and <b>Let go</b>) are on their headers too, and, while
+the patterned light's section is folded, its <b>All mirrors off</b>.</p>
 <p><b>The cell.</b> The amplifier's readings are shown large; its Rs and Cm are the whole-cell compensation's
 settings, marked "compensation off" when it is off (then they estimate nothing). The four meters are channel 1's
 potential and current, then channel 2's, as Commander shows them. <b>From the recorded trace:</b> the newest file in the
@@ -269,78 +269,72 @@ through Basler's pylon (its C library, <i>PylonC</i>, installed with pylon Viewe
 it). Which camera is plugged in decides which. Only one program can hold the camera, so its own program (Infinity
 Analyze, pylon Viewer) must be closed first; what Clampwise changes on a Basler camera to take it (8-bit frames, its
 automatic exposure and gain off, its trigger off) is put back when it lets go. For a camera that will not start,
-<i>Clampwise.exe --camera-check</i> writes what happened to <i>camera-check.txt</i> in the log folder; <b>Let go</b> (or closing Clampwise) gives it back. The picture fills the camera's view; its controls are in the
-side panel's <b>Camera</b> section, so they stay in reach while the picture is enlarged or in a window of its own
-(on another screen, say): the exposure, the gain and the frames averaged into each picture (more for dim fluorescence). <b>Adjust...</b> changes what is shown, never the
-picture saved: brightness, contrast, gamma (below 1 lifts dim parts), saturation, sharpness, clarity (local
-contrast), auto levels and the colour balance (White balance on an empty, bright field), each with its reset; a set
-of them can be kept by name as a preset. With the um per pixel from a stage micrometer's picture, a scale bar is
-drawn. <b>Snapshot</b> saves the picture as taken, a TIFF in the folder the acquisition writes to (else the open
-project's), with the exposure, gain, frames averaged, objective and adjustments in its description and the scale
-as its resolution (ImageJ and Fiji read it); when anything was changed on screen, the picture as shown is saved beside
-it (<i>_as_shown.png</i>): the original is never altered (Rossner &amp; Yamada 2004).</p>
-<p><b>For patching</b> (Adjust...): <b>Take background</b> on a defocused or empty field and subtract it, the
-video-enhanced contrast that makes cells stand out under infrared contrast optics (Allen, Allen &amp; Travis 1981;
-Inoue 1981; Stuart, Dodt &amp; Sakmann 1993), or divide by it to even out the illumination of fluorescence (flat
-field); <b>Take dark frame</b> with the light blocked to take out the camera's own offset. <b>Keep this picture</b>
-holds a fluorescence picture and lays it, in a colour of your choice and as strongly as you like, over the live
-infrared one, so the labelled cells stay marked while the pipette approaches. <b>Auto exposure</b> brings the
-brightest 0.5% of the picture to 80% of the camera's full scale; the <b>histogram</b> shows every pixel's brightness
-and <b>clipped pixels</b> are painted red, since a pixel at full scale is no longer a measure (Waters 2009; Lambert
-&amp; Waters 2014; Murphy &amp; Davidson 2012). Grey, green (GFP), magenta and fire colour scales; a crosshair;
-<b>Measure</b> drags a line whose length is given in um once the camera is calibrated; the wheel zooms, a drag pans,
-<b>Fit</b> shows the whole picture. The <b>Objective</b> slider says which objective is in use (2.5x to 63x; the list
-is set in Adjust...), and the scale bar and Measure follow it; the size of one pixel in um is shown beside it. Before
-any calibration it is nominal: the camera's own pixel (4.5 um on the INFINITY8-3M, 5.86 um on a Basler acA1920-40, filled in from its model) over the
-objective's magnification times the camera adapter's (Adjust..., Length calibration; the adapter is printed on it,
-often 1x, 0.63x or 0.5x). To measure it instead: under Adjust..., Length calibration,
-type the um a pixel for the objective in use, or drag the Measure line along a stage micrometer and choose From the
+<i>Clampwise.exe --camera-check</i> writes what happened to <i>camera-check.txt</i> in the log folder; <b>Let go</b> (or closing Clampwise) gives it back. The picture fills the camera's view, shown <b>raw and grey</b>: each pixel as the camera
+gives it, nothing computed on it (a colour camera's brightness), so every frame the camera takes can be shown. Its
+controls are in the side panel's <b>Camera</b> section, in reach while the picture is enlarged or in a window of its
+own (on another screen, say). At the top, the <b>frame rate</b> the camera gives now, live, and the one you want:
+typed in pictures a second, it keeps the exposure short enough for them and raises the gain to keep the picture as
+bright (when the gain is at its highest, the panel says how much dimmer the picture is); at 0 (fastest) the
+exposure alone sets the pace. Then the exposure and the gain. <b>Auto exposure</b>, on unless unticked, follows the
+light twice a second, keeping the brightest 0.5% of the picture at 80% of full scale: more light, a shorter exposure
+and more pictures a second, as the camera's own program does; it stays within the frame rate asked for, holds still
+during the patterned light's calibration, and unticked leaves the exposure as typed. The picture is the camera's
+video stream at its fastest, so the exposure sets the pace (37 ms: 27 pictures a second); hovering the frame rate
+says what limits it. <b>Snapshot</b> saves the picture as taken, a TIFF in the folder the acquisition writes to
+(else the open project's), with the exposure, gain and objective in its description and the scale as its
+resolution (ImageJ and Fiji read it). <b>Measure</b> drags a line whose length is given in um once the camera is
+calibrated; the wheel zooms, a drag pans, <b>Fit</b> shows the whole picture. The <b>Objective</b> slider says which
+objective is in use, and the scale bar, Measure and the patterned light's calibration follow it; the size of one
+pixel in um is shown beside it. <b>Scale &amp; slice...</b> sets that scale: before any calibration it is nominal, the camera's
+own pixel (4.5 um on the INFINITY8-3M, 5.86 um on a Basler acA1920-40, filled in from its model) over the
+objective's magnification times the camera adapter's (printed on it, often 1x, 0.63x or 0.5x). To measure it, type
+the um a pixel for the objective in use, or drag the Measure line along a stage micrometer and choose From the
 Measure line; every other objective's scale is then that one's times the ratio of their magnifications, said as
-estimated, until it is calibrated itself. A snapshot records the objective and its scale. The <b>compass</b>
-(Adjust..., Compass) marks the slice's four directions in its plane over the picture. Choose the plane it was cut in:
-horizontal (rostral-caudal and medial-lateral in the picture, dorsal-ventral cut across), coronal (dorsal-ventral and
-medial-lateral; rostral-caudal cut across) or sagittal (dorsal-ventral and rostral-caudal; medial-lateral cut across);
-and the names: rostral and caudal, or anterior and posterior, in words or by their letters. Then set where the plane's
-first direction points on the screen (rostral in a horizontal slice, dorsal in a coronal or a sagittal one; degrees
-clockwise from up, Turn left and Turn right by a quarter) and which side of it the other axis's first end is on
-(medial; rostral in a sagittal slice); the first direction's arm is the thicker. A snapshot records the plane and the
-orientation too. The picture is the
-camera's video stream at its fastest frame rate, so the exposure alone sets the pace (37 ms: 27 pictures a second);
-the frame rate is shown beside the buttons, as taken and, when fewer, as drawn. While Clampwise holds the camera, the camera's own processing (the contrast and
-brightness its program leaves in it) is made neutral, and put back when it lets go.</p>
-<p><b>The histogram</b> in the Camera section is adjustable by hand, as ImageJ's Brightness &amp; Contrast:
-drag the edges of its band (or type them) to set the grey level shown black and the one shown white (contrast),
-the band itself to move both (brightness), and the line inside it for the level shown mid-grey (gamma: to its
-left lifts the dim parts); the curve over the histogram is how each level is shown; <b>Auto</b> fits them
-to the picture, <b>Reset</b> shows every level, <b>Log</b>
-counts show the few bright pixels of dim fluorescence. <b>Binning</b> (off unless chosen) adds 2 x 2 or 4 x 4
-pixels into one: a dim picture 4 or 16 times brighter, so that much shorter an exposure, and that many more
-pictures a second, at half or a quarter of the resolution each way; the scale bar and measuring follow it.</p>
+estimated until it is calibrated itself. The list of objectives on the slider is set there too. The
+<b>Compass</b> (beside Measure) marks the slice's four directions in its plane over the picture; in Scale &amp;
+slice..., choose the plane it was cut in (horizontal, coronal or sagittal: the third axis is cut across), the names
+(rostral and caudal, or anterior and posterior, in words or by their letters), where the plane's first direction
+points on the screen (rostral in a horizontal slice, dorsal in a coronal or sagittal one; degrees clockwise from up,
+Turn left and Turn right by a quarter) and which side of it the other axis's first end is on. A snapshot records the
+plane and the orientation. While Clampwise
+holds the camera, the camera's own processing (the contrast and brightness its program leaves in it) is made
+neutral, and put back when it lets go.</p>
 <p><b>The Polygon</b> (<b>Use here</b> in Live's patterned light view, or on the side panel's Patterned light
 section, whose controls sit under the camera's) sets where the light goes on the slice and
 holds it there,
 while the light itself is switched by its LED driver, from Clampex, as your protocol says. PolyScan must be closed:
 one program at a time holds the Polygon (<b>Let go</b> gives it back, and Clampwise gives it back when it closes).
 Finding it takes PolyScan4's driver about 25 s (it looks through every USB 3 port): the window goes on meanwhile,
-and the view says when it is held.
+and the section says when it is held. Use here on the patterned light takes the camera too: its regions are drawn
+on the camera's picture. At the top of the section, a line always says what the mirrors do: <b>Mirrors ON</b> and
+which steps (lit whenever the LED fires), or <b>Mirrors off</b> (nothing is lit, whatever the LED does), with the
+two buttons that change it, <b>Mirrors on</b> and <b>All mirrors off</b>. Below it, <b>1 · Set up</b> says whether the
+camera is held and whether the objective in use is calibrated (when, and how closely the check landed), each with
+its button; then <b>2 · Pattern</b> and <b>3 · Steps</b>; what is rarely changed is under <b>More options</b>.
 Make a pattern (a full field, a spot, a grid numbered from 1 at the top left along each row as PolyScan numbers
 its grids, a line of spots, a black-and-white image file, one of PolyScan's sequences, or rectangles and ellipses
-drawn on the camera's picture), then show its steps: <b>Project</b> the one chosen, <b>Previous</b> and
-<b>Next</b>, or <b>Next every</b> few seconds, timed to your protocol's sweeps; <b>Off</b> lights no mirror. Each
+drawn on the camera's picture), then show its steps: <b>Mirrors on</b> lights the one chosen (or double-click
+it), <b>Previous</b> and <b>Next</b> light the step before or after, <b>Next every</b> few seconds (More options)
+steps on by itself, timed to your protocol's sweeps; <b>All mirrors off</b> lights no mirror. Each
 step shown is written to <i>polygon_log.csv</i> in the cell's folder (when, which step, its shapes) to match to
 the recordings. The camera must be taken in Clampwise too (its Use here) for the calibration, drawing
-and outlines. <b>Test and calibrate</b> once, with the light on and a fluorescent slide or slice in view: the
-Polygon shows nothing and then everything, to learn which byte lights a mirror, then five spots, found on the
-camera's picture, to learn where its field lies there; drawing on the picture and the steps' outlines over it use
-that. With the light only in the protocol's pulses (<b>Light in pulses</b>, ticked), play the protocol during the
-test: each test picture waits up to 10 s for a pulse and reads the frame it lit. To light one neuron, choose
-<b>Drawn on the picture</b>, add an ellipse over it, <b>Make the steps</b> and <b>Project</b>: the protocol's pulses
+and outlines. <b>Calibrate...</b> opens a window that takes you through it, once for each objective: a mirror
+(the pattern seen reflected) or a fluorescent slide under the objective, focused until a pattern on the mirrors is
+sharp on the camera's picture; how the LED is on (<b>Automatic</b> finds out: on steadily at its driver, or in a
+protocol's pulses, then played during the calibration, each test picture waiting up to 10 s for a pulse); then
+<b>Start</b>. The Polygon shows nothing and then everything, to learn which byte lights a mirror; half the field, to
+see that the picture is in focus; then five spots, found on the camera's picture, to learn where its field lies
+there; then a check grid. The window shows how far it has gone and ends with the outcome in a word. When no spot
+is found and half the field gave an even glow, it says the camera is out of focus. Drawing on the picture and the
+steps' outlines over it use the calibration. With a mirror, the light sent back is far brighter than a cell's:
+lower the gain and the exposure until all mirrors on does not fill the picture with white. To light one neuron, choose
+<b>Drawn on the picture</b>, add an ellipse over it, <b>Make the steps</b> and <b>Mirrors on</b>: the protocol's pulses
 then light only that region, at every current step; dragged onto another cell, it is shown there at once. The Polygon's mirrors are diamonds in rows half a mirror apart, so its field is 16:10 and a round spot is
 drawn round on the slice.</p>
 <p><b>Lighting one cell of a grid, or several.</b> A grid is laid <b>over the camera's picture</b> once the field is
 calibrated (ticked by default; unticked, over the whole field as PolyScan lays its grids), so when the field is
 larger than the picture every cell is one you can see. Choose a cell in the list or click it on the picture;
-Ctrl+click (or Ctrl and Shift in the list) chooses more, and Ctrl+click again takes one out. <b>Project</b> lights
+Ctrl+click (or Ctrl and Shift in the list) chooses more, and Ctrl+click again takes one out. <b>Mirrors on</b> lights
 the cells chosen together and nothing else, logged as one step named by them (<i>1 + 57</i>) with each cell's shape.
 Double-clicking a cell on the picture shows it at once. On the picture the chosen steps are outlined in yellow,
 what the Polygon shows now is filled in blue (lit whenever the LED is on), and the field's edge is dashed; an image

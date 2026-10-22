@@ -582,6 +582,18 @@ def lit_difference(on: np.ndarray, off: np.ndarray) -> float:
     return float(np.asarray(on, float).mean() - np.asarray(off, float).mean())
 
 
+SHARP = 0.3                    # below it, a half-lit field is an even glow: the camera not focused where it forms
+
+
+def sharpness(lit: np.ndarray) -> float:
+    """How sharply a pattern stands out on the picture (``lit``: the picture less the unlit one), 0 to 1: the
+    spread between its darker and brighter tenths over their sum. Half the field lit and in focus, about 1 (half the
+    picture dark, half bright); out of focus, its light spread evenly over the picture, near 0."""
+    lo, hi = np.percentile(np.asarray(lit, np.float32), (10, 90))
+    lo = max(float(lo), 0.0)
+    return float((hi - lo) / max(hi + lo, 1.0))
+
+
 def find_spot(on: np.ndarray, off: np.ndarray) -> tuple[float, float] | None:
     """The centre (x, y) of the spot lit in ``on`` and not in ``off`` (two grey pictures of the same view): the
     weighted centre of the pixels more than half way from the background to the spot's brightest, or None when no

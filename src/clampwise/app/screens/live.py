@@ -588,9 +588,7 @@ class LiveScreen(Screen):
         self.sections = widgets.Sections("live/sections", settings, folded=("controls",))
         sections = self.sections
         # the rig's hardware, found by itself (rig.hardware): what is connected and who is using it
-        found = sections.add(widgets.Section("hardware", "Hardware"))
-        found.add_tool(widgets.button("Detect", self.detect_hardware, "Look for the digitizer, the amplifier and the "
-                                      "camera now (they are looked for every few seconds anyway)", quiet=True))
+        found = sections.add(widgets.Section("hardware", "Hardware"))          # looked for every 5 s
         self.hardware_grid = QtWidgets.QGridLayout()
         self.hardware_grid.setHorizontalSpacing(theme.SPACE["m"])
         self.hardware_grid.setVerticalSpacing(theme.SPACE["xs"])
@@ -623,7 +621,8 @@ class LiveScreen(Screen):
         # the patterned light's, under the camera's: its regions are drawn on that picture, its calibration reads it,
         # its map follows the objective chosen there. Off stays on the header: in reach with the section folded
         light = sections.add(widgets.Section("light", "Patterned light"))
-        self.light_off = widgets.button("Off", self.patterned.off, "No mirror lit (here while the section is folded)")
+        self.light_off = widgets.button("All mirrors off", self.patterned.off, "No mirror lit (here while the "
+                                        "section is folded; unfolded, its own buttons say what the mirrors do)")
         light.add_tool(self.light_off)
         self.held_buttons["light"] = widgets.button("Use here", lambda: self._use_or_let_go("light"),
                                                     "Run the patterned light in Clampwise (its own program must be "
@@ -632,6 +631,8 @@ class LiveScreen(Screen):
         self.held_notes["light"] = label("", "muted", wrap=True)
         light.add(self.held_notes["light"])
         light.add(self.patterned)
+        light.toggled.connect(lambda *_: self.light_off.setVisible(self.views["light"].own and not light.open))
+        self.patterned.take_camera = lambda: self._use_or_let_go("camera") if not self.views["camera"].own else None
         for role in self.held_buttons:
             self.views[role].own_changed.connect(self._held_changed)
         channel = sections.add(widgets.Section("amplifier", "Amplifier"))
@@ -774,6 +775,9 @@ class LiveScreen(Screen):
             return
         view.set_own(True)
         self.patterned.take()                            # found on its own thread (25 s): the window goes on
+        camera = self.views["camera"]
+        if not camera.own and camera.source is None:     # its regions are drawn on the camera's picture: taken too
+            self._use_or_let_go("camera")
 
     # ---- the camera and the patterned light from the side panel's sections: the same Use here as their views'
     def _use_or_let_go(self, role: str) -> None:
@@ -789,10 +793,13 @@ class LiveScreen(Screen):
         controls = self.camera.controls if role == "camera" else self.patterned
         controls.setVisible(on)
         if role == "light":
-            self.light_off.setVisible(on)
+            self.light_off.setVisible(on and not self.sections.sections[role].open)
         if on:
             self.sections.sections[role].set_open(True)
             self.held_notes[role].setText("")
+            if role == "light":                          # its section brought into view, under the camera's
+                QtCore.QTimer.singleShot(0, lambda: self.side.verticalScrollBar().setValue(
+                    self.sections.sections["light"].mapTo(self.side.widget(), QtCore.QPoint(0, 0)).y()))
         elif role == "camera":
             self.held_notes[role].setText(
                 "Not held by Clampwise. Use here takes the camera (its own program must be closed); its controls "
@@ -817,6 +824,7 @@ class LiveScreen(Screen):
         readings)."""
         self.sections.sections["camera"].set_summary(*self.camera.summary())
         self.sections.sections["light"].set_summary(*self.patterned.summary())
+        self.patterned.show_state()                      # its set-up rows: the camera held, the calibration
 
     def _send_control(self, command: tuple) -> None:
         self._start()

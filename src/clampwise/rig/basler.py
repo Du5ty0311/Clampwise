@@ -126,6 +126,7 @@ class Camera:
         self.model = ""
         self.exposure_ms = 20.0
         self.gain = 0.0
+        self.gain_kind = "db"                                      # "Gain" in dB; "GainRaw" in the camera's own steps
         self.mono = True
         self.frame_rate = 0.0
         self.status = ""
@@ -299,6 +300,7 @@ class Camera:
                 self._format = MONO8 if self._put_text("PixelFormat", MONO8) else found
         self._exposure_name = "ExposureTime" if self._has("ExposureTime") else "ExposureTimeAbs"
         self._gain_name = "Gain" if self._has("Gain") else "GainRaw"
+        self.gain_kind = "db" if self._gain_name == "Gain" else "raw"
         exp = self.setting(EXPOSURE)
         if exp is not None:
             self.exposure_ms = exp.value

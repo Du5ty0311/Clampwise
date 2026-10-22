@@ -249,6 +249,7 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     from clampwise.rig import lucam
 
     monkeypatch.setattr(polygon_panel, "SETTLE_S", 0.0)
+    monkeypatch.setattr(polygon_panel, "LOOK_S", 0.0)
     rig, sdk = SimRig(on), FakeSDK()
     panel = QtWidgets.QWidget()
     panel.box = pg.ViewBox()
@@ -267,7 +268,7 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
     dlg.take()                                                                    # found on its own thread
     assert dlg._opening and dlg.wait() and dlg.polygon.connected and not dlg._opening
-    dlg.pulsed.setChecked(False)                                                  # the light on all the time
+    assert dlg.led == "auto"                                                      # found out: on all the time
     dlg.calibrate()
     for _ in range(200):
         if dlg._cal is None:
@@ -330,7 +331,7 @@ def test_the_light_test_says_so_when_the_light_is_off(qapp, monkeypatch):
     dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
     dlg.take()
     assert dlg.wait()
-    dlg.pulsed.setChecked(False)
+    dlg.led = "steady"
     dlg.calibrate()
     for _ in range(20):
         if dlg._cal is None:
@@ -339,7 +340,7 @@ def test_the_light_test_says_so_when_the_light_is_off(qapp, monkeypatch):
         panel._shown += 3
         time.sleep(0.005)                                                          # the settling (3 exposures)
         dlg._calibration_tick()
-    assert dlg._cal is None and "is the" in dlg.cal_status.text() and "LED" in dlg.cal_status.text()
+    assert dlg._cal is None and "Is the LED on" in dlg.cal_status.text()
     assert not dlg.calibration.light_tested
 
 
@@ -437,8 +438,9 @@ def test_the_calibration_waits_for_the_protocol_s_pulses_when_the_light_is_pulse
     frame()
     dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
     dlg.take()
-    assert dlg.wait() and dlg.pulsed.isChecked()                                  # pulsed unless unticked
+    assert dlg.wait() and dlg.led == "auto"                                       # found out: in pulses
     dlg.calibrate()
+    assert dlg._cal["pulsed"] is None
     end = time.monotonic() + 30
     while dlg._cal is not None and time.monotonic() < end:
         dlg.wait()
@@ -508,6 +510,15 @@ def test_a_calibration_is_kept_for_its_objective_and_refused_at_another():
     assert again.at(key10).measured == "2026-10-20 14:05" == again.at(key10).at_size((10, 10)).measured
     old = patterns.Calibrations.from_dict({"on_value": 0, "light_tested": True, "to_field": c.to_field})
     assert old.on_value == 0 and not old.maps                                     # its objective was not noted
+
+
+def test_a_pattern_out_of_focus_is_told_from_one_in_focus():
+    # half the field lit: half the picture bright when focused; an even glow when not (the rig, 2026-10-22: mean 52
+    # of 105 over 81% of the picture, at 2.5x on a mirror), so no calibration spot can show
+    sharp = np.zeros((100, 120), np.float32)
+    sharp[:, :60] = 105.0
+    glow = np.full((100, 120), 52.0, np.float32) + np.random.default_rng(1).normal(0, 2, (100, 120))
+    assert patterns.sharpness(sharp) > 0.9 and patterns.sharpness(glow) < patterns.SHARP
 
 
 def test_how_old_a_calibration_is_said_and_an_old_one_is_to_be_checked():
@@ -853,7 +864,7 @@ def test_the_calibration_finds_a_field_larger_than_the_picture(qapp, monkeypatch
     monkeypatch.setattr(polygon_panel, "SETTLE_S", 0.0)
     rig, sdk = SimRig(255, OVERFILLED), FakeSDK()
     dlg, frame = _sim_panel(rig, sdk, tmp_path)
-    dlg.pulsed.setChecked(False)
+    dlg.led = "steady"
     dlg.calibrate()
     for _ in range(300):
         if dlg._cal is None:

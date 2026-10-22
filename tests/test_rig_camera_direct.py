@@ -269,7 +269,8 @@ def test_the_dark_frame_is_taken_out_and_clipped_pixels_show_red():
     raw[0, 0] = 255
     dark = np.full((4, 4, 3), 10, np.float32)
     assert picture.corrected(raw, picture.Corrections(dark=dark))[1, 1, 0] == 40
-    shown = picture.shown(raw, picture.Corrections(), picture.Adjust())
+    assert tuple(picture.shown(raw, picture.Corrections(), picture.Adjust())[0, 0]) == (255, 255, 255)   # raw
+    shown = picture.shown(raw, picture.Corrections(show_clipped=True), picture.Adjust())
     assert tuple(shown[0, 0]) == (255, 0, 0) and tuple(shown[1, 1]) == (50, 50, 50)
 
 
@@ -318,21 +319,10 @@ def test_auto_exposure_in_the_dark_stops_at_a_second_and_says_so_instead_of_hang
 
     t, cam, said = CameraThread(), _DarkCamera(), []
     t.exposure_set.connect(lambda ms, note: said.append((ms, note)))
-    t.frame.connect(lambda *_: setattr(t, "drawing", False))
-    assert t._serve(cam, ("auto",), SimpleNamespace(low=0.016, high=15000.0))
-    assert cam.exposure_ms <= picture.AUTO_MAX_MS and cam.frames <= 8           # never 15 s frames, a few at most
-    assert said and "still dark" in said[0][1] and "light" in said[0][1]
-
-
-def test_an_averaged_picture_gives_way_to_a_button_pressed_meanwhile():
-    from clampwise.app.screens.camera_panel import CameraThread
-
-    t, cam = CameraThread(), _DarkCamera()
-    t.average = 64
-    f = t._averaged(cam)
-    assert f.averaged == 64 and picture.is_grey(f.rgb) and cam.frames == 64
-    cam.frames, t.request = 0, ("auto",)
-    assert t._averaged(cam) is False and cam.frames == 1                         # served after one frame, not 64
+    for _ in range(12):                                                          # following the light: 6 s of it
+        t._follow(cam, cam.frame(), SimpleNamespace(low=0.016, high=15000.0))
+    assert cam.exposure_ms == picture.AUTO_MAX_MS                                # never 15 s frames
+    assert said and "Dark at 1000 ms" in said[-1][1] and "light" in said[-1][1]
 
 
 def test_binning_adds_n_by_n_pixels_into_one_and_keeps_a_grey_frame_grey():
@@ -355,11 +345,34 @@ def test_the_levels_show_the_black_point_black_and_the_white_point_white():
     assert table[50, 0] == 0 and table[150, 0] == 255 and not picture.Adjust().changed()
 
 
-def test_the_camera_thread_bins_what_it_takes_when_asked():
-    from clampwise.app.screens.camera_panel import CameraThread
+def test_brightness_and_contrast_kept_before_become_the_levels_that_show_the_same():
+    # the histogram's handles are now the one place: an old preset's brightness and contrast as levels, the same
+    g = np.arange(256, dtype=np.uint8)[None, :]
+    rgb = np.broadcast_to(g[:, :, None], (1, 256, 3))
+    old = picture.Adjust(black=10.0, white=240.0, brightness=0.1, contrast=1.5)
+    new = picture.fold_tone(old)
+    assert (new.brightness, new.contrast) == (0.0, 1.0)
+    shown_old, shown_new = picture.apply(rgb, old)[0, :, 0], picture.apply(rgb, new)[0, :, 0]
+    assert np.abs(shown_old.astype(int) - shown_new.astype(int)).max() <= 1
+    assert picture.preset_from_text(json.dumps({"brightness": 0.1, "contrast": 1.5})).contrast == 1.0
+    assert picture.fold_tone(picture.Adjust()) == picture.Adjust()
 
-    t, cam = CameraThread(), _DarkCamera()
-    assert t._binned(cam.frame()).rgb.shape == (6, 8, 3)                          # off by default
-    t.binning = 2
-    f = t._binned(cam.frame())
-    assert f.rgb.shape == (3, 4, 3) and "2 x 2 binned" in f.notes
+
+def test_the_gain_that_keeps_a_shorter_exposure_as_bright():
+    # a camera counting gain as a multiplier, one in dB, one in its own steps (left alone)
+    assert picture.gain_for(1.0, 2.0, "linear", 1.0, 16.0) == (2.0, 2.0)
+    assert picture.gain_for(4.0, 8.0, "linear", 1.0, 16.0) == (16.0, 4.0)               # at its highest: half
+    gain, got = picture.gain_for(0.0, 2.0, "db", 0.0, 24.0)
+    assert gain == pytest.approx(6.02, abs=0.01) and got == pytest.approx(2.0)
+    assert picture.gain_for(300.0, 2.0, "raw", 0.0, 1000.0) == (300.0, 1.0)
+
+
+def test_a_colour_camera_s_frame_is_shown_grey_and_a_grey_one_as_it_is():
+    from clampwise.app.screens.camera_panel import grey
+
+    rgb = np.zeros((2, 2, 3), np.uint8)
+    rgb[..., 1] = 90                                                             # green only
+    f = grey(lucam.Frame(rgb, 10.0, 1.0))
+    assert picture.is_grey(f.rgb) and int(f.rgb[0, 0, 0]) == 30                  # its brightness
+    mono = _DarkCamera().frame()
+    assert grey(mono) is mono                                                    # no copy

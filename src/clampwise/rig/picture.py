@@ -13,7 +13,7 @@ import datetime as dt
 import json
 import re
 import struct
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -292,7 +292,35 @@ def preset_to_text(a: Adjust) -> str:
 
 def preset_from_text(text: str) -> Adjust:
     d = json.loads(text)
-    return Adjust(**{f.name: d[f.name] for f in fields(Adjust) if f.name in d})
+    return fold_tone(Adjust(**{f.name: d[f.name] for f in fields(Adjust) if f.name in d}))
+
+
+def fold_tone(a: Adjust) -> Adjust:
+    """Brightness and contrast (kept before 1.8, which set them with sliders) as the levels that do the same: the
+    histogram's black and white handles are now the one place they are set. Exact while the stretch is a
+    contrast of 1 or more (a lower one, which greys black, is taken as the nearest the levels can show)."""
+    if a.brightness == 0.0 and a.contrast == 1.0:
+        return a
+    c = max(float(a.contrast), 1e-3)
+    span = float(a.white) - float(a.black)
+    black = a.black + span * (0.5 - (0.5 + a.brightness) / c)
+    white = a.black + span * (0.5 + (0.5 - a.brightness) / c)
+    black = min(max(black, 0.0), 254.0)
+    white = min(max(white, black + 1.0), 255.0)
+    return replace(a, black=round(black, 2), white=round(white, 2), brightness=0.0, contrast=1.0)
+
+
+def gain_for(gain: float, brighter: float, kind: str, low: float, high: float) -> tuple[float, float]:
+    """The gain that makes the picture ``brighter`` times as bright, kept in [low, high], and how much brighter
+    that is: ``kind`` is how the camera counts gain ("linear", a multiplier; "db"; "raw", its own steps, not
+    changed)."""
+    if kind == "linear":
+        new = min(max(gain * brighter, low), high)
+        return new, new / gain if gain > 0 else 1.0
+    if kind == "db":
+        new = min(max(gain + 20.0 * float(np.log10(max(brighter, 1e-9))), low), high)
+        return new, float(10.0 ** ((new - gain) / 20.0))
+    return gain, 1.0
 
 
 # ---- microscopy corrections and aids, for patching (sources in Help: Waters 2009 JCB 185:1135; Lambert & Waters
@@ -314,7 +342,8 @@ class Corrections:
     background: np.ndarray | None = None    # an empty or defocused field, averaged
     mode: str = "off"                       # "off", "subtract" (video-enhanced contrast), "flat" (flat-field)
     lut: str = "colour"                     # how a picture is coloured on screen
-    show_clipped: bool = True               # saturated pixels painted red (the camera's own full scale)
+    show_clipped: bool = False              # saturated pixels painted red (the camera's own full scale): off, the
+                                            # picture shown raw unless asked for
     overlay: np.ndarray | None = None       # a kept picture (fluorescence), 0-1, laid over the live one
     overlay_colour: tuple = (0, 255, 0)
     overlay_opacity: float = 0.6
