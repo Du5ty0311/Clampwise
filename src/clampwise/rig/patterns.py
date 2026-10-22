@@ -13,6 +13,7 @@ picture. Several steps can be lit together as one.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 import struct
 from dataclasses import dataclass, field
@@ -358,6 +359,7 @@ class Calibration:
     objective: str = ""                                               # "40x, adapter 1x"; "" not known
     check: list[list[float]] = field(default_factory=list)
     um_per_px: float = 0.0                                            # the camera's scale when it was measured
+    measured: str = ""                                                # "YYYY-MM-DD HH:MM"; "" not noted (before 1.8)
 
     @property
     def ready(self) -> bool:
@@ -398,12 +400,13 @@ class Calibration:
         check = [[(x0 - (sx - 1) / 2) / sx, (y0 - (sy - 1) / 2) / sy, (x1 - (sx - 1) / 2) / sx,
                   (y1 - (sy - 1) / 2) / sy] for x0, y0, x1, y1 in self.check]
         return Calibration(self.on_value, self.light_tested, a.tolist(), (int(w), int(h)), self.residual_px / sx,
-                           self.objective, check, self.um_per_px * sx)
+                           self.objective, check, self.um_per_px * sx, self.measured)
 
     def to_dict(self) -> dict:
         return {"on_value": self.on_value, "light_tested": self.light_tested, "to_field": self.to_field,
                 "camera_size": list(self.camera_size), "residual_px": self.residual_px,
-                "objective": self.objective, "check": self.check, "um_per_px": self.um_per_px}
+                "objective": self.objective, "check": self.check, "um_per_px": self.um_per_px,
+                "measured": self.measured}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Calibration":
@@ -411,7 +414,22 @@ class Calibration:
                    [list(map(float, r)) for r in d.get("to_field", [])],
                    tuple(int(x) for x in d.get("camera_size", (0, 0))), float(d.get("residual_px", float("nan"))),
                    str(d.get("objective", "")), [list(map(float, r)) for r in d.get("check", [])],
-                   float(d.get("um_per_px", 0.0) or 0.0))
+                   float(d.get("um_per_px", 0.0) or 0.0), str(d.get("measured", "") or ""))
+
+
+def age_words(measured: str, now=None) -> str:
+    """When a calibration was measured, in words ("today", "3 days ago: check it again..."); "" when not noted. The
+    map holds only while neither the camera nor the Polygon has moved on the microscope: an old one is checked
+    before regions on one cell are trusted."""
+    try:
+        then = dt.datetime.strptime(measured, "%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return ""
+    days = ((now or dt.datetime.now()).date() - then.date()).days
+    if days <= 0:
+        return f"today at {then:%H:%M}"
+    when = "yesterday" if days == 1 else f"{days} days ago"
+    return when + (" (check it again before relying on regions of one cell)" if days >= STALE_DAYS else "")
 
 
 def objective_key(magnification: float | None, adapter: float | None = 1.0) -> str:
@@ -477,6 +495,7 @@ CLOSER_RINGS = (0.1, 0.04)
 # after the fit, a check grid of spots not used by it: how far each lands from where the map puts it
 CHECK_SPOTS = tuple((u, v) for v in (0.35, 0.5, 0.65) for u in (0.35, 0.5, 0.65) if (u, v) != (0.5, 0.5))
 CHECK_TARGET_UM = 5.0
+STALE_DAYS = 2                 # a calibration this old is said to need checking again (a day's work keeps it)
 
 
 def ring(d: float) -> tuple[tuple[tuple[float, float], ...], float]:

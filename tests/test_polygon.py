@@ -303,6 +303,7 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     # the check grid: spots the fit did not use land where the map puts them
     assert "Check: 8 of 8 spots found" in dlg.cal_status.text() and len(dlg.calibration.check) == 8
     assert dlg.calibration.check_errors_px().max() < 2.0
+    assert dlg.calibration.measured and "measured today at" in dlg._cal_text()  # when: the map holds until moved
     dlg.release()
     assert dlg.wait() and ("uninit",) in sdk.calls
     assert not (sdk.image == on).any()                                           # let go with nothing lit
@@ -501,10 +502,22 @@ def test_a_calibration_is_kept_for_its_objective_and_refused_at_another():
     assert cals.at(key40).on_value == 0 and cals.at(key40).light_tested         # the byte is the Polygon's own
     assert "10x" in cals.refusal(key40) and "calibrate with this objective" in cals.refusal(key40)
     assert cals.refusal(key10) == ""
+    c.measured = "2026-10-20 14:05"
     again = patterns.Calibrations.from_dict(cals.to_dict())
     assert again.at(key10).to_field == c.to_field and again.on_value == 0
+    assert again.at(key10).measured == "2026-10-20 14:05" == again.at(key10).at_size((10, 10)).measured
     old = patterns.Calibrations.from_dict({"on_value": 0, "light_tested": True, "to_field": c.to_field})
     assert old.on_value == 0 and not old.maps                                     # its objective was not noted
+
+
+def test_how_old_a_calibration_is_said_and_an_old_one_is_to_be_checked():
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 22, 9, 30)
+    assert patterns.age_words("2026-10-22 08:15", now) == "today at 08:15"
+    assert patterns.age_words("2026-10-21 17:00", now) == "yesterday"
+    assert patterns.age_words("2026-10-19 17:00", now).startswith("3 days ago (check it again")
+    assert patterns.age_words("", now) == "" and patterns.age_words("not a date", now) == ""
 
 
 def test_the_check_grid_and_the_scale_follow_the_binning():

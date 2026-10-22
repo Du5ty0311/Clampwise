@@ -1,5 +1,5 @@
-"""The Polygon in Live's patterned light view (Use here, PolyScan closed): where the light goes on the slice,
-while Clampex times the light itself.
+"""The Polygon in Live's side panel, under the camera's controls (Use here, PolyScan closed): where the light goes on
+the slice, while Clampex times the light itself.
 
 A pattern is made (a full field, a spot, a numbered grid, a line of spots, an image file, a PolyScan sequence, or
 shapes drawn on the camera's picture: named regions placed by a cell's centre and a diameter in um, each with a
@@ -81,7 +81,7 @@ class PolygonPanel(QtWidgets.QWidget):
         self._cal: dict | None = None                 # the calibration under way
         self._lit: set[str] = set()                   # the names of the steps the patterned light shows now
         self._mask_images: dict = {}                  # an image step's mirrors as a picture to lay over the camera's
-        lay = box("v", "s", "m")
+        lay = box("v", "s")                           # in a section of Live's side panel, which has the margins
         lay.addWidget(label("Clampwise sets where the light goes and holds it; the light itself is switched by "
                             "its LED driver, from the acquisition program, as your protocol says.", "muted", wrap=True))
         self.device_status = label(self.polygon.status, "muted", wrap=True)
@@ -109,6 +109,9 @@ class PolygonPanel(QtWidgets.QWidget):
                                          "With the light on and a fluorescent slide or slice in view: which byte "
                                          "lights a mirror, then where its field lies on the picture")
         cal.addWidget(self.cal_button)
+        cal.addStretch(1)
+        lay.addLayout(cal)
+        cal = box("h", "s")                           # a row each: the side panel is narrow
         self.pulsed = QtWidgets.QCheckBox("Light in pulses (play the protocol)")
         self.pulsed.setChecked(True)
         self.pulsed.setToolTip("The light is on only in the protocol's pulses: play the protocol during the test, and "
@@ -117,12 +120,15 @@ class PolygonPanel(QtWidgets.QWidget):
         cal.addWidget(self.pulsed)
         cal.addStretch(1)
         lay.addLayout(cal)
-        cal = box("h", "s")                           # two rows: the panel fits a narrow view
+        cal = box("h", "s")
         self.outlines = QtWidgets.QCheckBox("Outlines on the picture")
         self.outlines.setChecked(True)
         self.outlines.setToolTip("The steps' shapes drawn over the camera's picture (the one shown brighter)")
         self.outlines.toggled.connect(lambda *_: self.draw_outlines())
         cal.addWidget(self.outlines)
+        cal.addStretch(1)
+        lay.addLayout(cal)
+        cal = box("h", "s")
         self.swap = QtWidgets.QCheckBox("Lit by 0 (swap lit and unlit)")
         self.swap.setToolTip("Which byte turns a mirror onto the slice: the light test finds it; set it here by hand "
                              "when the test cannot run (the light only on in the protocol's pulses). Shown again at once.")
@@ -190,15 +196,18 @@ class PolygonPanel(QtWidgets.QWidget):
                                    "by the protocol's digital output (sent a few ms before each light pulse). Off "
                                    "stops it. Needs the digitizer's digital output wired to Trig In.")
         trig.addWidget(self.on_trigger)
+        trig.addStretch(1)
+        lay.addLayout(trig)
+        trig = box("h", "s")
         self.held_ms = _pct(50.0, 1.0, 10000.0, 5.0, " ms")
         self.held_ms.setToolTip("How long each step stays after its trigger: longer than the light pulse")
-        trig.addWidget(label("each held", "muted"))
+        trig.addWidget(label("Each step held", "muted"))
         trig.addWidget(self.held_ms)
         trig.addStretch(1)
         lay.addLayout(trig)
         self.shown_label = label("Nothing shown.", "muted", wrap=True)
         lay.addWidget(self.shown_label)
-        widgets.resizable(self, lay)
+        self.setLayout(lay)                           # in Live's side panel, which scrolls (no scroll area inside it)
         self._poll = QtCore.QTimer(self)
         self._poll.setInterval(50)
         self._poll.timeout.connect(self._calibration_tick)
@@ -409,6 +418,22 @@ class PolygonPanel(QtWidgets.QWidget):
 
     def busy(self) -> bool:
         return self.busy_box.isVisibleTo(self)
+
+    def summary(self) -> tuple[str, str, str]:
+        """How the patterned light stands in a few words (status, words, detail): what a folded section's header
+        shows. Lit is said first; a map missing for the objective in use is a warning (regions would land
+        elsewhere)."""
+        if self._opening:
+            return "muted", "finding it...", "its driver looks through every USB 3 port (about 25 s)"
+        if not self.polygon.connected:
+            return "muted", "not held", ""
+        if not self.calibration.ready:
+            return "warn", f"not calibrated at {self._objective() or 'this objective'}", self.cal_status.text()
+        lit = sorted(self._lit)
+        if not lit:
+            return "ok", "nothing lit", self.shown_label.text()
+        words = ", ".join(lit[:3]) + (f" +{len(lit) - 3}" if len(lit) > 3 else "")
+        return "ok", f"{words} lit", self.shown_label.text()
 
     def _held(self) -> bool:
         if self.polygon.connected:
@@ -1132,6 +1157,7 @@ class PolygonPanel(QtWidgets.QWidget):
         self.calibration.camera_size = self._frame_size()
         self.calibration.objective = self._objective()
         self.calibration.um_per_px = self._um_per_px()
+        self.calibration.measured = time.strftime("%Y-%m-%d %H:%M")
         self.calibration.check = []
         # then the check: spots the fit did not use, laid over the picture (so the camera sees them all), each
         # found and compared with where the map puts it
@@ -1211,6 +1237,9 @@ class PolygonPanel(QtWidgets.QWidget):
             err = c.check_errors_px()
             text += (f"; checked within {err.max() * c.um_per_px:.1f} um" if c.um_per_px else
                      f"; checked within {err.max():.1f} px")
+        age = patterns.age_words(c.measured)
+        if age:                                       # the camera or the Polygon moved since: the map is off
+            text += f"; measured {age}"
         return text + "."
 
     def _use_objective(self) -> None:

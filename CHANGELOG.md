@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.8.0 — not released yet
+
+- **The camera's controls are in Live's side panel.** Exposure, gain, frames averaged, binning, the objective,
+  Auto exposure, Snapshot, Adjust... and the histogram now sit in a **Camera** section beside the views. The picture
+  fills the camera's view alone, and the controls stay in reach while it is enlarged or in a window of its own on
+  another screen.
+- **The patterned light's controls are right under the camera's**, in a **Patterned light** section, so the light
+  and the picture it is drawn on are set up together. Its view in the grid says where its controls went.
+- **The side panel folds.** Hardware, Camera, Patterned light, Amplifier, Amplifier controls, Cell health and Recorded
+  are sections: a click on a header folds or unfolds it, and a right-click folds the others or moves it. The folds
+  and the order are kept for next time. A folded header still says how its section stands: the camera's exposure,
+  frame rate and objective; what the patterned light shows, or that it is not calibrated at this objective; the
+  amplifier's mode and holding; and the cell's readings outside their limits, so a fold never hides a warning.
+- **Use here, Let go and the light's Off are on the section headers**, usable with the section folded.
+- **Each patterned-light calibration says when it was measured.** From two days old, it says to check it again
+  before relying on regions of one cell: the map holds only while the camera and the Polygon stay where they were.
+- The side panel is never narrower than its controls need, so nothing is cut off at its right edge.
+
 ## 1.7.1 — 2026-10-20
 
 - **When the camera cannot be taken, the camera's view says why.** In 1.7.0, a camera that Use here could not take

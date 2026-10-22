@@ -242,6 +242,14 @@ again. A right-click on a view can show <b>only part of the window</b>: drag ove
 the window's edges when it is resized; <b>Show the whole window</b> undoes it. The camera's view shows only Infinity
 Analyze's picture panel (below its menu, left of its Control Panel) unless another part is chosen. These choices are
 kept for the next time Clampwise opens.</p>
+<p><b>The side panel</b> beside the views is in sections: Hardware, Camera, Patterned light, Amplifier, Amplifier
+controls, Cell health and Recorded. A click on a section's header folds it to that header, or unfolds it; a
+right-click folds all but that one, folds or unfolds them all, or moves it up or down. The folds and the order are
+kept for the next time. A folded section's header still says how it stands: the camera's exposure, frame rate and
+objective; what the patterned light shows now, or that it is not calibrated at the objective in use; the amplifier's
+mode and holding; and what is outside the cell's quality limits, in amber, so a warning is never hidden by a fold.
+The camera's and the patterned light's <b>Use here</b> (and <b>Let go</b>) are on their headers too, and the
+patterned light's <b>Off</b>, in reach whether the section is folded or not.</p>
 <p><b>The cell.</b> The amplifier's readings are shown large; its Rs and Cm are the whole-cell compensation's
 settings, marked "compensation off" when it is off (then they estimate nothing). The four meters are channel 1's
 potential and current, then channel 2's, as Commander shows them. <b>From the recorded trace:</b> the newest file in the
@@ -261,8 +269,9 @@ through Basler's pylon (its C library, <i>PylonC</i>, installed with pylon Viewe
 it). Which camera is plugged in decides which. Only one program can hold the camera, so its own program (Infinity
 Analyze, pylon Viewer) must be closed first; what Clampwise changes on a Basler camera to take it (8-bit frames, its
 automatic exposure and gain off, its trigger off) is put back when it lets go. For a camera that will not start,
-<i>Clampwise.exe --camera-check</i> writes what happened to <i>camera-check.txt</i> in the log folder; <b>Let go</b> (or closing Clampwise) gives it back. Below the picture: the exposure, the gain and the
-frames averaged into each picture (more for dim fluorescence). <b>Adjust...</b> changes what is shown, never the
+<i>Clampwise.exe --camera-check</i> writes what happened to <i>camera-check.txt</i> in the log folder; <b>Let go</b> (or closing Clampwise) gives it back. The picture fills the camera's view; its controls are in the
+side panel's <b>Camera</b> section, so they stay in reach while the picture is enlarged or in a window of its own
+(on another screen, say): the exposure, the gain and the frames averaged into each picture (more for dim fluorescence). <b>Adjust...</b> changes what is shown, never the
 picture saved: brightness, contrast, gamma (below 1 lifts dim parts), saturation, sharpness, clarity (local
 contrast), auto levels and the colour balance (White balance on an empty, bright field), each with its reset; a set
 of them can be kept by name as a preset. With the um per pixel from a stage micrometer's picture, a scale bar is
@@ -299,7 +308,7 @@ orientation too. The picture is the
 camera's video stream at its fastest frame rate, so the exposure alone sets the pace (37 ms: 27 pictures a second);
 the frame rate is shown beside the buttons, as taken and, when fewer, as drawn. While Clampwise holds the camera, the camera's own processing (the contrast and
 brightness its program leaves in it) is made neutral, and put back when it lets go.</p>
-<p><b>The histogram</b> under the camera's picture is adjustable by hand, as ImageJ's Brightness &amp; Contrast:
+<p><b>The histogram</b> in the Camera section is adjustable by hand, as ImageJ's Brightness &amp; Contrast:
 drag the edges of its band (or type them) to set the grey level shown black and the one shown white (contrast),
 the band itself to move both (brightness), and the line inside it for the level shown mid-grey (gamma: to its
 left lifts the dim parts); the curve over the histogram is how each level is shown; <b>Auto</b> fits them
@@ -307,7 +316,8 @@ to the picture, <b>Reset</b> shows every level, <b>Log</b>
 counts show the few bright pixels of dim fluorescence. <b>Binning</b> (off unless chosen) adds 2 x 2 or 4 x 4
 pixels into one: a dim picture 4 or 16 times brighter, so that much shorter an exposure, and that many more
 pictures a second, at half or a quarter of the resolution each way; the scale bar and measuring follow it.</p>
-<p><b>The Polygon</b> (Live's patterned light view, <b>Use here</b>) sets where the light goes on the slice and
+<p><b>The Polygon</b> (<b>Use here</b> in Live's patterned light view, or on the side panel's Patterned light
+section, whose controls sit under the camera's) sets where the light goes on the slice and
 holds it there,
 while the light itself is switched by its LED driver, from Clampex, as your protocol says. PolyScan must be closed:
 one program at a time holds the Polygon (<b>Let go</b> gives it back, and Clampwise gives it back when it closes).
@@ -318,7 +328,7 @@ its grids, a line of spots, a black-and-white image file, one of PolyScan's sequ
 drawn on the camera's picture), then show its steps: <b>Project</b> the one chosen, <b>Previous</b> and
 <b>Next</b>, or <b>Next every</b> few seconds, timed to your protocol's sweeps; <b>Off</b> lights no mirror. Each
 step shown is written to <i>polygon_log.csv</i> in the cell's folder (when, which step, its shapes) to match to
-the recordings. The camera must be taken in Clampwise too (its view's Use here) for the calibration, drawing
+the recordings. The camera must be taken in Clampwise too (its Use here) for the calibration, drawing
 and outlines. <b>Test and calibrate</b> once, with the light on and a fluorescent slide or slice in view: the
 Polygon shows nothing and then everything, to learn which byte lights a mirror, then five spots, found on the
 camera's picture, to learn where its field lies there; drawing on the picture and the steps' outlines over it use
@@ -342,6 +352,8 @@ centres the field a little differently, so with another objective the regions ar
 too (which byte lights a mirror is the Polygon's own and is kept for all). After the fit, a <b>check grid</b> of 8
 spots the fit did not use is projected and found: how far each lands from where the calibration puts it is said in
 um (aim for under 5 um before lighting one soma) and drawn on the picture (o where it should be, + where it fell).
+Each calibration says when it was measured: it holds only while neither the camera nor the Polygon has moved on the
+microscope, so from two days on it says to check it again before relying on regions of one cell.
 <b>Click the cell's centre</b> places a round region of the diameter typed (in um) where you click next; name it
 first (Cell 1). <b>Add a control beside it</b> makes a region of the same size and shape the distance typed away:
 drag it onto neuropil with no cell, and what it evokes in the cell is light scattered onto it. <b>Keep with the

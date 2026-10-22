@@ -557,19 +557,22 @@ class LevelsHistogram(QtWidgets.QWidget):
         self.log.setChecked(True)
         self.log.setToolTip("Counts on a log scale: the few bright pixels seen beside the many dark ones")
         self.log.toggled.connect(lambda *_: self._draw())
-        row = box("h", "s")
+        row = box("h", "s")                                    # two rows: fits Live's side panel
         for caption, w in (("Black", self.black), ("White", self.white), ("Gamma", self.gamma)):
             row.addWidget(label(caption, "muted"))
             row.addWidget(w)
-        row.addWidget(widgets.button("Auto", self.auto, "Fit black and white to the picture: its darkest and "
-                                                        "brightest 0.1% left out", quiet=True))
-        row.addWidget(widgets.button("Reset", lambda: self.set_levels(0, 255, 1.0), "Every level as taken (0 to "
-                                                                                  "255, gamma 1)", quiet=True))
-        row.addWidget(self.log)
         row.addStretch(1)
+        buttons = box("h", "s")
+        buttons.addWidget(widgets.button("Auto", self.auto, "Fit black and white to the picture: its darkest and "
+                                                            "brightest 0.1% left out", quiet=True))
+        buttons.addWidget(widgets.button("Reset", lambda: self.set_levels(0, 255, 1.0), "Every level as taken (0 "
+                                                                                      "to 255, gamma 1)", quiet=True))
+        buttons.addWidget(self.log)
+        buttons.addStretch(1)
         lay = box("v", "xs")
         lay.addWidget(self.plot, 1)
         lay.addLayout(row)
+        lay.addLayout(buttons)
         self.setLayout(lay)
         self._quiet = False
         self._place_mid()
@@ -648,7 +651,8 @@ class LevelsHistogram(QtWidgets.QWidget):
 
 
 class CameraPanel(QtWidgets.QWidget):
-    """The live picture and its controls, inside Live's camera view while Clampwise holds the camera."""
+    """The live picture, inside Live's camera view while Clampwise holds the camera; its controls (``controls``) are
+    placed by Live apart from it."""
 
     released = QtCore.Signal()
 
@@ -686,7 +690,7 @@ class CameraPanel(QtWidgets.QWidget):
         self.ruler = None                                     # a line to measure with
         self.ruler_text = pg.TextItem("", color="y", anchor=(0, 1))
         self.box.addItem(self.ruler_text)
-        controls = QtWidgets.QGridLayout()                 # captions over values, then the actions: fits a narrow view
+        controls = QtWidgets.QGridLayout()                 # captions over values, two across: fits Live's side panel
         controls.setHorizontalSpacing(theme.SPACE["s"])
         controls.setVerticalSpacing(theme.SPACE["xs"])
         self.exposure = QtWidgets.QDoubleSpinBox()
@@ -713,62 +717,50 @@ class CameraPanel(QtWidgets.QWidget):
                                 "pictures a second, at 1/n of the resolution each way. Off: every pixel as taken.")
         self.binning.currentIndexChanged.connect(lambda *_: self._binning())
         for k, (caption, w) in enumerate((("Exposure (ms)", self.exposure), ("Gain", self.gain),
-                                          ("Average", self.average), ("Binning", self.binning),
-                                          (self.objective_caption, self.objective))):
-            controls.addWidget(caption if isinstance(caption, QtWidgets.QWidget) else label(caption, "muted"), 0, k)
-            controls.addWidget(w, 1, k)
+                                          ("Average", self.average), ("Binning", self.binning))):
+            controls.addWidget(label(caption, "muted"), 2 * (k // 2), k % 2)
+            controls.addWidget(w, 2 * (k // 2) + 1, k % 2)
+        controls.addWidget(self.objective_caption, 4, 0, 1, 2)
+        controls.addWidget(self.objective, 5, 0, 1, 2)
         self.objective.valueChanged.connect(self._objective_moved)
         self.exposure.editingFinished.connect(self._exposure)
         self.gain.editingFinished.connect(self._exposure)
         self.average.valueChanged.connect(self._average)
         actions = box("h", "s")
-        actions.addWidget(widgets.button("Adjust...", self.open_adjust, "Brightness, contrast, gamma, sharpness, "
-                                                                      "clarity, colour, presets, the scale bar"))
         actions.addWidget(widgets.button("Auto exposure", self.auto_exposure,
                                          "The brightest 0.5% of the picture to 80% of full scale, nothing clipped"))
         actions.addWidget(widgets.button("Snapshot", self.snapshot, "Save the picture as taken into the cell's folder "
                                                                     "(and as shown, when anything is changed)"))
+        actions.addWidget(widgets.button("Adjust...", self.open_adjust, "Brightness, contrast, gamma, sharpness, "
+                                                                      "clarity, colour, presets, the scale bar"))
+        actions.addStretch(1)
+        tools = box("h", "s")
         self.measure = widgets.button("Measure", self.toggle_measure, "A line to drag over the picture: its length in "
                                                                       "um (with the calibration)", quiet=True)
         self.measure.setCheckable(True)
-        actions.addWidget(self.measure)
-        actions.addWidget(widgets.button("Fit", lambda: self.box.autoRange(padding=0), "The whole picture again "
-                                                                                       "(the wheel zooms, a drag pans)",
-                                         quiet=True))
-        actions.addStretch(1)
+        tools.addWidget(self.measure)
+        tools.addWidget(widgets.button("Fit", lambda: self.box.autoRange(padding=0), "The whole picture again "
+                                                                                     "(the wheel zooms, a drag pans)",
+                                       quiet=True))
+        tools.addStretch(1)
         self.fps = label("", "muted")             # the camera's frame rate
         self.fps.setToolTip("Pictures a second: as the camera takes them (the exposure and averaging set it), and as "
                             "drawn here (at most 10 a second)")
-        actions.addWidget(self.fps)
+        tools.addWidget(self.fps)
         self.status = label("", "muted", wrap=True)
-        # the controls under the picture, as tall as the user drags them (scrolled when made smaller than they are)
         self.levels = LevelsHistogram(window.palette)
         self.levels.changed.connect(self._levels)
-        # the settings and the buttons always in view; the histogram and the status below them, scrolled when small
+        # the controls apart from the picture: Live puts them in its side panel's Camera section, so they stay in
+        # reach while the picture is enlarged or in a window of its own
         below = box("v", "xs")
         below.addLayout(controls)
         below.addLayout(actions)
+        below.addLayout(tools)
         below.addWidget(self.levels)
         below.addWidget(self.status)
-        below.addStretch(1)
-        holder = QtWidgets.QWidget()
-        holder.setLayout(below)
-        self._essentials_h = controls.sizeHint().height() + actions.sizeHint().height() + 3 * theme.SPACE["xs"]
-        self.controls_area = QtWidgets.QScrollArea()
-        self.controls_area.setWidgetResizable(True)
-        self.controls_area.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.controls_area.setWidget(holder)
-        self.controls_area.setMinimumHeight(self._essentials_h)
-        self.split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        self.split.setChildrenCollapsible(False)
-        self.split.addWidget(self.view)
-        self.split.addWidget(self.controls_area)
-        self.split.setStretchFactor(0, 1)
-        self.split.setStretchFactor(1, 0)
-        self.split.setHandleWidth(theme.SPACE["s"])
-        self.split.handle(1).setToolTip("Drag to give the controls more or less room")
-        self.split.splitterMoved.connect(lambda *_: self.save_settings())
-        lay.addWidget(self.split, 1)
+        self.controls = QtWidgets.QWidget()
+        self.controls.setLayout(below)
+        lay.addWidget(self.view, 1)
         self.setLayout(lay)
         self._shown = 0                                       # pictures drawn (the frame rate's other count)
         self._fps_timer = QtCore.QTimer(self)
@@ -780,8 +772,6 @@ class CameraPanel(QtWidgets.QWidget):
         self.objective.setValue(self.objectives.index(20.0))
         self.load_settings()
         self.levels.show_levels(self.adjust.black, self.adjust.white, self.adjust.gamma)
-        if not getattr(self.window, "persist", False) or self.window._settings().value("camera/split") is None:
-            self.split.setSizes([600, holder.sizeHint().height()])      # the first time: every control in view
         self._loading = False
 
     # ---- taking and letting go
@@ -810,6 +800,17 @@ class CameraPanel(QtWidgets.QWidget):
         t.start()
         self._fps_at, self._fps_taken, self._fps_shown = time.monotonic(), 0, self._shown
         self._fps_timer.start(1000)
+
+    def summary(self) -> tuple[str, str, str]:
+        """How the camera stands in a few words (status, words, detail): what a folded section's header shows."""
+        if self._thread is None:
+            return "muted", "not held", ""
+        if self.last is None:
+            return "muted", "opening...", self.status.text()
+        fps = self.fps.text().split(" (")[0]
+        um = self.scale()[0]
+        words = ", ".join(x for x in (f"{self.exposure.value():g} ms", fps, f"{self.magnification:g}x") if x)
+        return "ok", words, f"{self.magnification:g}x: " + (f"{um:.4g} um a pixel" if um else "not calibrated")
 
     def _power(self, t=None, on: bool | None = None) -> None:
         """Low-power mode's limits (app.power) on the camera's drawing: ``on`` as chosen, else as kept."""
@@ -1246,9 +1247,6 @@ class CameraPanel(QtWidgets.QWidget):
         self.dialog.bar.setChecked(str(s.value("camera/scale_bar", "true")).lower() == "true")
         self.average.setValue(int(s.value("camera/average", 1) or 1))
         self.binning.setCurrentIndex(max(0, self.binning.findData(int(s.value("camera/binning", 1) or 1))))
-        split = s.value("camera/split")
-        if split is not None:
-            self.split.restoreState(split)
 
     def save_settings(self) -> None:
         if self._loading or not getattr(self.window, "persist", False):
@@ -1269,4 +1267,3 @@ class CameraPanel(QtWidgets.QWidget):
         s.setValue("camera/scale_bar", self.dialog.bar.isChecked())
         s.setValue("camera/average", self.average.value())
         s.setValue("camera/binning", self.binning.currentData())
-        s.setValue("camera/split", self.split.saveState())

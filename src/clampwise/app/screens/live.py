@@ -96,6 +96,7 @@ class WindowView(QtWidgets.QFrame):
     pop = QtCore.Signal(str)                          # out into a window of its own, or back
     fill_changed = QtCore.Signal(str, bool)
     part_chosen = QtCore.Signal(str, object)          # role, (left, top, right, bottom) px in from the edges, or WHOLE
+    own_changed = QtCore.Signal(str, bool)            # role, Clampwise's own panel shown (Use here) or not
 
     def __init__(self, role: str) -> None:
         super().__init__()
@@ -192,6 +193,7 @@ class WindowView(QtWidgets.QFrame):
             self.set_status("ok", "in Clampwise", self.held)
         else:
             self.show_window(self.source)
+        self.own_changed.emit(self.role, on)
 
     def _attach(self) -> None:
         if self.own or self._thumb is not None or self.source is None or not self.isVisible():
@@ -546,8 +548,12 @@ class LiveScreen(Screen):
         from .polygon_panel import PolygonPanel
 
         self.patterned = PolygonPanel(self.camera)         # the Polygon in Clampwise (rig.polygon), PolyScan closed
+        # its controls are in the side panel beside the camera's; its view says where they went
+        light_note = label("Held by Clampwise. Its controls are in the Patterned light section, at the right, beside "
+                           "the camera's; regions are drawn and chosen on the camera's picture.", "muted", wrap=True)
+        light_note.setAlignment(QtCore.Qt.AlignCenter)
         self.views["light"].hold(
-            self.patterned, self.use_light, self.patterned.release,
+            light_note, self.use_light, self.patterned.release,
             "Run the Polygon in Clampwise: patterns, PolyScan's sequences, shapes drawn on the camera's picture "
             "(PolyScan must be closed)",
             "the patterned light held by Clampwise; its light is still switched by the acquisition (Let go gives it "
@@ -571,19 +577,20 @@ class LiveScreen(Screen):
         programs.customContextMenuRequested.connect(lambda pos: self.views_menu.exec_(programs.mapToGlobal(pos)))
         split.addWidget(programs)
 
-        # the cell, compact: the channel as the amplifier's panel shows it, then the recorded trace, Rs, the records
+        # the side panel: sections folded or unfolded as chosen, in the order chosen (kept for the user). The rig's
+        # hardware; the camera's controls and the patterned light's together, so the picture beside them can be as
+        # large as the views allow (enlarged, or in a window of its own on another screen) and they stay in reach;
+        # then the cell, its channel laid out like the amplifier's own panel. A folded section's header still says
+        # how it stands (a warning stays seen), and keeps the buttons that must stay in reach (Off, Use here).
         panel = QtWidgets.QWidget()
         lay = box("v", "s")
+        settings = (lambda: self.window._settings()) if getattr(window, "persist", False) else None
+        self.sections = widgets.Sections("live/sections", settings, folded=("controls",))
+        sections = self.sections
         # the rig's hardware, found by itself (rig.hardware): what is connected and who is using it
-        found = QtWidgets.QFrame()
-        found.setObjectName("desk")
-        found.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        fl = box("v", "xs", "s")
-        ftop = box("h", "s")
-        ftop.addWidget(label("Hardware", "heading"), 1)
-        ftop.addWidget(widgets.button("Detect", self.detect_hardware, "Look for the digitizer, the amplifier and the "
+        found = sections.add(widgets.Section("hardware", "Hardware"))
+        found.add_tool(widgets.button("Detect", self.detect_hardware, "Look for the digitizer, the amplifier and the "
                                       "camera now (they are looked for every few seconds anyway)", quiet=True))
-        fl.addLayout(ftop)
         self.hardware_grid = QtWidgets.QGridLayout()
         self.hardware_grid.setHorizontalSpacing(theme.SPACE["m"])
         self.hardware_grid.setVerticalSpacing(theme.SPACE["xs"])
@@ -597,17 +604,37 @@ class LiveScreen(Screen):
             self.hardware_grid.addWidget(caption, row, 0)
             self.hardware_grid.addWidget(badge, row, 1)
             self.hardware_rows[role] = badge
-        fl.addLayout(self.hardware_grid)
-        found.setLayout(fl)
-        lay.addWidget(found)
+        found.add(self.hardware_grid)
         self.hardware: list[hardware.Device] = []
         self._detecting = False
         self._hardware_timer = QtCore.QTimer(self)
         self._hardware_timer.timeout.connect(self.detect_hardware)
-        channel = QtWidgets.QFrame()
-        channel.setObjectName("desk")
-        channel.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        ch = box("v", "s", "s")
+        # the camera's controls (its picture stays in the camera's view): Use here on the header, as on the view's
+        cam = sections.add(widgets.Section("camera", "Camera"))
+        self.held_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self.held_notes: dict[str, QtWidgets.QLabel] = {}
+        self.held_buttons["camera"] = widgets.button("Use here", lambda: self._use_or_let_go("camera"),
+                                                     "Use the camera in Clampwise (its own program must be closed); "
+                                                     "Let go gives it back", quiet=True)
+        cam.add_tool(self.held_buttons["camera"])
+        self.held_notes["camera"] = label("", "muted", wrap=True)
+        cam.add(self.held_notes["camera"])
+        cam.add(self.camera.controls)
+        # the patterned light's, under the camera's: its regions are drawn on that picture, its calibration reads it,
+        # its map follows the objective chosen there. Off stays on the header: in reach with the section folded
+        light = sections.add(widgets.Section("light", "Patterned light"))
+        self.light_off = widgets.button("Off", self.patterned.off, "No mirror lit (here while the section is folded)")
+        light.add_tool(self.light_off)
+        self.held_buttons["light"] = widgets.button("Use here", lambda: self._use_or_let_go("light"),
+                                                    "Run the patterned light in Clampwise (its own program must be "
+                                                    "closed); Let go gives it back", quiet=True)
+        light.add_tool(self.held_buttons["light"])
+        self.held_notes["light"] = label("", "muted", wrap=True)
+        light.add(self.held_notes["light"])
+        light.add(self.patterned)
+        for role in self.held_buttons:
+            self.views[role].own_changed.connect(self._held_changed)
+        channel = sections.add(widgets.Section("amplifier", "Amplifier"))
         top = box("h", "s")
         self.channel_name = label("Amplifier", "heading")
         top.addWidget(self.channel_name, 1)
@@ -616,7 +643,7 @@ class LiveScreen(Screen):
             ("bridge", "Bridge balance"), ("output", "Primary output"), ("filter", "Low-pass"),
             ("seal", "Seal test"), ("telegraph", "Telegraph"))}
         top.addWidget(self.readouts["mode"].value)
-        ch.addLayout(top)
+        channel.add(top)
         meters = QtWidgets.QGridLayout()                  # the channel's two meters, as the amplifier's panel has them
         meters.setHorizontalSpacing(theme.SPACE["s"])
         self.meter_v, self.meter_i = label("–", "meter"), label("–", "meter")
@@ -624,7 +651,7 @@ class LiveScreen(Screen):
             w.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             meters.addWidget(label(cap, "muted"), 0, k)
             meters.addWidget(w, 1, k)
-        ch.addLayout(meters)
+        channel.add(meters)
         form = QtWidgets.QGridLayout()
         form.setHorizontalSpacing(theme.SPACE["m"])
         form.setVerticalSpacing(theme.SPACE["xs"])
@@ -632,49 +659,31 @@ class LiveScreen(Screen):
             form.addWidget(self.readouts[key].caption, row, 0)
             form.addWidget(self.readouts[key].value, row, 1)
         form.setColumnStretch(1, 1)
-        ch.addLayout(form)
+        channel.add(form)
         self.meters = label("", "muted", wrap=True)
-        ch.addWidget(self.meters)
-        channel.setLayout(ch)
-        lay.addWidget(channel)
-        # the amplifier's controls, sent through its own program (rig.amplifier_control; Settings > Features)
+        channel.add(self.meters)
+        # the amplifier's controls, sent through its own program (rig.amplifier_control; Settings > Features): folded
+        # until unfolded
         from .amplifier_panel import AmplifierPanel
 
-        self.controls_frame = QtWidgets.QFrame()
-        self.controls_frame.setObjectName("desk")
-        self.controls_frame.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        cl = box("v", "xs", "s")
-        ctop = box("h", "s")
-        ctop.addWidget(label("Controls", "heading"), 1)
-        self.controls_toggle = widgets.button("Show", self.toggle_controls, "The amplifier's settings and buttons, "
-                                              "sent through its own program (which shows each change too)",
-                                              quiet=True)
-        ctop.addWidget(self.controls_toggle)
-        cl.addLayout(ctop)
+        self.controls_frame = sections.add(widgets.Section("controls", "Amplifier controls"))
+        self.controls_frame.head.setToolTip("The amplifier's settings and buttons, sent through its own program "
+                                            "(which shows each change too)")
         self.amp_controls = AmplifierPanel(self._send_control)
-        self.amp_controls.setVisible(False)
-        cl.addWidget(self.amp_controls)
-        self.controls_frame.setLayout(cl)
-        lay.addWidget(self.controls_frame)
+        self.controls_frame.add(self.amp_controls)
         # the cell's health: each reading from its best source, against the quality limits (rig.health)
-        well = QtWidgets.QFrame()
-        well.setObjectName("desk")
-        well.setAttribute(QtCore.Qt.WA_StyledBackground, True)
-        hl = box("v", "xs", "s")
-        hl.addWidget(label("Cell health", "heading"))
+        well = sections.add(widgets.Section("health", "Cell health"))
         self.health_grid = QtWidgets.QGridLayout()
         self.health_grid.setHorizontalSpacing(theme.SPACE["m"])
         self.health_grid.setVerticalSpacing(theme.SPACE["xs"])
         self.health_grid.setColumnStretch(1, 1)
-        hl.addLayout(self.health_grid)
-        well.setLayout(hl)
-        lay.addWidget(well)
+        well.add(self.health_grid)
         self.health_rows: dict[str, tuple[QtWidgets.QLabel, widgets.Badge]] = {}
         self.rs_badge = widgets.Badge("muted", "Rs steady")
         self.rs_badge.setVisible(False)
-        lay.addWidget(self.rs_badge, 0, QtCore.Qt.AlignLeft)
+        well.add(self.rs_badge)
         self.trace = label("", wrap=True)                 # each sweep's test pulse, as the acquisition writes it
-        lay.addWidget(self.trace)
+        well.add(self.trace)
         self.plot = pg.PlotWidget()
         self.plot.setMinimumHeight(110)
         self.plot.setMaximumHeight(200)
@@ -688,15 +697,16 @@ class LiveScreen(Screen):
                                           symbolBrush=theme.series(window.palette)[1], symbolPen=None,
                                           name="test pulse")
         self.plot.setVisible(False)
-        lay.addWidget(self.plot)
-        lay.addWidget(label("Recorded", "section"))
+        well.add(self.plot)
+        recorded = sections.add(widgets.Section("recorded", "Recorded"))
         self.acquisition = label("", "muted", wrap=True)
         self.test = label("", "muted", wrap=True)
         self.light = label("", "muted", wrap=True)
         self.picture = label("", "muted", wrap=True)
         for w in (self.acquisition, self.test, self.light, self.picture):
-            lay.addWidget(w)
-        lay.addStretch(1)
+            recorded.add(w)
+        sections.load()
+        lay.addWidget(sections, 1)
         notes = box("h", "s")                              # a note, timestamped, kept with the project
         self.note = QtWidgets.QLineEdit()
         self.note.setPlaceholderText("A note (drug on, drug off...)")
@@ -711,6 +721,7 @@ class LiveScreen(Screen):
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         scroll.setWidget(panel)
         scroll.setMinimumWidth(320)
+        self.side = scroll
         split.addWidget(scroll)
         split.setStretchFactor(0, 4)
         split.setStretchFactor(1, 1)
@@ -724,6 +735,8 @@ class LiveScreen(Screen):
         self._details_folded = False
         self._load_layout()
         self._apply_views()
+        for role in self.held_buttons:                     # nothing held yet: each section says how to take it
+            self._held_changed(role, False)
 
         d = box("v", "s", "m")
         d.addWidget(label("What this screen reads", "heading"))
@@ -762,10 +775,48 @@ class LiveScreen(Screen):
         view.set_own(True)
         self.patterned.take()                            # found on its own thread (25 s): the window goes on
 
-    def toggle_controls(self) -> None:
-        shown = not self.amp_controls.isVisible()
-        self.amp_controls.setVisible(shown)
-        self.controls_toggle.setText("Hide" if shown else "Show")
+    # ---- the camera and the patterned light from the side panel's sections: the same Use here as their views'
+    def _use_or_let_go(self, role: str) -> None:
+        if role == "camera" and not self.views[role].own and role in self._hidden:
+            self.set_view_shown(role, True)              # taken to be seen: its picture shown again
+        self.views[role].use_button.click()
+
+    def _held_changed(self, role: str, on: bool) -> None:
+        """Use here or Let go, from the view or the section: the section's controls shown while held (unfolded when
+        taken), else why not and how."""
+        view = self.views[role]
+        self.held_buttons[role].setText("Let go" if on else "Use here")
+        controls = self.camera.controls if role == "camera" else self.patterned
+        controls.setVisible(on)
+        if role == "light":
+            self.light_off.setVisible(on)
+        if on:
+            self.sections.sections[role].set_open(True)
+            self.held_notes[role].setText("")
+        elif role == "camera":
+            self.held_notes[role].setText(
+                "Not held by Clampwise. Use here takes the camera (its own program must be closed); its controls "
+                "then show here, its picture in the camera's view." +
+                (f"\n\nUse here could not take it: {view.failure}" if view.failure else ""))
+        else:
+            self.held_notes[role].setText(
+                "Not held by Clampwise. Use here takes the patterned light (its own program must be closed; finding it "
+                "takes about 25 s). The camera must be taken too: regions are drawn on its picture.")
+        self.held_notes[role].setVisible(not on)
+        self._fit_side()
+        self._summaries()
+
+    def _fit_side(self) -> None:
+        """The side panel never narrower than its content needs (it scrolls only up and down: what is wider would
+        be cut off at its edge, out of reach)."""
+        bar = self.side.verticalScrollBar().sizeHint().width()
+        self.side.setMinimumWidth(max(320, self.side.widget().minimumSizeHint().width() + bar + 2))
+
+    def _summaries(self) -> None:
+        """The camera's and the patterned light's headers say how they stand (the others' are set with their
+        readings)."""
+        self.sections.sections["camera"].set_summary(*self.camera.summary())
+        self.sections.sections["light"].set_summary(*self.patterned.summary())
 
     def _send_control(self, command: tuple) -> None:
         self._start()
@@ -1017,6 +1068,7 @@ class LiveScreen(Screen):
             return
         self.hardware = result
         have = {d.role: d for d in result}
+        missing, taken = [], []
         for role, badge in self.hardware_rows.items():
             d = have.get(role)
             if role == "light":
@@ -1024,21 +1076,29 @@ class LiveScreen(Screen):
                 self.hardware_grid.itemAtPosition(hardware.ROLES.index(role), 0).widget().setVisible(d is not None)
             if d is None:
                 badge.set("muted", "not connected", "Not among the USB devices Windows lists now")
+                if role != "light":
+                    missing.append(hardware.WORDS[role].lower())
                 continue
             busy = d.state.startswith("in use by") and "Clampwise" not in d.state or "closed" in d.state
             badge.set("warn" if busy else "ok", d.line(), f"Windows' device: {d.instance}")
             badge.setWordWrap(True)
+            if busy:
+                taken.append(hardware.WORDS[role].lower())
+        words = (f"{len(have)} connected" + (f"; no {', '.join(missing)}" if missing else "")
+                 + (f"; {', '.join(taken)} in use elsewhere" if taken else ""))
+        self.sections.sections["hardware"].set_summary("warn" if taken else "ok" if not missing else "muted", words)
 
     # ---- the readout runs while the screen shows or the folder is watched
     def on_shown(self) -> None:
         if not self._hardware_timer.isActive():
             self._hardware_timer.start(5000)
         QtCore.QTimer.singleShot(0, self.detect_hardware)
-        if not self._split_set:                          # first time: the programs take most of the width
-            self._split_set = True
+        if not self._split_set:                          # first time: the programs take most of the width (the side
+            self._split_set = True                       # panel enough for the camera's and the light's controls)
             total = max(self.split.width(), 2)
-            panel = max(340, int(total * 0.24))
+            panel = max(380, int(total * 0.28))
             self.split.setSizes([total - panel, panel])
+        self._fit_side()
         toggle = getattr(getattr(self.window, "frame", None), "details_toggle", None)
         if toggle is not None and toggle.isChecked():   # the programs get the room; Details still opens it
             self._details_folded = True
@@ -1133,6 +1193,7 @@ class LiveScreen(Screen):
         self._trace(snap)
         self._health(snap)
         self._records(snap)
+        self._summaries()
         for role, view in self.views.items():
             found = [w for w in snap.windows.get(role, []) if not w.minimized] or snap.windows.get(role, [])
             view.show_window(found[0] if found else None)
@@ -1179,9 +1240,12 @@ class LiveScreen(Screen):
             self.meter_i.setText("–")
             self.channel_name.setText("Amplifier")
             self.meters.setText(amplifier_words(amp.status).capitalize() + "." if amp is not None and amp.status else "")
+            self.sections.sections["amplifier"].set_summary("muted", "not read",
+                                                            amplifier_words(amp.status) if amp is not None else "")
             return
         vc = amp.mode == 0
         src = f"read from the amplifier ({channel_words(amp.device)})"
+        self.sections.sections["amplifier"].set_summary("ok", f"{amp.mode_name}, {amp.shown('holding')}", src)
         tg = getattr(snap, "telegraph", None)
         r["telegraph"].set(telegraph_words(tg) if tg is not None else "not received",
                            "what the amplifier's program telegraphs to an acquisition program, as Clampex receives "
@@ -1289,6 +1353,16 @@ class LiveScreen(Screen):
             tip = (f"From {r.source}." if r.source else "Not read yet.") + (f" Limit: {r.limit}." if r.limit else "")
             value.set(r.status, "" if r.shown() == "–" else r.shown(), tip)
             cap.setToolTip(tip)
+        # its header, seen with the section folded: what is outside its limit, by name (Rs's change included)
+        flagged = [r.label for r in rows if r.status == "warn"]
+        if not self.rs_badge.isHidden() and self.rs_badge.objectName() == "badge_warn":     # folded: still counted
+            flagged.append(self.rs_badge.text().lstrip("⚠ "))
+        if flagged:
+            self.sections.sections["health"].set_summary("warn", ", ".join(flagged), "Outside the quality limits")
+        elif any(r.status == "ok" for r in rows):
+            self.sections.sections["health"].set_summary("ok", "within the limits")
+        else:
+            self.sections.sections["health"].set_summary("muted", "nothing read yet")
 
     @staticmethod
     def _rin_floor() -> float:

@@ -652,7 +652,15 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert panel.dialog.isSizeGripEnabled() and panel.dialog.minimumSize().height() <= 200
     panel.dialog.resize(300, 200)
     assert panel.dialog.height() <= 220
-    assert panel.split.count() == 2 and panel.split.widget(1) is panel.controls_area
+    # the controls in the side panel's Camera section, the picture alone in the view: in reach with it enlarged
+    assert live.sections.sections["camera"].isAncestorOf(panel.controls) and not view.isAncestorOf(panel.controls)
+    assert panel.controls.isVisibleTo(live) and live.held_buttons["camera"].text() == "Let go"
+    live.toggle_enlarged("camera")
+    assert panel.controls.isVisibleTo(live) and panel.exposure.isVisibleTo(live)
+    live.toggle_enlarged("camera")
+    live._summaries()                                                             # as each look at the rig does
+    status, words, _ = live.sections.sections["camera"].badge._shown
+    assert status == "ok" and "20x" in words                                      # its header, folded or not
     # the adjustable histogram: its handles are the levels shown black and white; Reset all puts them back
     assert _wait(qapp, lambda: panel.levels.counts is not None)
     panel.levels.set_levels(40, 180, 1.0)
@@ -660,7 +668,6 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert panel.levels.mid.value() == pytest.approx(110.0)                       # mid-grey half way at gamma 1
     panel.levels.mid.setValue(40 + 140 * 0.25)                                    # dragged left: dim parts lifted
     assert panel.adjust.gamma == pytest.approx(2.0, abs=0.01) and panel.levels.gamma.value() == pytest.approx(2.0)
-    assert panel.controls_area.minimumHeight() >= 40                              # the buttons never squeezed away
     panel.dialog.show_adjust(picture.Adjust(), apply=True)
     assert (panel.adjust.black, panel.adjust.white) == (0.0, 255.0) and panel.levels.white.value() == 255
     # binning: off unless chosen; on, the picture is half as wide and each pixel twice the um across
@@ -682,20 +689,29 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     light.source = None
     light.use_button.click()                                                     # found without the window waiting
     assert light.own and live.patterned.wait() and live.patterned.polygon.connected
-    assert live.patterned.isVisibleTo(light)
-    assert light.use_button.text() == "Let go"
+    # its controls in the side panel, under the camera's; Off on its header, kept there when folded
+    assert live.sections.sections["light"].isAncestorOf(live.patterned) and live.patterned.isVisibleTo(live)
+    assert live.sections.order().index("light") == live.sections.order().index("camera") + 1
+    qapp.processEvents()                                                         # nothing cut off at its right edge
+    assert live.side.widget().minimumSizeHint().width() <= live.side.minimumWidth() - 10
+    assert live.side.widget().width() <= live.side.viewport().width()
+    live.sections.sections["light"].set_open(False)
+    assert not live.patterned.isVisibleTo(live) and live.light_off.isVisibleTo(live)
+    live._summaries()
+    assert live.sections.sections["light"].badge._shown[0] == "warn"               # not calibrated: said folded
+    live.sections.sections["light"].set_open(True)
+    assert light.use_button.text() == "Let go" and live.held_buttons["light"].text() == "Let go"
     live.patterned.source.setCurrentText("Grid")
     live.patterned.make_steps()
     assert live.patterned.list.count() == 100 and live.patterned.list.item(0).text() == "1"
     live.patterned.project()
     assert live.patterned.wait() and live.patterned.polygon.shown == "1" and sdk.image is not None
-    light.use_button.click()                                                     # Let go: PolyScan can have it
+    live.held_buttons["light"].click()                                           # Let go from the section's header
     assert not light.own and live.patterned.wait() and not live.patterned.polygon.connected
-    assert ("uninit",) in sdk.calls
-    panel.split.setSizes([500, 10])                                               # dragged right down:
-    assert panel.split.sizes()[1] == panel.controls_area.minimumHeight()          # the buttons still in view
+    assert ("uninit",) in sdk.calls and not live.patterned.isVisibleTo(live) and not live.light_off.isVisibleTo(live)
     panel.release()
     assert not view.own and fake.calls[-1] == "close" and view.use_button.text() == "Use here"
+    assert live.held_buttons["camera"].text() == "Use here" and not panel.controls.isVisibleTo(live)
 
 
 def test_live_uses_a_basler_camera_as_it_does_the_other(qapp, window, tmp_path):
@@ -919,6 +935,52 @@ def test_live_shows_the_cell_s_health_from_its_best_source(qapp, window):
     assert cap.text() == "Access (Rs)" and value.text() == "✓ 9.10 MOhm" and "Membrane Test" in value.toolTip()
     assert "at most 25 MOhm" in value.toolTip()
     assert {"rm", "rt", "cm", "rs_rm", "clamp_tau", "holding", "noise", "rs_change"} <= set(live.health_rows)
+
+
+def test_live_s_side_panel_folds_each_section_and_a_folded_one_still_warns(qapp, window):
+    # the side panel's sections fold as chosen; a folded one's header still says what is outside its limits
+    window.go("live")
+    live = window.screens["live"]
+    s = live.sections
+    assert s.order()[:3] == ["hardware", "camera", "light"]                     # the camera's and the light's together
+    assert not s.sections["controls"].open and s.sections["health"].open        # the amplifier's controls folded
+    assert not live.camera.controls.isVisibleTo(live) and "Use here" in live.held_notes["camera"].text()
+    s.only("health")
+    assert [k for k, sec in s.sections.items() if sec.open] == ["health"]
+    s.sections["health"].set_open(False)
+    assert not live.health_grid.parentWidget().isVisibleTo(live)
+    health = s.sections["health"].badge
+    assert _wait(qapp, lambda: health._shown[0] == "warn")                       # Rs crept up 28%: seen folded
+    assert "Rs" in health.text() and health.isVisibleTo(live)
+    assert "-70" in s.sections["amplifier"].badge._shown[1]                      # the mode and holding, folded
+    s.every(True)
+    assert all(sec.open for sec in s.sections.values())
+
+
+def test_sections_keep_their_folds_and_order_between_sessions(qapp, tmp_path):
+    from pyqtgraph.Qt import QtCore
+
+    from clampwise.app import widgets
+
+    kept = QtCore.QSettings(str(tmp_path / "kept.ini"), QtCore.QSettings.IniFormat)
+
+    def side():
+        sections = widgets.Sections("side", lambda: kept, folded=("b",))
+        for key in "abc":
+            sections.add(widgets.Section(key, key.upper()))
+        sections.load()
+        return sections
+
+    first = side()
+    assert first.order() == ["a", "b", "c"] and not first.sections["b"].open     # folded at first
+    first.move("c", -2)
+    first.every(True)
+    first.sections["a"].set_open(False)
+    again = side()                                                               # the next session
+    assert again.order() == ["c", "a", "b"]
+    assert not again.sections["a"].open and again.sections["b"].open and again.sections["c"].open
+    again.every(True)                                                            # none folded is kept too
+    assert all(sec.open for sec in side().sections.values())
 
 
 def test_a_view_pops_out_into_a_window_of_its_own_and_closing_it_puts_it_back(qapp, window):
