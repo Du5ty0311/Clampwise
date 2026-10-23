@@ -328,9 +328,9 @@ class CameraPanel(QtWidgets.QWidget):
         self.bar_text = pg.TextItem("", color="w", anchor=(1, 1))
         for item in (self.bar_line, self.bar_text):
             self.box.addItem(item)
-        # the slice's orientation: a cross of the four directions in its plane, the turned one (rostral, or dorsal)
-        # the stronger arm (rig.picture.compass); keyed by the names the plane gives them
-        arms = [(pg.PlotCurveItem(pen=pg.mkPen("w", width=4 if i == 0 else 2)),
+        # the slice's orientation: a cross of the four directions in its plane, every arm the same width (each is
+        # named, rig.picture.compass); keyed by the names the plane gives them
+        arms = [(pg.PlotCurveItem(pen=pg.mkPen("w", width=2)),
                  pg.TextItem("", color="w", anchor=(0.5, 0.5), fill=pg.mkBrush(0, 0, 0, 120))) for i in range(4)]
         self.compass_lines = {name: line for name, (line, _) in zip(picture.compass(0), arms)}
         self.compass_text = {name: text for name, (_, text) in zip(picture.compass(0), arms)}

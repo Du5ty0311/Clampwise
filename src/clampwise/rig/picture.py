@@ -113,7 +113,7 @@ def axis_name(pair: tuple[str, str], naming: str = NAMINGS[0]) -> str:
 def compass(up_deg: float, side_right: bool = True, plane: str = "horizontal",
             naming: str = NAMINGS[0]) -> dict[str, tuple[float, float]]:
     """The slice's directions in the picture, as unit vectors (x to the right, y down, as the picture's rows run),
-    named as ``naming`` names them, the first the plane's turned direction (drawn stronger). The plane's first axis
+    named as ``naming`` names them, the first the plane's turned direction. The plane's first axis
     (rostral in a horizontal slice; dorsal in a coronal or a sagittal one) points ``up_deg`` clockwise from up, its
     other end opposite; the second axis's first end (medial in a horizontal or a coronal slice, rostral in a sagittal
     one) a quarter turn clockwise of it (to its right, as one faces it) or anticlockwise. The axis the slice is cut
