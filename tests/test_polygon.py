@@ -148,10 +148,17 @@ class FakeSDK:
         self.mode = mode
         return 0
 
+    @staticmethod
+    def _mirrors(ptr) -> np.ndarray:
+        """What the Polygon does with what it is sent (as measured on the rig): reads a bit a mirror, eight a byte,
+        from the start of it, and lights the mirrors whose bit is set (255 here, 0 not)."""
+        n = patterns.ROWS * patterns.COLUMNS // 8
+        data = np.ctypeslib.as_array(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8)), (n,)).copy()
+        bits = np.unpackbits(data.reshape(patterns.ROWS, patterns.COLUMNS // 8), axis=1, bitorder="big")
+        return (bits * 255).astype(np.uint8)
+
     def MTPLG_SetDevStaticImageFromMemory(self, i, ptr, order):
-        n = patterns.ROWS * patterns.COLUMNS
-        self.image = np.ctypeslib.as_array(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8)), (n,)).copy().reshape(
-            patterns.ROWS, patterns.COLUMNS)
+        self.image = self._mirrors(ptr)
         self.calls.append(("image", i, order))
         return 0
 
@@ -165,8 +172,7 @@ class FakeSDK:
         return 0
 
     def MTPLG_SetDevPtnFromMemory(self, i, k, ptr):
-        n = patterns.ROWS * patterns.COLUMNS
-        self.patterns[k] = np.ctypeslib.as_array(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8)), (n,)).copy()
+        self.patterns[k] = self._mirrors(ptr).ravel()
         return 0
 
     def MTPLG_StartPattern(self, i):
@@ -184,6 +190,23 @@ class FakeSDK:
     def MTPLG_UnInitDevice(self):
         self.calls.append(("uninit",))
         return 0
+
+
+def test_a_pattern_reaches_the_mirrors_as_drawn_a_bit_a_mirror():
+    # the Polygon reads a bit a mirror, eight a byte (measured on the rig, 2026-10-23): sent a byte a mirror, only the
+    # first eighth of an image reached it, as fine stripes over the whole field. The left half lights the left half.
+    sdk = FakeSDK()
+    p = Polygon(sdk, polyscan_running=lambda: False)
+    assert p.open()
+    left = np.zeros((patterns.ROWS, patterns.COLUMNS), bool)
+    left[:, : patterns.COLUMNS // 2] = True
+    assert p.send(patterns.image(left, 255))
+    assert (sdk.image[:, : patterns.COLUMNS // 2] == 255).all() and not sdk.image[:, patterns.COLUMNS // 2:].any()
+    corner = np.zeros_like(left)
+    corner[1000:, 900:] = True                                                     # the last mirrors read too
+    assert p.send(patterns.image(corner, 255)) and (sdk.image == 255).sum() == corner.sum()
+    assert sdk.image[1139, 911] == 255 and sdk.image[0, 0] == 0
+    p.close()
 
 
 def test_the_polygon_is_not_taken_while_polyscan_holds_it():

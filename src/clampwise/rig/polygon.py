@@ -2,8 +2,10 @@
 
 ``MT_Polygon1000_SDK.dll`` (64-bit, beside PolyScan) is called with ctypes as PolyScan's own code calls it: the
 devices counted with ``MTPLG_InitDevice(-1)``, the first connected as device 1 (devices are numbered from 1), the
-display set to a static image (mode 0) and each pattern sent as one byte a mirror, 912 x 1140, row by row
-(``MTPLG_SetDevStaticImageFromMemory``). The Polygon only steers light: the LED behind it is switched by its own
+display set to a static image (mode 0) and each pattern sent as one bit a mirror, eight mirrors a byte (the first
+mirror the high bit), 114 bytes a row of 912 mirrors, 1140 rows (``MTPLG_SetDevStaticImageFromMemory``). Measured on
+the rig (2026-10-23): only the first eighth of a byte-a-mirror image reached the mirrors, each byte lighting eight of
+them, so a pattern sent so came out as fine stripes over the whole field. The Polygon only steers light: the LED behind it is switched by its own
 driver (from Clampex, as the recording's protocol says), so a pattern shown is lit only while that LED is on.
 
 Only one program can hold the Polygon: it is not taken while PolyScan runs, and it is let go when asked, so
@@ -25,6 +27,7 @@ SDK_FOLDERS = (r"C:\Program Files\Mightex\PolyScan", r"C:\Program Files\Mightex\
                r"C:\Program Files\Mightex\PolyScan3", r"C:\Program Files\Mightex\PolyScan4")
 DISPLAY_STATIC = 0
 PIXEL_ROW_MAJOR = 0
+BIT_ORDER = "big"                      # the first mirror of eight in a byte's high bit
 ERRORS = {-1: "critical error", -2: "out of range", -3: "not connected", -4: "timed out", -5: "wrong device",
           -6: "invalid", -7: "out of memory", -8: "file name", -9: "bad data", -10: "wrong state", -13: "warning"}
 
@@ -62,6 +65,19 @@ def _version(path: Path) -> tuple[int, ...]:
         return (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF)
     except (AttributeError, OSError):
         return ()
+
+
+def packed(image: np.ndarray) -> np.ndarray:
+    """An image of mirrors (1140 x 912, a byte each: 255 or 0, as patterns.image makes them) as the Polygon reads
+    it: a bit a mirror, eight a byte, row by row; in a buffer the size of the image (the rest zero), so that nothing
+    is read past its end whatever the device reads."""
+    image = np.asarray(image)
+    if image.shape != (patterns.ROWS, patterns.COLUMNS):
+        raise ValueError(f"the Polygon takes {patterns.ROWS} x {patterns.COLUMNS} images, not {image.shape}")
+    bits = np.packbits(image > 127, axis=1, bitorder=BIT_ORDER).ravel()
+    out = np.zeros(patterns.ROWS * patterns.COLUMNS, np.uint8)
+    out[:bits.size] = bits
+    return out
 
 
 def find_sdk(folders=SDK_FOLDERS) -> Path | None:
@@ -146,14 +162,12 @@ class Polygon:
         return True
 
     def send(self, image: np.ndarray) -> bool:
-        """One image of mirrors (uint8, 1140 rows x 912 columns) shown at once."""
+        """One image of mirrors (uint8, 1140 rows x 912 columns, 255 or 0 a mirror) shown at once."""
         if not self.connected:
             self.status = "not connected"
             return False
-        image = np.ascontiguousarray(image, np.uint8)
-        if image.shape != (patterns.ROWS, patterns.COLUMNS):
-            raise ValueError(f"the Polygon takes {patterns.ROWS} x {patterns.COLUMNS} images, not {image.shape}")
-        r = self._lib.MTPLG_SetDevStaticImageFromMemory(self.index, image.ctypes.data_as(ctypes.c_void_p),
+        data = packed(image)
+        r = self._lib.MTPLG_SetDevStaticImageFromMemory(self.index, data.ctypes.data_as(ctypes.c_void_p),
                                                         PIXEL_ROW_MAJOR)
         if r != 0:
             self.status = f"the pattern was not taken ({_why(r)})"
@@ -191,7 +205,7 @@ class Polygon:
         if r == 0:
             r = lib.MTPLG_SetDevPtnSetting(self.index, PatternSetting(bit_depth, len(masks), 0, TRIGGER_EXTERNAL,
                                                                       int(delay_us), 0, int(shown_us), 0, int(edge)))
-        images = [patterns.image(m, on_value) for m in masks]                  # kept until the SDK has them
+        images = [packed(patterns.image(m, on_value)) for m in masks]          # kept until the SDK has them
         for k, img in enumerate(images):
             if r != 0:
                 break

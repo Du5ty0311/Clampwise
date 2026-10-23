@@ -2,6 +2,11 @@
 
 ## 1.8.0 — not released yet
 
+- **The patterned light now shows the pattern drawn.** Clampwise sent each pattern as a byte a mirror, but the
+  Polygon reads a bit a mirror, eight to a byte. So only the first eighth of each image reached it, and every pattern
+  came out as fine stripes over the whole field: an even glow, no spot to find, and the calibration failing. Measured
+  on the rig with a mirror (the first eighth of an image carried 97% of the light, the rest none) and fixed: patterns
+  are packed as the device reads them, for single patterns and trigger sequences alike.
 - **The camera's controls are in Live's side panel.** Exposure, gain, frames averaged, binning, the objective,
   Auto exposure, Snapshot, Adjust... and the histogram now sit in a **Camera** section beside the views. The picture
   fills the camera's view alone, and the controls stay in reach while it is enlarged or in a window of its own on
