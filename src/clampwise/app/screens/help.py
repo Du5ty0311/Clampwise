@@ -235,15 +235,24 @@ cell's folder and each of its recordings finds them. The camera is not opened by
 it.</td></tr></table>
 <p><b>The programs' windows.</b> Each role's window is shown live on the right, drawn by Windows itself (as in the
 taskbar's previews): nothing is copied and the program is not touched. A minimized window has nothing to show until
-it is restored. A click on a window brings that program to the front, to be worked in directly. The acquisition and
-the camera have the wide column. Each view's <b>enlarge</b> button (as on a window's title bar) lets it fill the views alone (again
+it is restored. A click on a window brings that program to the front, to be worked in directly. They are laid out by
+how much they are watched while patching: the camera on the left, the whole height and half the width; the acquisition
+at the top right, with twice the height of the amplifier's and the patterned light's windows under it. Each view's <b>enlarge</b> button (as on a window's title bar) lets it fill the views alone (again
 brings the others back) and its <b>close</b> button hides one not in use; <b>Views</b> above them (or a right-click beside them) shows it
 again. A right-click on a view can show <b>only part of the window</b>: drag over the part to keep, which then follows
 the window's edges when it is resized; <b>Show the whole window</b> undoes it. The camera's view shows only Infinity
 Analyze's picture panel (below its menu, left of its Control Panel) unless another part is chosen. These choices are
 kept for the next time Clampwise opens.</p>
-<p><b>The side panel</b> beside the views is in sections: Hardware, Camera, Patterned light, Amplifier, Amplifier
-controls, Cell health and Recorded. A click on a section's header folds it to that header, or unfolds it; a
+<p><b>The side panel</b> beside the views is in sections, in the order they are used: Camera, Cell health, Amplifier,
+Amplifier controls (open), then Patterned light, Hardware and Recorded (folded until wanted). Live's controls sit close
+together, as on the amplifier's own panel. The <b>amplifier's controls</b> are laid out as Commander's: the mode as
+three buttons (VC, I=0, IC), then each group in the order a cell is patched (the pipette, the seal test, whole cell,
+Rs compensation, the bridge in current clamp, leak subtraction, the outputs), each switch beside its value and each
+<b>Auto</b> on the line of the value it sets. The acquisition's controls are two lines under its scope: the protocol
+and Play, Pause, Record, Stop and the membrane test; then the folder, a gap-free length and the test pulse.
+<b>Function keys</b>, in Live only, each the same as its button: F2 snapshot, F5 Play, F6 Record, F7 Pause or
+Resume, F8 Stop, F9 the membrane test, F11 the camera full screen (F11 or Esc again leaves), F12 all mirrors off.
+The amplifier's mode and Zap have none, so no key pressed by mistake reaches the cell. A click on a section's header folds it to that header, or unfolds it; a
 right-click folds all but that one, folds or unfolds them all, or moves it up or down. The folds and the order are
 kept for the next time. A folded section's header still says how it stands: the camera's exposure, frame rate and
 objective; what the patterned light shows now, or that it is not calibrated at the objective in use; the amplifier's

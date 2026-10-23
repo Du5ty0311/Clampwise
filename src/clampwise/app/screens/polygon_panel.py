@@ -371,7 +371,10 @@ class PolygonPanel(QtWidgets.QWidget):
                 result = e
             self._done.emit(then, result)
 
-        self._pool.submit(run)
+        try:
+            self._pool.submit(run)
+        except RuntimeError:                         # the worker already gone (Python closing): done here, so the
+            run()                                    # mirrors are still put off and the device let go
 
     def _finished(self, then, result) -> None:
         self._pending -= 1

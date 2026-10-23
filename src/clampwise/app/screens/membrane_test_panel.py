@@ -66,6 +66,16 @@ class MembraneTestView(QtWidgets.QWidget):
         for p in (self.pulse, self.history):
             theme.style_plot(p, palette)
             p.clear()
+        for p in (self.pulse, self.history):                # time never before 0, however zoomed or dragged
+            p.getViewBox().setLimits(xMin=0)
+        # 0 and the holding measured (the middle of the two steps): an open, zeroed pipette's trace is centred on 0
+        self.zero = pg.InfiniteLine(0, angle=0, pen=pg.mkPen(palette.text_muted, width=1, style=QtCore.Qt.DashLine),
+                                    label="0", labelOpts={"position": 0.02, "color": palette.text_muted})
+        self.holding_line = pg.InfiniteLine(0, angle=0, pen=pg.mkPen(series[1], width=1),
+                                            label="Holding", labelOpts={"position": 0.98, "color": series[1]})
+        self.holding_line.setVisible(False)
+        for line in (self.zero, self.holding_line):
+            self.pulse.addItem(line, ignoreBounds=True)
         self.trace = self.pulse.plot([], [], pen=pg.mkPen(series[0], width=1))
         self.fit_curves = [self.pulse.plot([], [], pen=pg.mkPen(palette.bad, width=2)) for _ in range(2)]
         self.pulse.getPlotItem().enableAutoRange(y=False)
@@ -110,6 +120,9 @@ class MembraneTestView(QtWidgets.QWidget):
         self.values["cm"].setText(f"{r.cm_pf:.1f} pF" if math.isfinite(r.cm_pf) else "–")
         self.values["tau"].setText(f"{r.tau_ms:.3g} ms" if math.isfinite(r.tau_ms) else "–")
         self.values["holding"].setText(f"{r.holding:.1f} {r.unit}" if math.isfinite(r.holding) else "–")
+        self.holding_line.setVisible(math.isfinite(r.holding))
+        if math.isfinite(r.holding):
+            self.holding_line.setValue(r.holding)
         if math.isfinite(r.resolution):
             self.grain.setText(f"One sample count is {r.resolution:.2g} {r.unit} at the amplifier's present gain: "
                                "a larger pulse, more pulses averaged or a higher gain resolve Rt more finely.")

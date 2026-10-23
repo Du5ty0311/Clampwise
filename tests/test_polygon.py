@@ -353,6 +353,29 @@ def test_a_calibration_made_at_one_binning_holds_at_another():
     assert full.at_size((1944, 1472)) is full
 
 
+def test_letting_go_still_puts_the_mirrors_off_when_python_is_closing(qapp):
+    """The worker the calls run on is shut down as Python closes; a release then must still light nothing and let
+    the patterned light go (it once left a pattern lit after a script ended)."""
+    from types import SimpleNamespace
+
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtWidgets
+
+    from clampwise.app.screens import polygon_panel
+
+    sdk = FakeSDK()
+    panel = QtWidgets.QWidget()
+    panel.box, panel.window, panel.folder = pg.ViewBox(), SimpleNamespace(say=lambda *_: None), lambda: ""
+    panel.last, panel._thread, panel._shown = None, None, 0
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
+    dlg.take()
+    assert dlg.wait() and dlg.polygon.connected
+    dlg._pool.shutdown(wait=True)                                                  # as at Python's exit
+    dlg.release()
+    assert not dlg.polygon.connected and ("uninit",) in sdk.calls
+    assert sdk.image is not None and not (sdk.image == dlg.calibration.on_value).any()   # nothing lit
+
+
 def test_finding_the_polygon_never_holds_the_window_up(qapp):
     """Its SDK takes 25 s to find it on the rig: Use here returns at once and the window goes on meanwhile."""
     from types import SimpleNamespace

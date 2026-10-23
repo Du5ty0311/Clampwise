@@ -149,34 +149,10 @@ def test_a_monochrome_camera_s_frames_stay_one_grey_channel():
     assert tuple(f.rgb[2, 3]) == (35, 35, 35)
     s = picture.stats(f.rgb)
     assert s["p995"] == 35 and s["hist"].sum() == 48 and s["clipped"] == 0
-    shown = picture.apply(f.rgb, picture.Adjust(contrast=2.0))                      # a lookup, still grey
-    assert picture.is_grey(shown) and tuple(shown[0, 0]) == tuple(picture.apply(
-        np.ascontiguousarray(f.rgb), picture.Adjust(contrast=2.0, sharpness=1e-12))[0, 0])
     cam.close()
 
 
-def test_adjustments_change_what_is_shown_and_each_resets_to_neutral():
-    rng = np.random.default_rng(0)
-    rgb = rng.integers(40, 120, (60, 80, 3)).astype(np.uint8)
-    assert picture.apply(rgb, picture.Adjust()) is rgb                               # neutral: untouched
-    brighter = picture.apply(rgb, picture.Adjust(brightness=0.2))
-    assert brighter.mean() > rgb.mean() + 40 and rgb.mean() < 81                    # the original is unchanged
-    grey = picture.apply(rgb, picture.Adjust(saturation=0.0))
-    assert np.all(grey[..., 0] == grey[..., 1]) and np.all(grey[..., 1] == grey[..., 2])
-    stretched = picture.apply(rgb, picture.Adjust(auto_levels=True))
-    assert stretched.min() == 0 and stretched.max() == 255
-    for name in ("contrast", "gamma", "sharpness", "clarity"):
-        a = picture.Adjust(**{name: 2.0})
-        assert not np.array_equal(picture.apply(rgb, a), rgb) and a.changed() == {name: 2.0}
-    kept = picture.preset_from_text(picture.preset_to_text(picture.Adjust(gamma=0.6, clarity=1.5)))
-    assert kept == picture.Adjust(gamma=0.6, clarity=1.5)
-
-
-def test_white_balance_and_the_scale_bar():
-    tinted = np.zeros((10, 10, 3), np.uint8) + np.array([200, 100, 50], np.uint8)
-    r, g, b = picture.white_balance(tinted)
-    balanced = picture.apply(tinted, picture.Adjust(red=r, green=g, blue=b))
-    assert np.ptp(balanced[0, 0].astype(int)) <= 1
+def test_the_scale_bar_is_a_round_length_about_a_fifth_of_the_picture():
     assert picture.scale_bar(0.16, 1944) == (50.0, 312)                              # a fifth of 311 um: 50 um
 
 
@@ -231,60 +207,17 @@ def test_before_any_calibration_a_pixel_s_size_follows_from_the_camera_s_own_pix
 def test_a_snapshot_keeps_the_camera_s_pixels_how_it_was_taken_and_its_scale(tmp_path):
     rgb = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)
     path = picture.write_tiff(picture.snapshot_name(tmp_path, "40x GFP"), rgb,
-                              {"exposure_ms": 250.0, "gain": 1.1, "averaged": 4,
-                               "shown_with": picture.Adjust(gamma=0.6).changed()}, um_per_px=0.16)
+                              {"exposure_ms": 250.0, "gain": 1.1, "objective": "40x"}, um_per_px=0.16)
     assert path.name.endswith("_40x_GFP.tif")
     tags = camera.tiff_tags(path.read_bytes())
     assert (tags[256], tags[257]) == (8, 6)
     info = json.loads(tags[270].decode("utf-8").rstrip("\0"))
-    assert info["exposure_ms"] == 250.0 and info["shown_with"] == {"gamma": 0.6}
+    assert info["exposure_ms"] == 250.0 and info["objective"] == "40x"
     from pyqtgraph.Qt import QtGui
 
     back = QtGui.QImage(str(path))
     assert (back.width(), back.height()) == (8, 6) and QtGui.QColor(back.pixel(1, 0)).getRgb()[:3] == (3, 4, 5)
     assert back.dotsPerMeterX() == pytest.approx(1e6 / 0.16, rel=1e-3)               # the scale, as ImageJ reads it
-
-
-def _field(h=60, w=80):
-    """An uneven field (illumination falling off to the right) with one small dark cell in it."""
-    shade = np.linspace(200, 100, w)[None, :, None] * np.ones((h, 1, 3))
-    cell = shade.copy()
-    cell[25:35, 35:45] -= 30
-    return shade.astype(np.float32), np.clip(cell, 0, 255).astype(np.uint8)
-
-
-def test_background_subtraction_flattens_the_field_and_keeps_the_cell():
-    # video-enhanced contrast (Allen et al. 1981; Inoue 1981): the background taken out, the cell left
-    bg, frame = _field()
-    out = picture.corrected(frame, picture.Corrections(background=bg, mode="subtract")).astype(float)
-    outside = np.delete(out[:, :, 0], np.s_[25:35], axis=0)
-    assert np.ptp(outside) <= 1                                                   # flat where there is no cell
-    assert out[30, 40, 0] == pytest.approx(out[0, 40, 0] - 30, abs=1)              # the cell's contrast kept
-    flat = picture.corrected(frame, picture.Corrections(background=bg, mode="flat")).astype(float)
-    assert np.ptp(np.delete(flat[:, :, 0], np.s_[25:35], axis=0)) <= 1
-
-
-def test_the_dark_frame_is_taken_out_and_clipped_pixels_show_red():
-    raw = np.full((4, 4, 3), 50, np.uint8)
-    raw[0, 0] = 255
-    dark = np.full((4, 4, 3), 10, np.float32)
-    assert picture.corrected(raw, picture.Corrections(dark=dark))[1, 1, 0] == 40
-    assert tuple(picture.shown(raw, picture.Corrections(), picture.Adjust())[0, 0]) == (255, 255, 255)   # raw
-    shown = picture.shown(raw, picture.Corrections(show_clipped=True), picture.Adjust())
-    assert tuple(shown[0, 0]) == (255, 0, 0) and tuple(shown[1, 1]) == (50, 50, 50)
-
-
-def test_a_kept_fluorescence_picture_is_laid_over_the_live_one():
-    dim = np.full((40, 40, 3), 20, np.uint8)
-    dim[18:22, 18:22] = 120                                                       # one labelled cell
-    over = picture.overlay_from(dim, picture.Corrections())
-    assert over[20, 20] == pytest.approx(1.0, abs=0.05) and over[2, 2] == pytest.approx(0.0, abs=0.05)
-    live = np.full((40, 40, 3), 100, np.uint8)
-    c = picture.Corrections(overlay=over, overlay_colour=(0, 255, 0), overlay_opacity=0.5, show_clipped=False)
-    out = picture.shown(live, c, picture.Adjust())
-    assert tuple(out[20, 20]) == (50, 178, 50) and tuple(out[2, 2]) == (100, 100, 100)
-    green = picture.shown(live, picture.Corrections(lut="green"), picture.Adjust())
-    assert tuple(green[0, 0]) == (0, 100, 0)
 
 
 def test_auto_exposure_brings_the_brightest_to_80_percent_and_backs_off_when_clipped():
@@ -325,39 +258,6 @@ def test_auto_exposure_in_the_dark_stops_at_a_second_and_says_so_instead_of_hang
     assert said and "Dark at 1000 ms" in said[-1][1] and "light" in said[-1][1]
 
 
-def test_binning_adds_n_by_n_pixels_into_one_and_keeps_a_grey_frame_grey():
-    rng = np.random.default_rng(3)
-    g = rng.integers(0, 70, (9, 13), dtype=np.uint8)                              # odd edges: cut off
-    rgb = np.broadcast_to(g[:, :, None], (9, 13, 3))
-    b = picture.bin_sum(rgb, 2)
-    want = np.minimum(g[:8, :12].reshape(4, 2, 6, 2).sum(axis=(1, 3)), 255)
-    assert b.shape == (4, 6, 3) and picture.is_grey(b) and np.array_equal(b[:, :, 0], want)
-    assert picture.bin_sum(np.full((8, 8, 3), 200, np.uint8), 4).max() == 255     # clipped at full scale
-    assert picture.bin_sum(rgb, 1) is rgb                                          # off: the frame as taken
-
-
-def test_the_levels_show_the_black_point_black_and_the_white_point_white():
-    a = picture.Adjust(black=50.0, white=150.0)
-    g = np.array([[0, 50, 100, 150, 255]], np.uint8)
-    out = picture.apply(np.broadcast_to(g[:, :, None], (1, 5, 3)), a)[0, :, 0]
-    assert list(out[[0, 1, 3, 4]]) == [0, 0, 255, 255] and abs(int(out[2]) - 128) <= 1
-    table = picture.display_table(picture.Corrections(show_clipped=False), a)
-    assert table[50, 0] == 0 and table[150, 0] == 255 and not picture.Adjust().changed()
-
-
-def test_brightness_and_contrast_kept_before_become_the_levels_that_show_the_same():
-    # the histogram's handles are now the one place: an old preset's brightness and contrast as levels, the same
-    g = np.arange(256, dtype=np.uint8)[None, :]
-    rgb = np.broadcast_to(g[:, :, None], (1, 256, 3))
-    old = picture.Adjust(black=10.0, white=240.0, brightness=0.1, contrast=1.5)
-    new = picture.fold_tone(old)
-    assert (new.brightness, new.contrast) == (0.0, 1.0)
-    shown_old, shown_new = picture.apply(rgb, old)[0, :, 0], picture.apply(rgb, new)[0, :, 0]
-    assert np.abs(shown_old.astype(int) - shown_new.astype(int)).max() <= 1
-    assert picture.preset_from_text(json.dumps({"brightness": 0.1, "contrast": 1.5})).contrast == 1.0
-    assert picture.fold_tone(picture.Adjust()) == picture.Adjust()
-
-
 def test_the_gain_that_keeps_a_shorter_exposure_as_bright():
     # a camera counting gain as a multiplier, one in dB, one in its own steps (left alone)
     assert picture.gain_for(1.0, 2.0, "linear", 1.0, 16.0) == (2.0, 2.0)
@@ -365,6 +265,46 @@ def test_the_gain_that_keeps_a_shorter_exposure_as_bright():
     gain, got = picture.gain_for(0.0, 2.0, "db", 0.0, 24.0)
     assert gain == pytest.approx(6.02, abs=0.01) and got == pytest.approx(2.0)
     assert picture.gain_for(300.0, 2.0, "raw", 0.0, 1000.0) == (300.0, 1.0)
+
+
+def test_a_camera_that_refuses_once_is_asked_again(monkeypatch):
+    # a camera let go moments before (or by a program that ended without letting go) can refuse once: Lumenera's
+    # error 10 on the rig, gone on a second try
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from pyqtgraph.Qt import QtWidgets
+
+    from clampwise.app.screens import camera_panel
+
+    qapp = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    monkeypatch.setattr(camera_panel, "OPEN_RETRY_S", 0.0)
+    fake = FakeLucam()
+    tries = []
+
+    class Once(lucam.Camera):
+        def open(self, index=1):
+            tries.append(1)
+            if len(tries) == 1:
+                self.status = "the camera did not start (error 10)"
+                return False
+            return super().open(index)
+
+    t = camera_panel.CameraThread(lambda: Once(fake, owner_check=lambda: False))
+    got, failed = [], []
+    t.frame.connect(lambda f: (got.append(f), setattr(t, "drawing", False)))
+    t.failed.connect(failed.append)
+    t.start()
+    end = time.monotonic() + 5
+    while not got and time.monotonic() < end:
+        qapp.processEvents()
+        time.sleep(0.01)
+    t.stop()
+    t.frame.disconnect()                     # frames sent just before it stopped are still queued: dropped here, not
+    t.failed.disconnect()                    # delivered to this test's handler after the thread is gone
+    qapp.processEvents()
+    assert len(tries) == 2 and got and not failed
 
 
 def test_a_colour_camera_s_frame_is_shown_grey_and_a_grey_one_as_it_is():

@@ -30,6 +30,7 @@ DISPLAY = (("brightness", "Brightness", -100, 100, "Lighter or darker on screen 
            ("contrast", "Contrast", -70, 130, "More or less contrast on screen (100%: as taken; 20% to 20 times)"),
            ("gamma", "Gamma", 20, 300, "Above 1 lifts the dim parts (dim fluorescence), below 1 darkens them"))
 RAW = {"brightness": 0, "contrast": 0, "gamma": 100}
+OPEN_RETRY_S = 1.5                   # a camera that refuses to open is asked once more after this long
 FPS_SHARE = 0.97                     # of each frame's time, the exposure (the rest: the camera reading the sensor out)
 FOLLOW_EVERY_S = 0.5                 # auto exposure, on: how often it looks at the picture and corrects the exposure
 FOLLOW_STEP = 2.0                    # each correction at most twice or half the exposure (no jumping about)
@@ -94,6 +95,9 @@ class CameraThread(QtCore.QThread):
         try:                                     # whatever the camera's library does, the reason is said
             cam = self.make()
             opened = cam.open()
+            if not opened and not self._stop:         # a camera a program let go of moments ago (or one that ended
+                time.sleep(OPEN_RETRY_S)              # without letting go) can refuse once: asked again
+                opened = cam.open()
         except Exception as exc:
             logging.getLogger(__name__).exception("The camera could not be taken")
             self.failed.emit(f"it could not be taken ({type(exc).__name__}: {exc})")

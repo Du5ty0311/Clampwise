@@ -1,6 +1,8 @@
 """The amplifier's controls in Live (what MultiClamp Commander does, with Commander itself still usable beside it):
-every setting and button of rig.amplifier_control, built from its table,
-grouped as Commander groups them, only the current mode's shown. Each control shows the amplifier's value as read
+every setting and button of rig.amplifier_control, built from its table, laid out as Commander's panel is: the mode
+as three buttons, then each group in the order a cell is patched (the pipette, the seal test, whole cell, Rs
+compensation, the bridge in current clamp, leak subtraction, the outputs), each on/off beside its value and each Auto
+on the line of the value it sets, only the current mode's shown. Each control shows the amplifier's value as read
 (unless it is being edited) and sends a change to Commander, whose own panel follows it."""
 
 from __future__ import annotations
@@ -11,9 +13,14 @@ from ...rig import amplifier_control as ac
 from .. import theme, widgets
 from ..widgets import box, label
 
-ACTION_GROUPS = {"auto_pipette_offset": "Pipette", "auto_fast": "Pipette", "auto_slow": "Pipette",
-                 "auto_whole_cell": "Whole cell", "auto_bridge": "Bridge and neutralization",
-                 "auto_leak": "Leak subtraction", "auto_output_zero": "Outputs", "zap": "Clamp", "buzz": "Clamp"}
+ORDER = ("Clamp", "Pipette", "Seal test", "Whole cell", "Rs compensation", "Bridge and neutralization",
+         "Leak subtraction", "Outputs")                          # the order a cell is patched in
+ON_FOR = {"holding": "holding_on", "test_signal_amplitude": "test_signal_on", "cm": "whole_cell_on",
+          "rs_correction": "rs_comp_on", "bridge": "bridge_on", "neutralization": "neutralization_on",
+          "leak_sub": "leak_sub_on"}                             # a value and the switch that puts it on, one line
+AUTO_FOR = {"pipette_offset": "auto_pipette_offset", "fast_cap": "auto_fast", "slow_cap": "auto_slow",
+            "cm": "auto_whole_cell", "bridge": "auto_bridge", "leak_sub": "auto_leak"}   # its Auto, on its line
+MODES = ((0, "VC"), (2, "I=0"), (1, "IC"))                       # as Commander's buttons, left to right
 
 
 def _choices(c: ac.Control, mode: int) -> tuple:
@@ -30,37 +37,77 @@ class AmplifierPanel(QtWidgets.QWidget):
         self.send = send
         self.mode = 0
         self.widgets: dict[str, QtWidgets.QWidget] = {}
-        self.rows: dict[str, tuple] = {}
+        self.rows: dict[str, list[QtWidgets.QWidget]] = {}      # a line's key -> everything on it
         self.buttons: dict[str, QtWidgets.QPushButton] = {}
         lay = box("v", "xs")
-        self.groups: dict[str, QtWidgets.QGroupBox] = {}
-        for g in ac.GROUPS:
-            frame = QtWidgets.QGroupBox(g)
-            grid = QtWidgets.QGridLayout()
-            grid.setHorizontalSpacing(theme.SPACE["s"])
-            grid.setVerticalSpacing(theme.SPACE["xs"])
-            grid.setColumnStretch(1, 1)
-            frame.setLayout(grid)
-            self.groups[g] = frame
-            lay.addWidget(frame)
-        for c in ac.CONTROLS:
-            grid = self.groups[c.group].layout()
-            row = grid.rowCount()
-            w = self._make(c)
-            cap = label(c.label, "muted")
-            grid.addWidget(cap, row, 0)
-            grid.addWidget(w, row, 1)
-            self.widgets[c.key], self.rows[c.key] = w, (cap, w)
-        for name, (_, words, _) in ac.ACTIONS.items():
-            grid = self.groups[ACTION_GROUPS[name]].layout()
-            b = widgets.button(words, lambda _=False, n=name: self.act(n), f"{words}, as the amplifier's own button",
-                               quiet=True)
-            grid.addWidget(b, grid.rowCount(), 0, 1, 2)
-            self.buttons[name] = b
+        modes = box("h", "xs")                                   # the mode, as three buttons
+        self.mode_buttons: dict[int, QtWidgets.QPushButton] = {}
+        for value, words in MODES:
+            b = widgets.button(words, lambda _=False, v=value: self.change("mode", v), f"{words}: the amplifier's "
+                               "mode (sent through its own program)", quiet=True)
+            b.setCheckable(True)
+            modes.addWidget(b)
+            self.mode_buttons[value] = b
+        modes.addStretch(1)
+        lay.addLayout(modes)
+        grid = QtWidgets.QGridLayout()                           # caption | on | value | Auto, one line each
+        grid.setHorizontalSpacing(theme.SPACE["xs"])
+        grid.setVerticalSpacing(theme.SPACE["xs"] // 2)
+        grid.setColumnStretch(2, 1)
+        self.groups: dict[str, QtWidgets.QLabel] = {}
+        paired = set(ON_FOR.values())
+        for g in ORDER:
+            caption = label(g, "section")
+            self.groups[g] = caption
+            grid.addWidget(caption, grid.rowCount(), 0, 1, 4)
+            for c in ac.CONTROLS:
+                if c.group != g or c.key == "mode" or c.key in paired:
+                    continue
+                row = grid.rowCount()
+                on_key = ON_FOR.get(c.key)
+                words = ac.BY_KEY[on_key].label.removesuffix(" on") if on_key else c.label
+                cap = label(words, "muted")
+                cap.setToolTip(c.label)
+                parts = [cap]
+                grid.addWidget(cap, row, 0)
+                if on_key:
+                    on = self._make(ac.BY_KEY[on_key])
+                    on.setToolTip(ac.BY_KEY[on_key].label)
+                    self.widgets[on_key] = on
+                    grid.addWidget(on, row, 1)
+                    parts.append(on)
+                w = self._make(c)
+                self.widgets[c.key] = w
+                grid.addWidget(w, row, 2)
+                parts.append(w)
+                if c.key in AUTO_FOR:
+                    b = self._action(AUTO_FOR[c.key], "Auto")
+                    grid.addWidget(b, row, 3)
+                    parts.append(b)
+                self.rows[c.key] = parts
+            if g == "Clamp":                                     # the membrane's own buttons, after the holding
+                pair = box("h", "xs")
+                for name in ("zap", "buzz"):
+                    pair.addWidget(self._action(name, ac.ACTIONS[name][1]))
+                pair.addStretch(1)
+                grid.addLayout(pair, grid.rowCount(), 1, 1, 3)
+            if g == "Outputs":
+                row = grid.rowCount()
+                cap = label("Output zero", "muted")
+                grid.addWidget(cap, row, 0)
+                grid.addWidget(self._action("auto_output_zero", "Auto"), row, 3)
+                self.rows["auto_output_zero"] = [cap, self.buttons["auto_output_zero"]]
+        lay.addLayout(grid)
         self.status = label("", "muted", wrap=True)
         lay.addWidget(self.status)
         self.setLayout(lay)
         self.show_mode(0)
+
+    def _action(self, name: str, words: str) -> QtWidgets.QPushButton:
+        b = widgets.button(words, lambda _=False, n=name: self.act(n), f"{ac.ACTIONS[name][1]}, as the amplifier's "
+                           "own button", quiet=True)
+        self.buttons[name] = b
+        return b
 
     def _make(self, c: ac.Control) -> QtWidgets.QWidget:
         if c.kind == "b":
@@ -81,10 +128,16 @@ class AmplifierPanel(QtWidgets.QWidget):
     def show_mode(self, mode: int) -> None:
         """Only the current mode's settings and buttons (as the amplifier's own panel)."""
         self.mode = mode
+        for value, b in self.mode_buttons.items():
+            b.setChecked(value == mode)
         for c in ac.CONTROLS:
-            cap, w = self.rows[c.key]
-            for x in (cap, w):
-                x.setVisible(mode in c.modes)
+            w = self.widgets.get(c.key)
+            if w is None:
+                continue
+            if c.key in self.rows:                               # a line: shown with its value's modes
+                for x in self.rows[c.key]:
+                    x.setVisible(mode in c.modes)
+            w.setVisible(mode in c.modes)
             if c.kind == "u":
                 keep = w.currentData()
                 w.blockSignals(True)
@@ -100,10 +153,10 @@ class AmplifierPanel(QtWidgets.QWidget):
                 w.setSuffix(f" {c.unit}")
         for name, (_, _, modes) in ac.ACTIONS.items():
             self.buttons[name].setVisible(mode in modes)
-        for g, frame in self.groups.items():
-            shown = [c for c in ac.CONTROLS if c.group == g and mode in c.modes] + \
-                    [n for n, gg in ACTION_GROUPS.items() if gg == g and mode in ac.ACTIONS[n][2]]
-            frame.setVisible(bool(shown))
+        for g, caption in self.groups.items():
+            shown = [c for c in ac.CONTROLS if c.group == g and c.key != "mode" and mode in c.modes] + \
+                    [n for n in ("zap", "buzz") if g == "Clamp" and mode in ac.ACTIONS[n][2]]
+            caption.setVisible(bool(shown))
 
     def show_state(self, amp) -> None:
         """The amplifier as read: each value, unless it is being edited."""
@@ -114,9 +167,12 @@ class AmplifierPanel(QtWidgets.QWidget):
         self.setEnabled(True)
         if amp.mode is not None and amp.mode != self.mode:
             self.show_mode(amp.mode)
+        elif amp.mode is not None:                               # a mode asked for but not taken: shown as it is
+            for v, b in self.mode_buttons.items():
+                b.setChecked(v == amp.mode)
         for c in ac.CONTROLS:
-            w = self.widgets[c.key]
-            if w.hasFocus() or c.key not in amp.raw:
+            w = self.widgets.get(c.key)
+            if w is None or w.hasFocus() or c.key not in amp.raw:
                 continue
             w.blockSignals(True)
             if c.kind == "b":
@@ -135,6 +191,9 @@ class AmplifierPanel(QtWidgets.QWidget):
 
     def change(self, key: str, value) -> None:
         c = ac.BY_KEY[key]
+        if key == "mode":
+            for v, b in self.mode_buttons.items():                # shown as asked until the amplifier says
+                b.setChecked(v == value)
         self.status.setText(f"{c.label}: sent.")
         self.send(("set", key, value, self.mode))
 

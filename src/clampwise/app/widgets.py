@@ -49,6 +49,22 @@ def label(text: str, kind: str = "", wrap: bool = False) -> QtWidgets.QLabel:
     return lab
 
 
+class OneLine(QtWidgets.QLabel):
+    """A label kept to one line (cut at the panel's edge rather than growing it), its whole text on hover."""
+
+    def __init__(self, text: str = "", kind: str = "muted") -> None:
+        super().__init__()
+        if kind:
+            self.setObjectName(kind)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt's name)
+        super().setText(text)
+        self.setToolTip(text)
+
+
 def hairline() -> QtWidgets.QFrame:
     f = QtWidgets.QFrame()
     f.setObjectName("hairline")
@@ -347,6 +363,12 @@ class Sections(QtWidgets.QWidget):
         section.toggled.connect(lambda *_: self.save())
         section.menu.connect(lambda at, k=section.key: self._menu(k, at))
         return section
+
+    def arrange(self, keys) -> None:
+        """The sections in this order (the default, before what was kept is loaded); others after them."""
+        for k in list(keys) + [k for k in self.order() if k not in keys]:
+            self._lay.removeWidget(self.sections[k])
+            self._lay.insertWidget(self._lay.count() - 1, self.sections[k])
 
     def order(self) -> list[str]:
         return [self._lay.itemAt(i).widget().key for i in range(self._lay.count() - 1)]

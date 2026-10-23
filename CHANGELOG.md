@@ -41,7 +41,8 @@
   - **Picture display**, folded: brightness, contrast and gamma, Auto and Raw. They change only how the screen draws
     the picture, so they cost the camera no frames, and snapshots stay raw.
   - **Full screen**, the picture alone (Esc leaves), and **Picture only** for the docked view: no title, status line
-    or border. The picture itself has no frame or margin.
+    or border. The picture itself has no frame or margin, and no empty band under it any more; the **Margin** round
+    it is chosen, the same on every side (0: the picture alone, edge to edge).
 - **Removed from the camera:** the histogram; Adjust... (sharpness, clarity, saturation, colour balance, auto
   levels, presets, colour scales, clipped pixels in red, crosshair);
   background and dark-frame corrections; the fluorescence overlay; frame averaging; binning. A colour camera's picture is shown grey.
@@ -55,6 +56,25 @@
   by 10 to 20 pA with an open pipette, so a zeroed pipette never looked zero. The mean begins again on any change at
   the amplifier (an Auto pipette offset, the mode, the holding, the seal test), so the new zero shows at once. The
   **pipette offset** is shown among the amplifier's readings.
+- **The membrane test's plot marks 0 and the holding.** A dashed 0 line and a line at the holding measured: an open,
+  zeroed pipette's square wave runs as far below 0 as above it (-500 and +500 pA for a 10 mV step through 10 MOhm),
+  which the axis, fitted to the trace, could make look like an offset.
+- **Time never starts before 0** on the membrane test's plots and the acquisition's scope, however they are zoomed
+  or dragged. The current or voltage axis stays free.
+- **Live laid out by use.** The camera on the left, the whole height and half the width; the acquisition at the
+  top right, the amplifier's and the patterned light's windows under it. The side panel in the order things are
+  used: Camera, Cell health, Amplifier, Amplifier controls (open), then Patterned light, Hardware and Recorded.
+- **Compact controls, as on the amplifier's own panel.** The amplifier's controls as Commander's: the mode as three
+  buttons, the groups in the order a cell is patched, each switch beside its value and each Auto on its value's
+  line. The acquisition's controls in two lines under the scope instead of five. Live's buttons and boxes closer
+  together.
+- **Function keys in Live:** F2 snapshot, F5 Play, F6 Record, F7 Pause, F8 Stop, F9 membrane test, F11 camera full
+  screen, F12 all mirrors off. None for the mode or Zap.
+- **Sturdier with the hardware.** The patterned light is put off and let go even when Python is already closing
+  (it once stayed lit after a script ended); a camera that refuses to open (Lumenera's error 10 after a program ended
+  without letting it go) is asked once more.
+- A window that keeps nothing (the tests, the rig scripts) no longer reads or writes the person's own settings.
+- Dead code removed: the camera's old display pipeline (presets, corrections, overlay, colour tables, binning).
 - `tools/rigtest/polygon_calibrate.py`: calibrates at the rig from a console (`--keep` keeps it), with
   `--focus` (a checkerboard and a sharpness reading to focus by) and `--spots-only`.
 

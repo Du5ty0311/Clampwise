@@ -372,7 +372,6 @@ class Camera:
     # ---- the stream
     def _stream(self) -> bool:
         """The stream grabber opened, its buffers queued, the camera's acquisition started."""
-        lib = self._lib
         self.set_exposure(self.exposure_ms, self.gain)
         w, h, payload = self._int("Width"), self._int("Height"), self._int("PayloadSize")
         if not w or not h:

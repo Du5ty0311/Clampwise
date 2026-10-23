@@ -136,6 +136,9 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.palette = palette or theme.LIGHT
         self.persist = persist
+        # a window that keeps nothing (tests, rig scripts) has settings of its own, empty and thrown away with it:
+        # it never reads the person's (their theme, recent projects...) nor writes over them
+        self._own_settings = None if persist else QtCore.QTemporaryDir()
         self.project = None
         self.selected: Path | None = None
         self._recordings: dict[Path, object] = {}
@@ -540,6 +543,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status.showMessage(text, 15000)
 
     def _settings(self) -> QtCore.QSettings:
+        if getattr(self, "_own_settings", None) is not None:
+            return QtCore.QSettings(self._own_settings.filePath("settings.ini"), QtCore.QSettings.IniFormat)
         return QtCore.QSettings(SETTINGS_ORG, APP_NAME)
 
     def _remember_project(self, folder: Path) -> None:

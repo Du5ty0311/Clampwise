@@ -543,9 +543,9 @@ def test_live_s_views_can_be_hidden_enlarged_and_show_part_of_a_window(qapp, win
     window.go("live")
     live = window.screens["live"]
     grid = live.grid
-    assert grid.getItemPosition(grid.indexOf(live.views["acquisition"])) == (0, 0, 1, 3)    # the top, all across
-    assert grid.getItemPosition(grid.indexOf(live.views["camera"]))[:2] == (1, 0)
-    assert grid.columnStretch(0) > grid.columnStretch(1)                                    # the camera largest below
+    assert grid.getItemPosition(grid.indexOf(live.views["camera"])) == (0, 0, 2, 1)      # left, full height
+    assert grid.getItemPosition(grid.indexOf(live.views["acquisition"])) == (0, 1, 1, 2)  # top right
+    assert grid.columnStretch(0) > grid.columnStretch(1) and grid.rowStretch(0) > grid.rowStretch(1)
     shown = lambda: {r for r, v in live.views.items() if v.isVisibleTo(live)}            # noqa: E731
     live.set_view_shown("light", False)
     assert shown() == {"acquisition", "amplifier", "camera"}
@@ -692,10 +692,26 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
                                                            QtCore.Qt.NoModifier))
     assert not view.isFullScreen() and not view.popped and not view.bare and view.name.isVisibleTo(view)
     assert view.use_button.isVisibleTo(view) and live.full_button.text() == "Full screen"
+    live.shortcuts["F11"].activated.emit()                                       # F11: full screen, and back
+    assert view.isFullScreen()
+    QtWidgets.QApplication.sendEvent(view, QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_F11,
+                                                           QtCore.Qt.NoModifier))
+    assert not view.isFullScreen() and not view.popped
+    assert set(live.shortcuts) == {"F2", "F5", "F6", "F7", "F8", "F9", "F11", "F12"}
+    assert "(F6)" in live.recorder.record_button.toolTip() and "(F12)" in live.patterned.off_button.toolTip()
     live.picture_only.setChecked(True)                                           # chosen: the picture alone, docked
     assert view.bare and not view.popped and not view.name.isVisibleTo(view)
+    live.picture_margin.setValue(0)                                              # no margin: edge to edge
+    qapp.processEvents()
+    assert panel.geometry() == view.rect()                                       # nothing below it, nor round it
+    live.picture_margin.setValue(12)                                             # a margin, even on every side
+    qapp.processEvents()
+    g = panel.geometry()
+    assert (g.left(), g.top(), view.width() - 1 - g.right(), view.height() - 1 - g.bottom()) == (12, 12, 12, 12)
     live.picture_only.setChecked(False)
     assert not view.bare and view.name.isVisibleTo(view)
+    qapp.processEvents()                                                         # with its title: no band below it,
+    assert view.height() - 1 - panel.geometry().bottom() == 12 + view.frameWidth()   # the margin, its border
     live._summaries()                                                             # as each look at the rig does
     status, words, _ = live.sections.sections["camera"].badge._shown
     assert status == "ok" and "20x" in words                                      # its header, folded or not
@@ -712,7 +728,7 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert light.own and live.patterned.wait() and live.patterned.polygon.connected
     # its controls in the side panel, under the camera's; Off on its header, kept there when folded
     assert live.sections.sections["light"].isAncestorOf(live.patterned) and live.patterned.isVisibleTo(live)
-    assert live.sections.order().index("light") == live.sections.order().index("camera") + 1
+    assert live.sections.order().index("light") > live.sections.order().index("controls")   # after the amplifier
     qapp.processEvents()                                                         # nothing cut off at its right edge
     assert live.side.widget().minimumSizeHint().width() <= live.side.minimumWidth() - 10
     assert live.side.widget().width() <= live.side.viewport().width()
@@ -938,6 +954,8 @@ def test_live_records_in_clampwise_on_request(qapp, window, tmp_path):
     # never a blank scope: the protocol drawn first
     assert "sim" in panel.note.text() and "as it will play" in panel.note.text() and len(panel.plots) == 1
     assert len(panel.plots[0].listDataItems()) == 2                       # each sweep's command
+    panel.plots[0].getViewBox().setXRange(-1.0, 1.0, padding=0)           # time never before the sweep's start
+    assert panel.plots[0].getViewBox().viewRange()[0][0] >= 0
     panel.set_folder(str(tmp_path / "data"))
     assert panel.play_button.isEnabled() and panel.record_button.isEnabled() and not panel.pause_button.isEnabled()
     panel.play()                                                          # Play: drawn and measured, nothing kept
@@ -1048,6 +1066,64 @@ def test_live_s_meters_are_steady_and_begin_again_after_a_pipette_offset(qapp, w
     assert live.readouts["pipette_offset"].value.text() == "35.5 mV" and live.meter_i.text() == "-2.0"
 
 
+def test_the_membrane_test_s_plot_marks_zero_and_the_holding_and_time_never_starts_before_0(qapp):
+    # an open pipette, zeroed: a 10 mV step through 10 MOhm is -500 pA then +500 pA, centred on 0 (the holding);
+    # the axis follows the trace, so the 0 line and the holding line say where zero is
+    from clampwise.app import theme
+    from clampwise.app.screens.membrane_test_panel import MembraneTestView
+    from clampwise.rig import membrane_test
+
+    view = MembraneTestView(theme.LIGHT)
+    y = np.where((np.arange(500) >= 125) & (np.arange(500) < 375), 500.0, -500.0)
+    r = membrane_test.measure(y, 25000.0, 10.0, "VC")
+    view.show_reading(r, [r])
+    assert r.holding == pytest.approx(0.0) and r.rt_mohm == pytest.approx(10.0)
+    assert view.zero.value() == 0 and view.holding_line.isVisible() and view.holding_line.value() == pytest.approx(0)
+    for plot in (view.pulse, view.history):
+        plot.getViewBox().setXRange(-5.0, 10.0, padding=0)                     # dragged to before 0
+        assert plot.getViewBox().viewRange()[0][0] >= 0                         # it stops at 0
+    view.on_theme(theme.DARK)                                                   # the lines kept with a new theme
+    assert view.zero.scene() is not None and view.holding_line.scene() is not None
+
+
+def test_the_amplifier_s_controls_are_laid_out_as_commander_s(qapp):
+    # the mode as three buttons; each Auto on the line of the value it sets; each switch beside its value; the
+    # groups in the order a cell is patched; only the mode's own shown
+    from clampwise.app.screens.amplifier_panel import AmplifierPanel
+    from clampwise.rig import multiclamp
+
+    sent = []
+    panel = AmplifierPanel(sent.append)
+    panel.resize(360, 900)
+    panel.show()
+
+    def amp(mode, **raw):
+        return multiclamp.AmplifierState(connected=True, mode=mode, raw=raw,
+                                         values={"pipette_offset": raw.get("pipette_offset", 0.0)})
+
+    panel.show_state(amp(0, pipette_offset=32.4, holding_on=0))
+    qapp.processEvents()
+    assert panel.mode_buttons[0].isChecked() and not panel.mode_buttons[1].isChecked()
+    grid = panel.layout().itemAt(1).layout()
+    at = lambda w: grid.getItemPosition(grid.indexOf(w))[0]                              # noqa: E731
+    assert at(panel.buttons["auto_pipette_offset"]) == at(panel.widgets["pipette_offset"])   # Auto on its line
+    assert at(panel.widgets["holding_on"]) == at(panel.widgets["holding"])                   # on beside its value
+    assert panel.widgets["pipette_offset"].value() == pytest.approx(32.4)
+    order = [g for g in panel.groups if panel.groups[g].isVisibleTo(panel)]
+    assert order[:4] == ["Clamp", "Pipette", "Seal test", "Whole cell"]
+    assert panel.buttons["auto_fast"].isVisibleTo(panel) and not panel.buttons["auto_bridge"].isVisibleTo(panel)
+    panel.buttons["auto_pipette_offset"].click()
+    assert sent[-1] == ("act", "auto_pipette_offset")
+    panel.mode_buttons[1].click()                                                         # IC asked
+    assert sent[-1] == ("set", "mode", 1, 0) and panel.mode_buttons[1].isChecked()
+    panel.show_state(amp(0))                                                              # refused: VC shown again
+    assert panel.mode_buttons[0].isChecked() and not panel.mode_buttons[1].isChecked()
+    panel.show_state(amp(1))                                                              # current clamp
+    assert panel.buttons["auto_bridge"].isVisibleTo(panel) and not panel.buttons["auto_fast"].isVisibleTo(panel)
+    assert not panel.widgets["fast_cap"].isVisibleTo(panel) and panel.widgets["bridge"].isVisibleTo(panel)
+    panel.close()
+
+
 def test_live_shows_the_cell_s_health_from_its_best_source(qapp, window):
     # access resistance and the other general readouts of a cell's health; the made-up rig: the acquisition's last Membrane Test Ra 9.1 MOhm, Cm 52 pF
     window.go("live")
@@ -1064,8 +1140,8 @@ def test_live_s_side_panel_folds_each_section_and_a_folded_one_still_warns(qapp,
     window.go("live")
     live = window.screens["live"]
     s = live.sections
-    assert s.order()[:3] == ["hardware", "camera", "light"]                     # the camera's and the light's together
-    assert not s.sections["controls"].open and s.sections["health"].open        # the amplifier's controls folded
+    assert s.order()[:4] == ["camera", "health", "amplifier", "controls"]      # by use: the camera, the cell, its
+    assert s.sections["controls"].open and not s.sections["light"].open         # controls (open); the light folded
     assert not live.camera.controls.isVisibleTo(live) and "Use here" in live.held_notes["camera"].text()
     s.only("health")
     assert [k for k, sec in s.sections.items() if sec.open] == ["health"]
@@ -1117,7 +1193,7 @@ def test_a_view_pops_out_into_a_window_of_its_own_and_closing_it_puts_it_back(qa
     view.close()                                                                  # closing puts it back
     assert not view.popped and not view.isWindow() and view.windowOpacity() == 1.0
     grid = live.grid
-    assert grid.getItemPosition(grid.indexOf(view))[:2] == (0, 0)
+    assert grid.getItemPosition(grid.indexOf(view))[:2] == (0, 1)
 
 
 def test_the_views_can_be_windows_inside_clampwise(qapp, window):
@@ -1140,4 +1216,4 @@ def test_the_views_can_be_windows_inside_clampwise(qapp, window):
     assert "light" in live._subs
     live.set_free(False)
     assert live.stack.currentIndex() == 0 and not live._subs
-    assert live.grid.getItemPosition(live.grid.indexOf(view)) == (0, 0, 1, 3)
+    assert live.grid.getItemPosition(live.grid.indexOf(view)) == (0, 1, 1, 2)

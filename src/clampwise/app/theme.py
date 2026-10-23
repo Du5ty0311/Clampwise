@@ -168,6 +168,8 @@ QPushButton#primary:hover {{ background: {p.accent}; border-color: {p.text}; }}
 QPushButton#primary:disabled {{ background: {p.border}; color: {p.text_muted}; border-color: {p.border}; }}
 QPushButton#quiet {{ background: transparent; border: 1px solid transparent; }}
 QPushButton#quiet:hover {{ background: {p.surface_alt}; }}
+QPushButton:checked, QPushButton#quiet:checked {{ background: {p.accent_soft}; border: 1px solid {p.accent};
+                                                  font-weight: {FONT_WEIGHT['medium']}; }}
 QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: {r}px; padding: {s['xs']}px; }}
 QToolButton:hover {{ background: {p.surface_alt}; }}
 QToolButton:checked {{ background: {p.accent_soft}; }}
@@ -178,6 +180,10 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus {{
     border: 2px solid {p.accent}; }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
+QWidget#dense QPushButton {{ padding: {s['xs'] // 2}px {s['s']}px; min-height: 18px; }}
+QWidget#dense QLineEdit, QWidget#dense QSpinBox, QWidget#dense QDoubleSpinBox, QWidget#dense QComboBox {{
+    padding: {s['xs'] // 2}px {s['xs']}px; }}
+QWidget#dense QLabel#section {{ padding-top: {s['xs']}px; }}
 QComboBox QAbstractItemView {{ background: {p.surface}; border: 1px solid {p.border};
     selection-background-color: {p.accent_soft}; selection-color: {p.text}; }}
 QCheckBox, QRadioButton {{ background: transparent; spacing: {s['s']}px; }}
@@ -248,6 +254,7 @@ QFrame#vline {{ background: {p.border}; max-width: 1px; min-width: 1px; border: 
 QWidget#toolbar {{ background: {p.surface}; border-bottom: 1px solid {p.border}; }}
 QLabel#section {{ color: {p.text_muted}; font-weight: {FONT_WEIGHT['medium']}; padding-top: {s['s']}px; }}
 QScrollArea#desk, QWidget#desk {{ background: {p.surface_alt}; border: 1px solid {p.border}; border-radius: {r}px; }}
+QWidget#bare {{ background: {p.surface_alt}; border: none; border-radius: 0px; }}
 QMdiArea {{ background: {p.window}; }}
 QLabel#meter {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: {r}px; padding: {s['xs']}px {s['s']}px;
     font-family: '{FONT_MONO}'; font-size: {heading}pt; }}

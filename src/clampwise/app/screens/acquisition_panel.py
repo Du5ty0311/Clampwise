@@ -57,9 +57,8 @@ class AcquisitionPanel(QtWidgets.QWidget):
         lay.addWidget(self.stack, 1)
         self._plot_inputs: list = []
         self._n_sweeps = 0
-        form = QtWidgets.QGridLayout()
-        form.setHorizontalSpacing(theme.SPACE["s"])
-        form.setVerticalSpacing(theme.SPACE["xs"])
+        # two lines under the scope, as an acquisition program's toolbar: the protocol and the transport, then where it
+        # is written and the membrane test's pulse
         self.protocol = QtWidgets.QComboBox()
         self.protocol.setToolTip("One of your own protocols, played as the acquisition program plays it")
         self.protocol.currentIndexChanged.connect(self._protocol_changed)
@@ -69,25 +68,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
         self.seconds.setValue(60.0)
         self.seconds.setSuffix(" s")
         self.seconds.setToolTip("A gap-free protocol's length (Stop ends it sooner)")
-        self.folder = label("", "muted", wrap=True)
-        form.addWidget(label("Protocol", "muted"), 0, 0)
-        form.addWidget(self.protocol, 0, 1)
-        pick = box("h", "xs")
-        pick.addWidget(widgets.button("Edit...", self.edit_protocol, "Edit a copy of this protocol (its epochs, "
-                                      "holding, sweeps), saved under a new name", quiet=True))
-        pick.addWidget(widgets.button("Protocols...", self.choose_protocols, "The folder your protocols are in",
-                                      quiet=True))
-        form.addLayout(pick, 0, 2)
-        self._seconds_caption = label("Gap-free", "muted")
-        form.addWidget(self._seconds_caption, 1, 0)
-        form.addWidget(self.seconds, 1, 1)
-        form.addWidget(label("Into", "muted"), 2, 0)
-        form.addWidget(self.folder, 2, 1)
-        form.addWidget(widgets.button("Folder...", self.choose_folder, "The folder the recordings are written into",
-                                      quiet=True), 2, 2)
-        form.setColumnStretch(1, 1)
-        lay.addLayout(form)
-        actions = box("h", "s")                           # the transport: Play, Pause, Record, Stop
+        self.folder = widgets.OneLine()                           # one line; the whole path on hover
         style = self.style()
         self.play_button = widgets.button("Play", self.play, "Run the protocol, drawn and measured live, keeping no "
                                                              "file (as the acquisition program's View)")
@@ -100,24 +81,35 @@ class AcquisitionPanel(QtWidgets.QWidget):
         self.record_button.setIcon(self._dot(self.window.palette.bad))
         self.stop_button = widgets.button("Stop", self.stop, "End the run (the sweeps complete by then are kept)")
         self.stop_button.setIcon(style.standardIcon(QtWidgets.QStyle.SP_MediaStop))
-        for b in (self.play_button, self.pause_button, self.record_button, self.stop_button):
-            actions.addWidget(b)
-        self.progress = QtWidgets.QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.setMaximumHeight(8)
-        actions.addWidget(self.progress, 1)
-        lay.addLayout(actions)
-        trow = box("h", "s")                 # the membrane test, beside the acquisition
         self.test_button = widgets.button(
             "Membrane test", self.toggle_test, "A test pulse played over and over: Rt (a seal's too), Rs, Rm, Cm "
             "and the holding, live; nothing is saved")
         self.test_button.setCheckable(True)
-        trow.addWidget(self.test_button)
+        self._seconds_caption = label("Gap-free", "muted")
+        bar = box("h", "xs")                                      # the protocol
+        bar.addWidget(self.protocol, 1)
+        bar.addWidget(self._seconds_caption)
+        bar.addWidget(self.seconds)
+        bar.addWidget(widgets.button("Edit...", self.edit_protocol, "Edit a copy of this protocol (its epochs, "
+                                     "holding, sweeps), saved under a new name", quiet=True))
+        bar.addWidget(widgets.button("Protocols...", self.choose_protocols, "The folder your protocols are in",
+                                     quiet=True))
+        lay.addLayout(bar)
+        bar = box("h", "xs")                                      # the transport, and the membrane test
+        for b in (self.play_button, self.pause_button, self.record_button, self.stop_button):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        bar.addWidget(self.test_button)
+        lay.addLayout(bar)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setMaximumHeight(theme.SPACE["xs"])
+        lay.addWidget(self.progress)
         self.test_amp = QtWidgets.QDoubleSpinBox()
         self.test_amp.setRange(-1000.0, 1000.0)
         self.test_amp.setDecimals(1)
-        self.test_amp.setToolTip("The pulse, peak to peak, centred on the holding: mV in voltage clamp, pA in current "
-                                 "clamp (the amplifier's mode)")
+        self.test_amp.setToolTip("The membrane test's pulse, peak to peak, centred on the holding: mV in voltage "
+                                 "clamp, pA in current clamp (the amplifier's mode)")
         self.test_hz = QtWidgets.QDoubleSpinBox()
         self.test_hz.setRange(1.0, 500.0)                # 500 samples a period, as Clampex's: up to 250 kHz
         self.test_hz.setDecimals(1)
@@ -125,17 +117,21 @@ class AcquisitionPanel(QtWidgets.QWidget):
         self.test_avg = QtWidgets.QSpinBox()
         self.test_avg.setRange(1, 100)
         self.test_avg.setToolTip("Pulses averaged into each reading")
-        for caption, w in (("Pulse", self.test_amp), ("at", self.test_hz), ("averaging", self.test_avg)):
-            trow.addWidget(label(caption, "muted"))
-            trow.addWidget(w)
-        trow.addStretch(1)
-        lay.addLayout(trow)
+        line = box("h", "xs")
+        line.addWidget(label("Into", "muted"))
+        line.addWidget(self.folder, 1)
+        line.addWidget(widgets.button("Folder...", self.choose_folder, "The folder the recordings are written into",
+                                      quiet=True))
+        for caption, w in (("Test pulse", self.test_amp), ("at", self.test_hz), ("avg", self.test_avg)):
+            line.addWidget(label(caption, "muted"))
+            line.addWidget(w)
+        lay.addLayout(line)
         self._test_mode = "VC"
         self._test_settings = {"VC": (10.0, 50.0, 5), "IC": (50.0, 5.0, 3)}     # each mode's own pulse (VC: Clampex's Cell stage)
         self._show_test_settings("VC")
         for w in (self.test_amp, self.test_hz, self.test_avg):
             w.valueChanged.connect(self._keep_test_settings)
-        self.status = label("", "muted", wrap=True)
+        self.status = widgets.OneLine()                           # one line; the whole of it on hover
         lay.addWidget(self.status)
         self.setLayout(lay)
         self._protocols_dir = acquire.protocols_folder()
@@ -495,6 +491,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
             # 2 s gap-free view at 20 kHz drawn whole took 0.93 s a redraw (the rig PC), the scope a second behind
             p.setDownsampling(auto=True, mode="peak")
             p.setClipToView(True)
+            p.getViewBox().setLimits(xMin=0)              # time never before the sweep's start, however zoomed
             if k:
                 p.setXLink(self.plots[0])
             if k == len(inputs) - 1:

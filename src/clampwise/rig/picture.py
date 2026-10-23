@@ -1,10 +1,8 @@
-"""The camera's picture as Clampwise shows and saves it: beside the exposure and gain, contrast, brightness,
-sharpness, clarity and the rest, each easy to change.
-
-The adjustments change what is shown, never the picture taken: a snapshot keeps the camera's own pixels, with how
-it was taken (exposure, gain, frames averaged) and the adjustments that were on written into it, and the length
-calibration as the TIFF's resolution (ImageJ and Fiji read it as the scale). Each adjustment is one number with a
-neutral value, so any of them can be reset, and a set of them can be kept by name (a preset: brightfield, GFP).
+"""The camera's picture as Clampwise keeps it: the scale (um a pixel at each objective, from a calibration or the
+camera's own pixel), the slice's compass, a snapshot as an uncompressed TIFF of the camera's own pixels with how it was
+taken written into it and the scale as its resolution (ImageJ and Fiji read it), the gain that keeps a shorter
+exposure as bright, and auto exposure's measure of the picture. Nothing here changes a picture: it is shown and saved
+as the camera gives it (Waters 2009, J Cell Biol 185:1135; Rossner & Yamada 2004 on keeping originals).
 """
 
 from __future__ import annotations
@@ -13,40 +11,9 @@ import datetime as dt
 import json
 import re
 import struct
-from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 import numpy as np
-from scipy import ndimage
-
-
-@dataclass
-class Adjust:
-    """What is shown: each at its neutral value changes nothing."""
-
-    black: float = 0.0            # the levels (the histogram's handles): this grey level and below shown black,
-    white: float = 255.0          # this one and above white, those between stretched over the whole range
-    brightness: float = 0.0       # -1..1: added to every pixel (a fraction of the full range)
-    contrast: float = 1.0         # 0..3: stretched about mid-grey
-    gamma: float = 1.0            # 0.2..5: below 1 lifts the shadows (dim fluorescence), above darkens them
-    saturation: float = 1.0       # 0..3: 0 grey, 1 as taken
-    sharpness: float = 0.0        # 0..3: an unsharp mask of fine detail (1 px)
-    clarity: float = 0.0          # 0..3: local contrast (an unsharp mask 20 px wide)
-    auto_levels: bool = False     # stretch the darkest 0.5% to black and the brightest 0.5% to white
-    red: float = 1.0              # 0..3 each: the colour balance (white balance sets them)
-    green: float = 1.0
-    blue: float = 1.0
-
-    def neutral(self) -> bool:
-        return self == Adjust()
-
-    def changed(self) -> dict:
-        base = Adjust()
-        return {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) != getattr(base, f.name)}
-
-
-RANGES = {"brightness": (-1.0, 1.0), "contrast": (0.0, 3.0), "gamma": (0.2, 5.0), "saturation": (0.0, 3.0),
-          "sharpness": (0.0, 3.0), "clarity": (0.0, 3.0), "red": (0.0, 3.0), "green": (0.0, 3.0), "blue": (0.0, 3.0)}
 
 
 def is_grey(rgb: np.ndarray) -> bool:
@@ -59,64 +26,6 @@ def lum8(rgb: np.ndarray) -> np.ndarray:
     if is_grey(rgb):
         return rgb[:, :, 0]
     return (rgb.sum(axis=2, dtype=np.uint16) // 3).astype(np.uint8)
-
-
-def _levels(x: np.ndarray, a: Adjust) -> np.ndarray:
-    """``x`` (0-1, as taken) with the levels set: ``a.black`` and below to 0, ``a.white`` and above to 1."""
-    if a.black == 0.0 and a.white == 255.0:
-        return x
-    lo, hi = float(a.black) / 255.0, float(a.white) / 255.0
-    return np.clip((x - lo) / max(hi - lo, 1.0 / 255.0), 0.0, 1.0)
-
-
-def _point_lut(a: Adjust, gain: float) -> np.ndarray:
-    """What ``apply`` does to one channel's 256 levels when only point operations are set."""
-    x = _levels(np.arange(256, dtype=np.float32) / 255.0, a) * gain
-    x = np.clip((x - 0.5) * a.contrast + 0.5 + a.brightness, 0.0, 1.0)
-    if a.gamma != 1.0:
-        x = x ** (1.0 / a.gamma)
-    return np.round(x * 255.0).astype(np.uint8)
-
-
-def apply(rgb: np.ndarray, a: Adjust) -> np.ndarray:
-    """The picture (H, W, 3) uint8 as shown with ``a``; the input is not changed. Brightness, contrast, gamma and the
-    colour balance alone (saturation too, on a grey picture) are a lookup of each level: 5 ms on the rig camera's
-    2.9 MP frame, where working in floating point took 43 ms."""
-    if a.neutral():
-        return rgb
-    if not (a.auto_levels or a.sharpness or a.clarity) and (a.saturation == 1.0 or is_grey(rgb)):
-        if is_grey(rgb) and a.red == a.green == a.blue:
-            g = _point_lut(a, a.red)[rgb[:, :, 0]]
-            return np.broadcast_to(g[:, :, None], rgb.shape)
-        out = np.empty(rgb.shape, np.uint8)
-        for c, gain in enumerate((a.red, a.green, a.blue)):
-            out[:, :, c] = _point_lut(a, gain)[rgb[:, :, c]]
-        return out
-    x = _levels(rgb.astype(np.float32) / 255.0, a)
-    x = x * np.array([a.red, a.green, a.blue], np.float32)
-    if a.auto_levels:
-        lo, hi = np.percentile(x, (0.5, 99.5))
-        x = (x - lo) / max(hi - lo, 1e-6)
-    if a.sharpness:
-        x = x + a.sharpness * (x - ndimage.gaussian_filter(x, (1.0, 1.0, 0)))
-    if a.clarity:
-        lum = x.mean(axis=2, keepdims=True)
-        x = x + a.clarity * 0.5 * (lum - ndimage.gaussian_filter(lum, (20.0, 20.0, 0)))
-    if a.saturation != 1.0:
-        lum = x.mean(axis=2, keepdims=True)
-        x = lum + a.saturation * (x - lum)
-    x = (x - 0.5) * a.contrast + 0.5 + a.brightness
-    x = np.clip(x, 0.0, 1.0)
-    if a.gamma != 1.0:
-        x = x ** (1.0 / a.gamma)
-    return np.round(x * 255.0).astype(np.uint8)
-
-
-def white_balance(rgb: np.ndarray) -> tuple[float, float, float]:
-    """Red, green and blue gains that make the picture's mean grey (point the camera at an empty, bright field)."""
-    means = rgb.reshape(-1, 3).astype(np.float64).mean(axis=0)
-    means = np.maximum(means, 1.0)
-    return tuple(float(means.mean() / m) for m in means)
 
 
 OBJECTIVES = (2.5, 5.0, 10.0, 20.0, 40.0, 63.0)     # the slider's stops; each microscope's own can be set
@@ -286,30 +195,6 @@ def snapshot_name(folder: str | Path, label: str = "") -> Path:
     return p
 
 
-def preset_to_text(a: Adjust) -> str:
-    return json.dumps(asdict(a))
-
-
-def preset_from_text(text: str) -> Adjust:
-    d = json.loads(text)
-    return fold_tone(Adjust(**{f.name: d[f.name] for f in fields(Adjust) if f.name in d}))
-
-
-def fold_tone(a: Adjust) -> Adjust:
-    """Brightness and contrast (kept before 1.8, which set them with sliders) as the levels that do the same: the
-    histogram's black and white handles are now the one place they are set. Exact while the stretch is a
-    contrast of 1 or more (a lower one, which greys black, is taken as the nearest the levels can show)."""
-    if a.brightness == 0.0 and a.contrast == 1.0:
-        return a
-    c = max(float(a.contrast), 1e-3)
-    span = float(a.white) - float(a.black)
-    black = a.black + span * (0.5 - (0.5 + a.brightness) / c)
-    white = a.black + span * (0.5 + (0.5 - a.brightness) / c)
-    black = min(max(black, 0.0), 254.0)
-    white = min(max(white, black + 1.0), 255.0)
-    return replace(a, black=round(black, 2), white=round(white, 2), brightness=0.0, contrast=1.0)
-
-
 def gain_for(gain: float, brighter: float, kind: str, low: float, high: float) -> tuple[float, float]:
     """The gain that makes the picture ``brighter`` times as bright, kept in [low, high], and how much brighter
     that is: ``kind`` is how the camera counts gain ("linear", a multiplier; "db"; "raw", its own steps, not
@@ -323,120 +208,9 @@ def gain_for(gain: float, brighter: float, kind: str, low: float, high: float) -
     return gain, 1.0
 
 
-# ---- microscopy corrections and aids, for patching (sources in Help: Waters 2009 JCB 185:1135; Lambert & Waters
-# 2014, Methods Cell Biol 123; Murphy & Davidson 2012; Allen, Allen & Travis 1981 and Inoue 1981 for video-enhanced
-# contrast; Stuart, Dodt & Sakmann 1993 for infrared video microscopy of slices; Rossner & Yamada 2004 on originals)
 
-LUTS = ("colour", "grey", "green", "magenta", "fire")
 TARGET = 0.80 * 255                  # auto exposure: the brightest 0.5% at 80% of full scale, nothing clipped
 AUTO_MAX_MS = 1000.0                 # auto exposure goes no longer (a longer one is typed): a dark picture is no light
-AUTO_STEP = 4.0                      # each of its steps at most 4 times longer or shorter
-AUTO_BUDGET_S = 3.0                  # and it stops trying after about this long
-
-
-@dataclass
-class Corrections:
-    """What is done to each frame before it is shown (never to the frame saved)."""
-
-    dark: np.ndarray | None = None          # the camera's own offset: frames with the light blocked, averaged
-    background: np.ndarray | None = None    # an empty or defocused field, averaged
-    mode: str = "off"                       # "off", "subtract" (video-enhanced contrast), "flat" (flat-field)
-    lut: str = "colour"                     # how a picture is coloured on screen
-    show_clipped: bool = False              # saturated pixels painted red (the camera's own full scale): off, the
-                                            # picture shown raw unless asked for
-    overlay: np.ndarray | None = None       # a kept picture (fluorescence), 0-1, laid over the live one
-    overlay_colour: tuple = (0, 255, 0)
-    overlay_opacity: float = 0.6
-    overlay_on: bool = True
-
-    def active(self) -> list[str]:
-        out = []
-        if self.dark is not None:
-            out.append("dark frame subtracted")
-        if self.background is not None and self.mode == "subtract":
-            out.append("background subtracted (video-enhanced contrast)")
-        if self.background is not None and self.mode == "flat":
-            out.append("flat-field corrected")
-        if self.lut != "colour":
-            out.append(f"shown in {self.lut}")
-        if self.overlay is not None and self.overlay_on:
-            out.append(f"overlay at {self.overlay_opacity:.0%}")
-        return out
-
-
-def _lut(name: str) -> np.ndarray:
-    x = np.linspace(0, 1, 256)
-    if name == "green":
-        rgb = np.stack([0 * x, x, 0 * x], 1)
-    elif name == "magenta":
-        rgb = np.stack([x, 0 * x, x], 1)
-    elif name == "fire":
-        rgb = np.stack([np.clip(3 * x, 0, 1), np.clip(3 * x - 1, 0, 1), np.clip(3 * x - 2, 0, 1)], 1)
-    else:
-        rgb = np.stack([x, x, x], 1)
-    return np.round(rgb * 255).astype(np.uint8)
-
-
-def corrected(raw: np.ndarray, c: Corrections) -> np.ndarray:
-    """The frame with the dark frame and the background (or flat field) taken out, uint8."""
-    if c.dark is None and (c.background is None or c.mode == "off"):
-        return raw
-    x = raw.astype(np.float32)
-    if c.dark is not None and c.dark.shape == x.shape:
-        x = np.maximum(x - c.dark, 0)
-    bg = c.background
-    if bg is not None and bg.shape == x.shape and c.mode != "off":
-        if c.dark is not None and c.dark.shape == bg.shape:
-            bg = np.maximum(bg - c.dark, 0)
-        if c.mode == "subtract":
-            x = x - bg + float(bg.mean())
-        else:
-            x = x / np.maximum(bg / max(float(bg.mean()), 1e-6), 1e-3)
-    return np.clip(np.round(x), 0, 255).astype(np.uint8)
-
-
-def shown(raw: np.ndarray, c: Corrections, a: Adjust) -> np.ndarray:
-    """The frame as shown: corrected, adjusted, coloured, the overlay laid over it, clipped pixels in red."""
-    x = apply(corrected(raw, c), a)
-    if c.lut != "colour":
-        x = _lut(c.lut)[lum8(x)]
-    if c.overlay is not None and c.overlay_on and c.overlay.shape == x.shape[:2]:
-        m = (c.overlay * c.overlay_opacity)[..., None]
-        x = np.round(x * (1 - m) + np.array(c.overlay_colour, np.float32) * m).astype(np.uint8)
-    if c.show_clipped:
-        clipped = raw[:, :, 0] == 255 if is_grey(raw) else (raw >= 255).any(axis=2)
-        if clipped.any():
-            x = x.copy()
-            x[clipped] = (255, 0, 0)
-    return x
-
-
-def display_table(c: Corrections, a: Adjust) -> np.ndarray | None:
-    """For a grey frame: what ``shown`` does, as a table of the 256 levels (256, 3) uint8, when it can be one (point
-    adjustments only, no correction or overlay); the screen then draws the camera's own pixels through it. None when
-    the picture needs ``shown`` itself. A frame with a clipped pixel took 51 ms to draw through ``shown`` (red pixels
-    make a colour copy); through the table, a few."""
-    if a.auto_levels or a.sharpness or a.clarity or c.mode != "off" and c.background is not None or c.dark is not None:
-        return None
-    if c.overlay is not None and c.overlay_on:
-        return None
-    levels = np.arange(256, dtype=np.uint8)[:, None, None]                  # the 256 levels as a grey picture
-    grey = np.broadcast_to(levels, (256, 1, 3))
-    table = np.ascontiguousarray(apply(grey, a)).reshape(256, 3)
-    if c.lut != "colour":
-        table = _lut(c.lut)[(table.sum(axis=1, dtype=np.uint16) // 3).astype(np.uint8)]
-    if c.show_clipped:
-        table = table.copy()
-        table[255] = (255, 0, 0)
-    return table
-
-
-def overlay_from(raw: np.ndarray, c: Corrections) -> np.ndarray:
-    """A kept picture as an overlay: its brightness above its own background, 0-1 (the brightest 0.5% at 1)."""
-    lum = corrected(raw, Corrections(dark=c.dark)).astype(np.float32).mean(axis=2)
-    lum = lum - ndimage.median_filter(lum[::8, ::8], size=9).repeat(8, 0).repeat(8, 1)[:lum.shape[0], :lum.shape[1]]
-    top = float(np.percentile(lum, 99.5))
-    return np.clip(lum / max(top, 1e-6), 0, 1).astype(np.float32)
 
 
 def stats(raw: np.ndarray, bins: int = 64) -> dict:
@@ -459,28 +233,6 @@ def stats(raw: np.ndarray, bins: int = 64) -> dict:
         black = float(np.count_nonzero(top == 0)) / top.size
     return {"hist": hist, "counts": counts, "p995": p995, "mean": mean, "clipped": float(clipped),
             "black": float(black)}
-
-
-BINNINGS = (1, 2, 4)
-
-
-def bin_sum(rgb: np.ndarray, n: int) -> np.ndarray:
-    """``n`` x ``n`` pixels added into one, clipped at full scale: n squared times the light a pixel (a dim
-    fluorescent picture as bright at 1/n squared of the exposure, so that many times faster), at 1/n of the
-    resolution each way. Added from strided views, never a reshaped copy (3.6 ms for 2 x 2 on the rig camera's
-    2.9 MP frame; a reshape and sum took 18 ms)."""
-    if n <= 1:
-        return rgb
-    grey = is_grey(rgb)
-    x = rgb[:, :, 0] if grey else rgb
-    h, w = x.shape[0] // n * n, x.shape[1] // n * n
-    acc = x[0:h:n, 0:w:n].astype(np.uint16)
-    for i in range(n):
-        for j in range(n):
-            if i or j:
-                acc += x[i:h:n, j:w:n]
-    out = np.minimum(acc, 255).astype(np.uint8)
-    return np.broadcast_to(out[:, :, None], out.shape + (3,)) if grey else out
 
 
 def next_exposure(ms: float, p995: float, low: float, high: float, clipped: float = 0.0,

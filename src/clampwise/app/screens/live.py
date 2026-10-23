@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from ...rig import digidata, growing, hardware, multiclamp
 from ...rig import state as rig_state
@@ -28,11 +28,14 @@ from .base import Screen
 METER_LOOKS = 4                        # the meters shown: their mean over this many looks (2 s at two a second)
 RS_CHANGE = 0.20                       # B19: a badge when Rs moves more than 20% from where watching began
 HISTORY_S = 3 * 3600
-ORDER = ("acquisition", "camera", "amplifier", "light")
+ORDER = ("camera", "acquisition", "amplifier", "light")
 # (row, column, rows, columns): the acquisition's trace a wide rectangle across the top, as
 # big as possible, the camera the largest below it
-PLACES = {"acquisition": (0, 0, 1, 3), "camera": (1, 0, 1, 1), "amplifier": (1, 1, 1, 1), "light": (1, 2, 1, 1)}
-COLUMNS = (2, 1, 1)                    # the camera's column twice the others'
+PLACES = {"camera": (0, 0, 2, 1), "acquisition": (0, 1, 1, 2), "amplifier": (1, 1, 1, 1), "light": (1, 2, 1, 1)}
+COLUMNS = (2, 1, 1)                    # the camera's column twice the others' (half the width)
+ROWS = (2, 1)                          # the acquisition's row twice the one under it
+SIDE = ("camera", "health", "amplifier", "controls", "light", "hardware", "recorded")   # the side panel, by use
+SIDE_FOLDED = ("light", "hardware", "recorded")
 WHOLE = "whole"                        # a view's part: the whole window, chosen
 FILL = {"acquisition"}                 # stretched to fill by default
 
@@ -108,6 +111,7 @@ class WindowView(QtWidgets.QFrame):
         self.own = False
         self.popped = False                           # a window of its own
         self.bare = False                             # the picture alone: no title row, status line or border
+        self.margin = theme.SPACE["s"]                # round the picture, even on every side (0: the picture alone)
         self.bare_chosen = False                      # ... as chosen for the view (full screen is always bare)
         self.full_popped = False                      # out of Live only to go full screen: put back when left
         self._shown_before: dict = {}
@@ -194,6 +198,10 @@ class WindowView(QtWidgets.QFrame):
             self.panel.setVisible(on)
             self.use_button.setText("Let go" if on else "Use here")
         self.state.setVisible(not on)
+        lay = self.layout()                            # the spacers round "Not open" give way to the picture
+        for k in range(lay.count()):
+            if lay.itemAt(k).spacerItem() is not None:
+                lay.setStretch(k, 0 if on else 1)
         if on:
             self._drop()
             self.set_status("ok", "in Clampwise", self.held)
@@ -258,14 +266,21 @@ class WindowView(QtWidgets.QFrame):
             for w in parts:
                 w.setVisible(self._shown_before.get(w, True))
         self.bare = on
-        m = 0 if on else theme.SPACE["s"]
+        m = 0 if self.isFullScreen() or getattr(self, "_going_full", False) else self.margin
         self.layout().setContentsMargins(m, m, m, m)
         self.layout().setSpacing(0 if on else theme.SPACE["xs"])
         self.setObjectName("bare" if on else "desk")             # no border drawn round it
         self.style().unpolish(self)
         self.style().polish(self)
+        self.setFrameShape(self.frameShape())                    # its width read again from the new style
         if not on:
             self._fit_head()
+
+    def set_margin(self, px: int) -> None:
+        """The space round the picture, the same on every side (0: the picture alone, edge to edge)."""
+        self.margin = int(px)
+        if not self.isFullScreen():
+            self.layout().setContentsMargins(self.margin, self.margin, self.margin, self.margin)
 
     def _fit_head(self) -> None:
         """A narrow view keeps its name and its Use here (or Let go) readable: the status word gives way first,
@@ -421,7 +436,7 @@ class WindowView(QtWidgets.QFrame):
         if self._choosing() and event.key() == QtCore.Qt.Key_Escape:
             self._end_choice()
             return
-        if event.key() == QtCore.Qt.Key_Escape and self.isFullScreen():
+        if event.key() in (QtCore.Qt.Key_Escape, QtCore.Qt.Key_F11) and self.isFullScreen():
             self.fullscreen.emit(self.role)
             return
         super().keyPressEvent(event)
@@ -616,7 +631,8 @@ class LiveScreen(Screen):
         panel = QtWidgets.QWidget()
         lay = box("v", "s")
         settings = (lambda: self.window._settings()) if getattr(window, "persist", False) else None
-        self.sections = widgets.Sections("live/sections", settings, folded=("controls",))
+        # (kept under a new key: the order and folds before this one put the camera's controls second)
+        self.sections = widgets.Sections("live/side", settings, folded=SIDE_FOLDED)
         sections = self.sections
         # the rig's hardware, found by itself (rig.hardware): what is connected and who is using it
         found = sections.add(widgets.Section("hardware", "Hardware"))          # looked for every 5 s
@@ -658,6 +674,15 @@ class LiveScreen(Screen):
         self.picture_only.toggled.connect(self.set_picture_only)
         view_row.addWidget(self.full_button)
         view_row.addWidget(self.picture_only)
+        view_row.addWidget(label("Margin", "muted"))
+        self.picture_margin = QtWidgets.QSpinBox()
+        self.picture_margin.setRange(0, 64)
+        self.picture_margin.setSuffix(" px")
+        self.picture_margin.setValue(theme.SPACE["s"])
+        self.picture_margin.setToolTip("The space round the camera's picture, the same on every side (0: the picture "
+                                       "alone, edge to edge; full screen has none)")
+        self.picture_margin.valueChanged.connect(self.set_picture_margin)
+        view_row.addWidget(self.picture_margin)
         view_row.addStretch(1)
         self.camera.controls.layout().addLayout(view_row)
         # the patterned light's, under the camera's: its regions are drawn on that picture, its calibration reads it,
@@ -749,6 +774,7 @@ class LiveScreen(Screen):
         self.picture = label("", "muted", wrap=True)
         for w in (self.acquisition, self.test, self.light, self.picture):
             recorded.add(w)
+        sections.arrange(SIDE)
         sections.load()
         lay.addWidget(sections, 1)
         notes = box("h", "s")                              # a note, timestamped, kept with the project
@@ -771,6 +797,7 @@ class LiveScreen(Screen):
         split.setStretchFactor(1, 1)
         split.setChildrenCollapsible(False)
         self.split = split
+        split.setObjectName("dense")                   # Live's controls close together, as a rig program's (theme)
         split.splitterMoved.connect(lambda *_: self._save_layout())
         self.body(split)
         self._hidden: set[str] = set()
@@ -781,9 +808,13 @@ class LiveScreen(Screen):
         self.picture_only.blockSignals(True)               # as kept
         self.picture_only.setChecked(self.views["camera"].bare_chosen)
         self.picture_only.blockSignals(False)
+        self.picture_margin.blockSignals(True)
+        self.picture_margin.setValue(self.views["camera"].margin)
+        self.picture_margin.blockSignals(False)
         self._apply_views()
         for role in self.held_buttons:                     # nothing held yet: each section says how to take it
             self._held_changed(role, False)
+        self._keys()
 
         d = box("v", "s", "m")
         d.addWidget(label("What this screen reads", "heading"))
@@ -824,6 +855,23 @@ class LiveScreen(Screen):
         camera = self.views["camera"]
         if not camera.own and camera.source is None:     # its regions are drawn on the camera's picture: taken too
             self._use_or_let_go("camera")
+
+    def _keys(self) -> None:
+        """Function keys for what is done most while patching, as rig programs have them, each the same as its
+        button (a button that cannot be pressed now does nothing): only while Live is shown. The amplifier's mode and
+        Zap have none, so that no key pressed by mistake reaches the cell."""
+        rec = self.recorder
+        self.shortcuts = {}
+        for key, button, slot in (("F2", None, self.camera.snapshot), ("F5", rec.play_button, None),
+                                  ("F6", rec.record_button, None), ("F7", rec.pause_button, None),
+                                  ("F8", rec.stop_button, None), ("F9", rec.test_button, None),
+                                  ("F11", self.full_button, None), ("F12", self.patterned.off_button, None)):
+            act = slot if slot is not None else (lambda b=button: b.click() if b.isEnabled() else None)
+            sc = QtWidgets.QShortcut(QtGui.QKeySequence(key), self, act)
+            sc.setContext(QtCore.Qt.WidgetWithChildrenShortcut)
+            self.shortcuts[key] = sc
+            if button is not None:
+                button.setToolTip(f"{button.toolTip()} ({key})")
 
     # ---- the camera and the patterned light from the side panel's sections: the same Use here as their views'
     def _use_or_let_go(self, role: str) -> None:
@@ -1038,12 +1086,20 @@ class LiveScreen(Screen):
             if screen is not None and view.windowHandle() is not None:
                 view.windowHandle().setScreen(screen)
                 view.setGeometry(screen.geometry())
+            view._going_full = True                      # full screen: the picture alone, no margin
             view.set_bare(True)
+            view._going_full = False
             view.showFullScreen()
             view.setFocus()
         if role == "camera":                             # the picture fitted to its new size
             QtCore.QTimer.singleShot(150, lambda: self.camera.box.autoRange(padding=0))
         self.full_button.setText("Leave full screen" if view.isFullScreen() else "Full screen")
+
+    def set_picture_margin(self, px: int) -> None:
+        """The space round the camera's picture, chosen (kept)."""
+        self.views["camera"].set_margin(px)
+        QtCore.QTimer.singleShot(150, lambda: self.camera.box.autoRange(padding=0))
+        self._save_layout()
 
     def set_picture_only(self, on: bool) -> None:
         """The camera's view without its title row, status line and border, chosen (kept)."""
@@ -1087,8 +1143,9 @@ class LiveScreen(Screen):
     def _apply_views(self) -> None:
         shown = {r for r in self.views if r not in self._hidden and self._enlarged in (None, r)
                  and not self.views[r].popped}
-        for k in range(2):                              # an empty row or column takes no room
-            self.grid.setRowStretch(k, 1 if any(PLACES[r][0] == k for r in shown) else 0)
+        for k, stretch in enumerate(ROWS):              # an empty row or column takes no room
+            self.grid.setRowStretch(k, stretch if any(PLACES[r][0] <= k < PLACES[r][0] + PLACES[r][2]
+                                                      for r in shown) else 0)
         for k, stretch in enumerate(COLUMNS):
             self.grid.setColumnStretch(k, stretch if any(PLACES[r][1] <= k < PLACES[r][1] + PLACES[r][3]
                                                          for r in shown) else 0)
@@ -1120,6 +1177,7 @@ class LiveScreen(Screen):
                     view.part = None
         for role, view in self.views.items():
             view.bare_chosen = str(s.value(f"live/bare/{role}", "false")).lower() == "true"
+            view.set_margin(int(s.value(f"live/margin/{role}", theme.SPACE["s"]) or 0))
             if view.bare_chosen:
                 view.set_bare(True)
         state = s.value("live/split")
@@ -1136,6 +1194,7 @@ class LiveScreen(Screen):
         for role, view in self.views.items():
             s.setValue(f"live/fill/{role}", view.fill)
             s.setValue(f"live/bare/{role}", view.bare_chosen)
+            s.setValue(f"live/margin/{role}", view.margin)
             s.setValue(f"live/part/{role}", WHOLE if view.part == WHOLE else
                        ",".join(str(x) for x in view.part) if view.part else "")
         s.setValue("live/split", self.split.saveState())
