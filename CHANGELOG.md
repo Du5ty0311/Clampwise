@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.0 — not released yet
+## 1.8.0 — 2026-10-23
 
 - **The patterned light now shows the pattern drawn.** Clampwise sent each pattern as a byte a mirror, but the
   Polygon reads a bit a mirror, eight to a byte. So only the first eighth of each image reached it, and every pattern
