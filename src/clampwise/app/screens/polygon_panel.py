@@ -14,12 +14,15 @@ objective), matched to the recordings' sweeps; nothing is left lit after a recor
 The light test and calibration (with the light on and a fluorescent slide or slice in view) shows the Polygon
 nothing and everything, to learn which byte lights a mirror, then a few spots, found on the camera's picture, to
 learn how the Polygon's field lies under the camera; drawing on the picture and the outlines over it need it. A
-check grid of spots the fit did not use then says how far it is off, in um; it is kept for its objective.
+check grid of spots the fit did not use then says how far it is off, in um; it is kept for its objective. The field
+can also be placed by hand (when no spot is found, or a calibration has moved a little since): a target lit on the
+mirrors, drawn where the map puts it, and a frame dragged on the picture until the two sit on each other.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -45,6 +48,9 @@ LED_MODES = {"auto": "Find out by itself (Automatic)", "steady": "On steadily (s
 FLASH_GREY = 4.0               # a frame this much brighter (mean grey) than the darkest one caught a pulse
 CHOSEN = (255, 220, 0)         # the steps chosen, outlined on the picture
 LIT = (90, 170, 255)           # the steps the patterned light shows now (lit whenever the LED is on), filled
+TARGET = (255, 140, 0)         # placing the field by hand: its frame, and the target where the map puts it
+NUDGE = 0.0025                 # placing by hand, a button's step: this much of the picture's width (moved, sized)
+NUDGE_DEG = 0.25               # (turned)
 
 
 def _pct(value: float = 50.0, low: float = 0.0, high: float = 100.0, step: float = 1.0, suffix: str = " %"):
@@ -85,6 +91,8 @@ class PolygonPanel(QtWidgets.QWidget):
         self._clicking = False                        # the next click on the picture places a region's centre
         self._show_check = False                      # the check grid drawn, until steps are made
         self._cal: dict | None = None                 # the calibration under way
+        self._adjust: dict | None = None              # the field being placed by hand: its frame, the map it began with
+        self._target = patterns.alignment_target()
         self._lit: set[str] = set()                   # the names of the steps the patterned light shows now
         self.shown_mask: np.ndarray | None = None     # the mirrors lit now (ROWS x COLUMNS), None: none
         self._mask_images: dict = {}                  # an image step's mirrors as a picture to lay over the camera's
@@ -488,10 +496,13 @@ class PolygonPanel(QtWidgets.QWidget):
         """The objective in use's calibration in a few words: ok (checked within the target), warn (none, off the
         target, or old enough to check again)."""
         c, key = self.calibration, self._objective() or "this objective"
+        if self._adjust is not None:
+            return "warn", f"Placing the field by hand at {key} (not kept yet)"
         if not c.ready:
             return "warn", f"Not calibrated at {key}"
         age = patterns.age_words(c.measured)
-        words = f"Calibrated at {key}" + (f", {age.split(' (')[0]}" if age else "")
+        words = f"{'Placed by hand' if c.by_hand else 'Calibrated'} at {key}" + (f", {age.split(' (')[0]}" if age
+                                                                                   else "")
         if c.check and c.um_per_px:
             worst = float(c.check_errors_px().max() * c.um_per_px)
             words += f", within {worst:.1f} um"
@@ -1041,10 +1052,15 @@ class PolygonPanel(QtWidgets.QWidget):
         for item in self.outline_items:
             self.panel.box.removeItem(item)
         self.outline_items = []
-        if not (self.outlines.isChecked() and self.calibration.ready and self._overlaid()):
+        placing = self._adjust is not None
+        if not (self.calibration.ready and (placing or self.outlines.isChecked() and self._overlaid())):
             return
         cal = self.calibration.at_size(self._frame_size())     # the picture's binning now
         add = self._overlay
+        for shape in (self._target.shapes if placing else []):  # the target where the map puts it, to lay on the lit
+            pts = shape.outline()
+            x, y = cal.camera_of(pts[:, 0], pts[:, 1])
+            add(pg.PlotCurveItem(x, y, pen=pg.mkPen(TARGET, width=2)))
         # the field's edge, dashed (outside the picture when the field is larger than it: seen zoomed out)
         x, y = cal.camera_of(np.array([0.0, 1.0, 1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0, 1.0, 0.0]))
         add(pg.PlotCurveItem(x, y, pen=pg.mkPen((128, 128, 128, 220), width=1, style=QtCore.Qt.DashLine)))
@@ -1119,6 +1135,8 @@ class PolygonPanel(QtWidgets.QWidget):
     def calibrate(self) -> None:
         if self._cal is not None:
             return
+        if self._adjust is not None:
+            self.end_adjust(keep=False)
         if self.panel._thread is None or self.panel.last is None:
             self.panel.window.say("Take the camera first: the calibration reads its picture.")
             return
@@ -1354,34 +1372,47 @@ class PolygonPanel(QtWidgets.QWidget):
         self._next_picture()
 
     def _checked(self) -> None:
-        """The check grid's spots compared with where the map puts them: the errors in um (pixels when the camera's
-        scale is not known), kept with the calibration and drawn on the picture."""
+        """The check grid's spots found, then the map fitted again to every spot found (the first few and the check
+        grid's), and each spot compared with where the map fitted to the others puts it: the errors in um (pixels
+        when the camera's scale is not known), kept with the calibration and drawn on the picture."""
         c, cal = self._cal, self.calibration
-        rows = []
-        for found, (u, v) in c["checks"]:
-            if found is None:
-                continue
-            x, y = cal.camera_of(np.array([u]), np.array([v]))
-            rows.append([found[0], found[1], float(x[0]), float(y[0])])
-        cal.check = rows
-        self._show_check = True
-        n, total = len(rows), c.get("check_total", len(patterns.CHECK_SPOTS))
-        base = (f"Calibrated with {len(c['spots'])} spots at {cal.objective or 'this objective'}: a mirror is lit by "
-                f"{cal.on_value}. ")
+        checks = [(found, uv) for found, uv in c["checks"] if found is not None]
+        n, total = len(checks), c.get("check_total", len(patterns.CHECK_SPOTS))
         if not n:
-            self._end_calibration(base + "None of the check grid's spots was found on the picture: the fit is kept "
-                                  "but not checked.", keep_light=True)
+            self._end_calibration(f"Calibrated with {len(c['spots'])} spots at {cal.objective or 'this objective'}: "
+                                  f"a mirror is lit by {cal.on_value}. None of the check grid's spots was found on "
+                                  "the picture: the fit is kept but not checked.", keep_light=True)
             return
+        every = c["spots"] + checks
+        cam = np.array([p for p, _ in every], float)
+        uv = np.array([q for _, q in every], float)
+        strays = 0
+        if len(every) >= 6:                           # enough that each can be left out and the rest still fit
+            cal.to_field, cal.residual_px, held, kept = patterns.fit_without_strays(cam, uv)
+            strays = int((~kept).sum())
+            cam = cam[kept]
+            said = "where a map fitted to the others puts it"
+        else:
+            held = np.column_stack(cal.camera_of(uv[:, 0], uv[:, 1]))[len(c["spots"]):]
+            cam = cam[len(c["spots"]):]
+            said = "where the map puts it"
+        cal.check = np.column_stack([cam, held]).tolist()
+        self._show_check = True
+        base = (f"Calibrated with {len(cal.check) if len(every) >= 6 else len(c['spots'])} spots at "
+                f"{cal.objective or 'this objective'}: a mirror is lit by {cal.on_value}. ")
+        if strays:
+            base += (f"{strays} spot{'s' if strays > 1 else ''} left out, found far further off than the rest (cut "
+                     "by the picture's edge, or a speck beside it). ")
         err = cal.check_errors_px()
         if cal.um_per_px:
             e = err * cal.um_per_px
             verdict = ("within the target" if e.max() <= patterns.CHECK_TARGET_UM else
                        f"over the {patterns.CHECK_TARGET_UM:g} um target: calibrate again (focus on the slide, "
                        "brighter spots) before relying on regions of one cell")
-            text = (f"Check: {n} of {total} spots found, each within {e.max():.1f} um of where the map puts it (mean "
-                    f"{e.mean():.1f} um), {verdict}.")
+            text = (f"Check: {n} of {total} spots found; each of {len(err)} within {e.max():.1f} um of {said} "
+                    f"(mean {e.mean():.1f} um), {verdict}.")
         else:
-            text = (f"Check: {n} of {total} spots found, each within {err.max():.1f} px of where the map puts it "
+            text = (f"Check: {n} of {total} spots found; each of {len(err)} within {err.max():.1f} px of {said} "
                     f"(mean {err.mean():.1f} px); calibrate the camera's length to read it in um.")
         self._end_calibration(base + text, keep_light=True)
 
@@ -1434,6 +1465,156 @@ class PolygonPanel(QtWidgets.QWidget):
         self._said()
         self.show_state()
 
+    # ---------------------------------------------------------------- the field placed by hand
+    def adjust(self) -> bool:
+        """The field placed by hand: the alignment target lit on the mirrors (when the light is held), drawn in
+        orange where the map puts it, and the field's frame on the picture to drag until the drawn target sits on
+        the lit one (inside it to move it, the round handle to turn it, the square ones to size it). Starts from the
+        map in use at this objective, else from a guess in the middle of the picture. False when it cannot start."""
+        if self._adjust is not None:
+            return True
+        size = self._frame_size()
+        if not size[0]:
+            self.panel.window.say("Take the camera first: the field is placed on its picture.")
+            return False
+        if self._cal is not None:
+            self.panel.window.say("The calibration is under way: stop it first.")
+            return False
+        was = self.calibration
+        base = was.at_size(size)
+        self.calibration = dataclasses.replace(
+            base, to_field=base.to_field if base.ready else patterns.guessed(size), camera_size=tuple(size),
+            objective=self._objective(), um_per_px=self._um_per_px(), residual_px=float("nan"), check=[],
+            by_hand=True)
+        frame = patterns.frame_of(self.calibration)
+        roi = pg.ROI([0, 0], [1, 1], pen=pg.mkPen(TARGET, width=2), hoverPen=pg.mkPen(TARGET, width=3))
+        roi.addRotateHandle([0, 0], [0.5, 0.5])
+        roi.addScaleHandle([1, 1], [0.5, 0.5], lockAspect=True)
+        roi.addScaleHandle([1, 0.5], [0.5, 0.5])
+        roi.addScaleHandle([0.5, 1], [0.5, 0.5])
+        self._adjust = {"was": was, "roi": roi, "frame": frame, "start": (self.calibration.to_field, frame)}
+        self._put_frame(frame)
+        roi.sigRegionChanged.connect(self._frame_dragged)
+        self.panel.box.addItem(roi, ignoreBounds=True)
+        self._show_check = False
+        x, y = self.calibration.camera_of(np.array([0.0, 1.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0, 1.0]))
+        self.panel.box.setRange(QtCore.QRectF(QtCore.QPointF(min(0.0, x.min()), min(0.0, y.min())),
+                                              QtCore.QPointF(max(size[0], x.max()), max(size[1], y.max()))),
+                                padding=0.05)        # the picture and the whole frame, its handles in reach
+        self.show_target(True)
+        self.draw_outlines()
+        self.show_state()
+        return True
+
+    def _put_frame(self, frame) -> None:
+        """The frame on the picture set to ``frame`` (centre x, y, angle, width, height), the map left as it is."""
+        cx, cy, angle, w, h = frame
+        c, s = np.cos(np.radians(angle)), np.sin(np.radians(angle))
+        roi = self._adjust["roi"]
+        roi.blockSignals(True)
+        roi.setState({"pos": [cx - c * w / 2 + s * h / 2, cy - s * w / 2 - c * h / 2], "size": [w, h],
+                      "angle": angle})
+        roi.blockSignals(False)
+        self._adjust["frame"] = tuple(frame)
+
+    def _roi_frame(self) -> tuple[float, float, float, float, float]:
+        roi = self._adjust["roi"]
+        w, h = roi.size()
+        c = roi.mapToParent(QtCore.QPointF(w / 2, h / 2))
+        return float(c.x()), float(c.y()), float(roi.angle()), float(w), float(h)
+
+    def _frame_dragged(self) -> None:
+        """The frame moved, turned or sized on the picture: the field moved with it."""
+        if self._adjust is None:
+            return
+        after = self._roi_frame()
+        if min(after[3], after[4]) < 2.0:            # sized to nothing: the field cannot be placed so
+            self._put_frame(self._adjust["frame"])
+            return
+        self.calibration.to_field = patterns.moved(self.calibration.to_field, self._adjust["frame"], after)
+        self._adjust["frame"] = after
+        self.draw_outlines()
+
+    def nudge(self, dx: float = 0.0, dy: float = 0.0, turn: float = 0.0, grow: float = 1.0) -> None:
+        """The frame moved by (dx, dy) of the picture's pixels, turned by ``turn`` degrees and sized by ``grow``,
+        and the field with it."""
+        if self._adjust is None:
+            return
+        before = self._adjust["frame"]
+        cx, cy, angle, w, h = before
+        after = (cx + dx, cy + dy, angle + turn, w * grow, h * grow)
+        self.calibration.to_field = patterns.moved(self.calibration.to_field, before, after)
+        self._put_frame(after)
+        self.draw_outlines()
+
+    def nudge_step(self) -> float:
+        """A button's step, in the picture's pixels: a small part of its width, at least a pixel."""
+        return max(1.0, self._frame_size()[0] * NUDGE)
+
+    def flip(self, across: bool) -> None:
+        """The field mirrored within its frame: left for right (``across``), else top for bottom."""
+        if self._adjust is None:
+            return
+        self.calibration.to_field = patterns.flipped(self.calibration.to_field, self._adjust["frame"], across)
+        self.draw_outlines()
+
+    def adjust_from_start(self) -> None:
+        """The map and frame as they were when placing began."""
+        if self._adjust is None:
+            return
+        to_field, frame = self._adjust["start"]
+        self.calibration.to_field = [list(r) for r in to_field]
+        self._put_frame(frame)
+        self.draw_outlines()
+
+    def show_target(self, on: bool) -> None:
+        """The alignment target on the mirrors (``on``), or all mirrors off. Nothing when the light is not held:
+        the frame can still be placed on what the picture shows."""
+        if not self.polygon.connected:
+            return
+        if not on:
+            self.off()
+            return
+        lit = self._target.mirrors()
+        target = patterns.image(lit, self.calibration.on_value)
+        self.auto.setChecked(False)
+        self._wanted += 1
+
+        def done(ok):
+            if ok is True:
+                self.shown_label.setText(f"Alignment target since {time.strftime('%H:%M:%S')}: drag the orange "
+                                         "frame until the drawn target sits on the lit one.")
+                self._shown(lit)
+                self._set_lit({self._target.name})
+
+        self._async(lambda: self.polygon.send(target), done)
+
+    def end_adjust(self, keep: bool, lights_off: bool = True) -> None:
+        """Placing by hand ended: the field's place kept for this objective (``keep``: dated now, its check gone,
+        the steps laid over the picture made again through it), else the map in use before put back."""
+        a = self._adjust
+        if a is None:
+            return
+        self._adjust = None
+        self.panel.box.removeItem(a["roi"])
+        if keep:
+            self.calibration.measured = time.strftime("%Y-%m-%d %H:%M")
+            self.calibrations.keep(self.calibration)
+            self.save()
+            self.cal_status.setText(self._cal_text())
+        else:
+            self.calibration = a["was"]
+        if lights_off and self._target.name in self._lit:
+            self.show_target(False)
+        self.panel.box.autoRange(padding=0)          # the picture again (the frame and target are not counted)
+        if keep and self.calibration.ready:           # what was laid over the picture follows the new map
+            if self.source.currentText() == "Grid" and self.grid_on_picture.isChecked():
+                self.make_steps()
+            elif self.drawn:
+                self._drawn_moved()
+        self.draw_outlines()
+        self.show_state()
+
     # ---------------------------------------------------------------- kept for the user
     def _cal_text(self) -> str:
         c = self.calibration
@@ -1443,8 +1624,12 @@ class PolygonPanel(QtWidgets.QWidget):
             why = self.calibrations.refusal(self._objective())
             return f"Not calibrated here: {light}; {why}." if self.calibrations.maps else \
                 f"Not calibrated: {light}; the field's place is not known yet."
-        text = (f"Calibrated at {c.objective or 'an objective not noted'}: {light}; the field's place fitted within "
-                f"{c.residual_px:.1f} px at {c.camera_size[0]} x {c.camera_size[1]}")
+        if c.by_hand:
+            text = (f"Placed by hand at {c.objective or 'an objective not noted'}: {light}; at {c.camera_size[0]} x "
+                    f"{c.camera_size[1]}")
+        else:
+            text = (f"Calibrated at {c.objective or 'an objective not noted'}: {light}; the field's place fitted "
+                    f"within {c.residual_px:.1f} px at {c.camera_size[0]} x {c.camera_size[1]}")
         if c.check:
             err = c.check_errors_px()
             text += (f"; checked within {err.max() * c.um_per_px:.1f} um" if c.um_per_px else
@@ -1459,6 +1644,8 @@ class PolygonPanel(QtWidgets.QWidget):
         stopped = self._cal is not None               # its spots were found through the other objective
         if stopped:
             self._end_calibration("")
+        if self._adjust is not None:                  # placed through the other objective: not kept
+            self.end_adjust(keep=False)
         self.calibration = self.calibrations.at(self._objective())
         self.cal_status.setText(("The objective changed during the calibration: stopped. " if stopped else "")
                                 + self._cal_text())
@@ -1510,6 +1697,8 @@ class PolygonPanel(QtWidgets.QWidget):
         self._poll.stop()
         if self._cal is not None:
             self._cal = None
+        if self._adjust is not None:
+            self.end_adjust(keep=False, lights_off=False)
         self._wanted += 1
         if self.polygon.connected or self._opening:
             self.device_status.setText("")

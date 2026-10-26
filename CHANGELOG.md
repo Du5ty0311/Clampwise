@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.8.1 — not released yet
+
+- **The patterned light's field can be placed by hand.** Under Calibrate..., **Place by hand** lights a target on
+  the mirrors (the field's edge, a ring of spots, and an L at its centre whose arms show which way round the field
+  lies) and draws the same target in orange where Clampwise puts it. Drag the orange frame on the camera's picture
+  until the two sit on each other: inside it to move, the round handle to turn, the square ones to size. Buttons
+  move, turn and size it in small steps, turn it a quarter, or mirror it. It starts from the calibration in use, so
+  a calibration that has drifted since is corrected in seconds; with none, it starts from the middle of the picture.
+  **Keep** replaces that objective's calibration (noted as placed by hand) and **Cancel** puts the old one back.
+- **The calibration fits the field to every spot it finds, not just the first three.** Three spots fixed the map
+  exactly, so any error in finding one of them went straight into it, and runs at the rig came out 5.7 to 7 um off.
+  The map is now fitted to the first spots and the check grid together. Each spot is then checked against a map
+  fitted to all the others, so no spot passes by having been part of the fit. A spot found far further off than
+  the rest (one cut by the picture's edge, or a speck beside it) is left out, and the result says so. At the rig
+  (20x), this brought the check from 5.7–7.2 um to 2.3 um.
+
 ## 1.8.0 — 2026-10-23
 
 - **The patterned light now shows the pattern drawn.** Clampwise sent each pattern as a byte a mirror, but the

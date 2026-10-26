@@ -350,7 +350,8 @@ class Calibration:
     affine map from the camera's pixels (x across, y down) to the field (u, v): [u, v] = A @ [x, y, 1], measured
     with one ``objective`` (and camera adapter): the field's place shifts a little between objectives (their
     centring), so a map is used only with the objective it was measured with. ``check`` holds the check grid
-    projected after the fit: each spot where it was found and where the map put it (x, y, x, y, camera pixels)."""
+    projected after the fit: each spot where it was found and where the map put it (x, y, x, y, camera pixels).
+    ``by_hand``: the map placed (or moved) by hand onto the target lit, not fitted to spots found."""
     on_value: int = 255
     light_tested: bool = False                                        # on_value seen to light, not assumed
     to_field: list[list[float]] = field(default_factory=list)       # 2 x 3; empty: not calibrated
@@ -360,6 +361,7 @@ class Calibration:
     check: list[list[float]] = field(default_factory=list)
     um_per_px: float = 0.0                                            # the camera's scale when it was measured
     measured: str = ""                                                # "YYYY-MM-DD HH:MM"; "" not noted (before 1.8)
+    by_hand: bool = False
 
     @property
     def ready(self) -> bool:
@@ -400,13 +402,13 @@ class Calibration:
         check = [[(x0 - (sx - 1) / 2) / sx, (y0 - (sy - 1) / 2) / sy, (x1 - (sx - 1) / 2) / sx,
                   (y1 - (sy - 1) / 2) / sy] for x0, y0, x1, y1 in self.check]
         return Calibration(self.on_value, self.light_tested, a.tolist(), (int(w), int(h)), self.residual_px / sx,
-                           self.objective, check, self.um_per_px * sx, self.measured)
+                           self.objective, check, self.um_per_px * sx, self.measured, self.by_hand)
 
     def to_dict(self) -> dict:
         return {"on_value": self.on_value, "light_tested": self.light_tested, "to_field": self.to_field,
                 "camera_size": list(self.camera_size), "residual_px": self.residual_px,
                 "objective": self.objective, "check": self.check, "um_per_px": self.um_per_px,
-                "measured": self.measured}
+                "measured": self.measured, "by_hand": self.by_hand}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Calibration":
@@ -414,7 +416,8 @@ class Calibration:
                    [list(map(float, r)) for r in d.get("to_field", [])],
                    tuple(int(x) for x in d.get("camera_size", (0, 0))), float(d.get("residual_px", float("nan"))),
                    str(d.get("objective", "")), [list(map(float, r)) for r in d.get("check", [])],
-                   float(d.get("um_per_px", 0.0) or 0.0), str(d.get("measured", "") or ""))
+                   float(d.get("um_per_px", 0.0) or 0.0), str(d.get("measured", "") or ""),
+                   bool(d.get("by_hand", False)))
 
 
 def age_words(measured: str, now=None) -> str:
@@ -495,7 +498,70 @@ CLOSER_RINGS = (0.1, 0.04)
 # after the fit, a check grid of spots not used by it: how far each lands from where the map puts it
 CHECK_SPOTS = tuple((u, v) for v in (0.35, 0.5, 0.65) for u in (0.35, 0.5, 0.65) if (u, v) != (0.5, 0.5))
 CHECK_TARGET_UM = 5.0
+STRAY_PX = 5.0                 # a spot found this far (camera pixels) from where the others put it may be a stray
 STALE_DAYS = 2                 # a calibration this old is said to need checking again (a day's work keeps it)
+
+
+# ------------------------------------------------------------------ the field placed by hand
+
+def alignment_target() -> Step:
+    """What the mirrors show while the field is placed by hand: its edge, a ring of spots, and at its centre an L
+    whose long arm points along u and short arm up (towards v = 0). No turn or mirror of an L is the same L, so a
+    field turned or mirrored on the picture shows as one; the L alone places it when the edge is off the picture."""
+    tu = 0.01
+    tv = tu * FIELD_W / FIELD_H                       # bars as thick on the slice one way as the other
+    shapes = [Shape("rect", (0.0, 0.0, 1.0, tv)), Shape("rect", (0.0, 1.0 - tv, 1.0, 1.0)),
+              Shape("rect", (0.0, 0.0, tu, 1.0)), Shape("rect", (1.0 - tu, 0.0, 1.0, 1.0))]
+    for v in (0.15, 0.5, 0.85):
+        for u in (0.15, 0.5, 0.85):
+            if (u, v) != (0.5, 0.5):
+                shapes += spot(u, v, 0.04)[0].shapes
+    shapes += [Shape("rect", (0.5 - tu / 2, 0.5 - tv / 2, 0.68, 0.5 + tv / 2)),          # the long arm, along u
+               Shape("rect", (0.5 - tu / 2, 0.5 - 0.09 * FIELD_W / FIELD_H, 0.5 + tu / 2, 0.5 + tv / 2))]
+    return Step("alignment target", shapes)
+
+
+def frame_of(cal: Calibration) -> tuple[float, float, float, float, float]:
+    """The field's frame on the camera's picture, as it is dragged there: its centre (x, y), the angle of its u axis
+    (degrees, as the picture's x turns to its y), and its width along u and height along v (camera pixels)."""
+    x, y = cal.camera_of(np.array([0.5, 1.0, 0.5]), np.array([0.5, 0.5, 1.0]))
+    eu, ev = (2 * (x[1] - x[0]), 2 * (y[1] - y[0])), (2 * (x[2] - x[0]), 2 * (y[2] - y[0]))
+    return (float(x[0]), float(y[0]), float(np.degrees(np.arctan2(eu[1], eu[0]))), float(np.hypot(*eu)),
+            float(np.hypot(*ev)))
+
+
+def _frame_matrix(frame: tuple[float, float, float, float, float]) -> np.ndarray:
+    """From the frame's own coordinates (-1/2 to 1/2 each way) to the picture's, 3 x 3."""
+    cx, cy, angle, w, h = frame
+    c, s = np.cos(np.radians(angle)), np.sin(np.radians(angle))
+    return np.array([[c * w, -s * h, cx], [s * w, c * h, cy], [0.0, 0.0, 1.0]])
+
+
+def _full(to_field) -> np.ndarray:
+    return np.vstack([np.asarray(to_field, float), [0.0, 0.0, 1.0]])
+
+
+def moved(to_field, before, after) -> list[list[float]]:
+    """The map once the field's frame on the picture is moved from ``before`` to ``after`` (each as ``frame_of``
+    gives it): every point of the field moves on the picture with the frame."""
+    return (_full(to_field) @ _frame_matrix(before) @ np.linalg.inv(_frame_matrix(after)))[:2].tolist()
+
+
+def flipped(to_field, frame, across: bool) -> list[list[float]]:
+    """The map with the field mirrored on the picture within its frame (``frame_of``): left for right
+    (``across``), else top for bottom."""
+    f = _frame_matrix(frame)
+    return (_full(to_field) @ f @ np.diag([-1.0, 1.0, 1.0] if across else [1.0, -1.0, 1.0]) @
+            np.linalg.inv(f))[:2].tolist()
+
+
+def guessed(size: tuple[int, int]) -> list[list[float]]:
+    """A first map when none was measured: the field unturned in the middle of the picture (``size``, its width
+    and height), as large as fits in it with its 16:10 shape, to be dragged from there onto the target lit."""
+    w, h = size
+    k = min(w / FIELD_W, h / FIELD_H)                 # picture pixels a mirror's width
+    fw, fh = FIELD_W * k, FIELD_H * k
+    return [[1 / fw, 0.0, -(w - fw) / 2 / fw], [0.0, 1 / fh, -(h - fh) / 2 / fh]]
 
 
 def ring(d: float) -> tuple[tuple[tuple[float, float], ...], float]:
@@ -575,6 +641,39 @@ def fit_affine(camera_xy: np.ndarray, field_uv: np.ndarray) -> tuple[list[list[f
     c = Calibration(to_field=to_field)
     back = np.column_stack(c.camera_of(uv[:, 0], uv[:, 1]))
     return to_field, float(np.sqrt(np.mean(np.sum((back - cam) ** 2, axis=1))))
+
+
+def fit_held_out(camera_xy: np.ndarray, field_uv: np.ndarray) -> tuple[list[list[float]], float, np.ndarray]:
+    """The affine map fitted to every spot (as ``fit_affine``), and where each spot lands on the picture by the map
+    fitted to all the others (k x 2, camera pixels): a check no spot passes by having been part of the fit. Fitted
+    to many spots, the error in finding each one averages out; fitted to three, it all goes into the map."""
+    cam = np.asarray(camera_xy, float).reshape(-1, 2)
+    uv = np.asarray(field_uv, float).reshape(-1, 2)
+    to_field, residual = fit_affine(cam, uv)
+    held = []
+    for i in range(len(cam)):
+        others = np.arange(len(cam)) != i
+        x, y = Calibration(to_field=fit_affine(cam[others], uv[others])[0]).camera_of(uv[i:i + 1, 0], uv[i:i + 1, 1])
+        held.append((float(x[0]), float(y[0])))
+    return to_field, residual, np.array(held).reshape(-1, 2)
+
+
+def fit_without_strays(camera_xy: np.ndarray, field_uv: np.ndarray, at_least: int = 6
+                       ) -> tuple[list[list[float]], float, np.ndarray, np.ndarray]:
+    """``fit_held_out`` with a stray spot left out, one at a time while ``at_least`` remain: one found far further
+    from where the others put it than the rest are (4 times their median, and over STRAY_PX), as a spot cut by the
+    picture's edge is (its centre pulled inwards) or one with a speck beside it. Also which spots were kept."""
+    cam = np.asarray(camera_xy, float).reshape(-1, 2)
+    uv = np.asarray(field_uv, float).reshape(-1, 2)
+    kept = np.ones(len(cam), bool)
+    while True:
+        to_field, residual, held = fit_held_out(cam[kept], uv[kept])
+        err = np.hypot(*(held - cam[kept]).T)
+        worst = int(np.argmax(err))
+        rest = np.delete(err, worst)
+        if kept.sum() <= at_least or err[worst] <= max(4 * float(np.median(rest)), STRAY_PX):
+            return to_field, residual, held, kept
+        kept[np.flatnonzero(kept)[worst]] = False
 
 
 def lit_difference(on: np.ndarray, off: np.ndarray) -> float:

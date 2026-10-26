@@ -113,6 +113,35 @@ def test_the_fit_recovers_how_the_field_lies_under_the_camera_mirrored_and_turne
     assert np.allclose(np.column_stack([x, y]), cam)
 
 
+
+def test_a_map_fitted_to_every_spot_found_beats_three_and_is_checked_on_spots_left_out():
+    # spots found a few pixels off (focus, scattered light): three fix the map exactly, their errors and all; eleven
+    # average them out. Each spot is checked against the map fitted to the others, never one it helped to make
+    true = patterns.Calibration(to_field=[[-1 / 1700, 0.0, 0.8], [0.0, -1 / 1100, 0.9]])
+    rng = np.random.default_rng(3)
+    uv = np.array([(u, v) for v in (0.35, 0.45, 0.55, 0.65) for u in (0.4, 0.5, 0.6)][:11])
+    x, y = true.camera_of(uv[:, 0], uv[:, 1])
+    found = np.column_stack([x, y]) + rng.normal(0, 3.0, (len(uv), 2))
+
+    def worst(to_field):
+        xx, yy = patterns.Calibration(to_field=to_field).camera_of(uv[:, 0], uv[:, 1])
+        return float(np.hypot(xx - x, yy - y).max())
+
+    three, _ = patterns.fit_affine(found[:3], uv[:3])
+    every, residual, held = patterns.fit_held_out(found, uv)
+    assert worst(every) < worst(three) / 2 and residual > 0
+    held_err = np.hypot(*(held - found).T)
+    fit_err = np.hypot(*(np.column_stack(patterns.Calibration(to_field=every).camera_of(uv[:, 0], uv[:, 1]))
+                         - found).T)
+    assert held.shape == (11, 2) and (held_err >= fit_err - 1e-9).all()     # left out: never flattered
+    # one spot cut by the picture's edge, its centre pulled 35 px inwards (32 at the rig): left out, the map unharmed
+    edge = found.copy()
+    edge[1, 0] += 35.0
+    to_field, _, held, kept = patterns.fit_without_strays(edge, uv)
+    assert kept.sum() == 10 and not kept[1] and worst(to_field) < worst(three) / 2
+    assert patterns.fit_without_strays(found, uv)[3].all()                   # none left out when none strays
+
+
 def test_a_spot_is_found_where_it_is_lit_and_not_in_noise():
     rng = np.random.default_rng(1)
     off = 20 + rng.normal(0, 2, (160, 200))
@@ -301,7 +330,7 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
         frame()
         dlg._calibration_tick()
     dlg.wait()
-    assert dlg._cal is None and "Calibrated with 5 spots" in dlg.cal_status.text()
+    assert dlg._cal is None and "Calibrated with 13 spots" in dlg.cal_status.text()
     assert dlg.calibration.on_value == on and dlg.calibration.light_tested
     assert np.allclose(dlg.calibration.to_field, rig.cal.to_field, atol=0.01)
     assert sdk.image is not None and not (sdk.image == on).any()                 # left with nothing lit
@@ -325,7 +354,7 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     assert [e.event for e in log][:2] == ["taken", "shown"] and log[1].step == "1" and log[1].lit
     assert log[1].field_fraction == pytest.approx(0.25, abs=0.01)
     # the check grid: spots the fit did not use land where the map puts them
-    assert "Check: 8 of 8 spots found" in dlg.cal_status.text() and len(dlg.calibration.check) == 8
+    assert "Check: 8 of 8 spots found" in dlg.cal_status.text() and len(dlg.calibration.check) == 13
     assert dlg.calibration.check_errors_px().max() < 2.0
     assert dlg.calibration.measured and "measured today at" in dlg._cal_text()  # when: the map holds until moved
     dlg.release()
@@ -493,7 +522,7 @@ def test_the_calibration_waits_for_the_protocol_s_pulses_when_the_light_is_pulse
         frame()
         time.sleep(0.01)
         dlg._calibration_tick()
-    assert dlg._cal is None and "Calibrated with 5 spots" in dlg.cal_status.text(), dlg.cal_status.text()
+    assert dlg._cal is None and "Calibrated with 13 spots" in dlg.cal_status.text(), dlg.cal_status.text()
     assert dlg.calibration.on_value == 0 and dlg.swap.isChecked()
     assert np.allclose(dlg.calibration.to_field, rig.cal.to_field, atol=0.01)
 
@@ -921,7 +950,7 @@ def test_the_calibration_finds_a_field_larger_than_the_picture(qapp, monkeypatch
         dlg._calibration_tick()
     dlg.wait()
     text = dlg.cal_status.text()
-    assert dlg._cal is None and "Calibrated with 5 spots" in text, text      # the centre, then a closer ring of 4
+    assert dlg._cal is None and "Calibrated with 13 spots" in text, text     # the centre, a closer ring of 4, the check
     assert np.allclose(dlg.calibration.to_field, OVERFILLED, atol=0.002)
     assert "Check: 8 of 8 spots found" in text and dlg.calibration.check_errors_px().max() < 2.0
     assert not (sdk.image == 255).any()
@@ -1020,3 +1049,107 @@ def test_a_plain_click_or_next_after_several_chosen_lights_that_step_alone(qapp,
     assert x1 - x0 < 1.2 * rig.w or y1 - y0 < 1.2 * rig.h
     dlg.release()
     assert dlg.wait() and not dlg.outline_items                                  # let go: nothing drawn
+
+
+def test_the_field_s_frame_moved_turned_or_mirrored_moves_the_map_with_it():
+    cal = SimRig(255).cal                                                        # turned round and mirrored
+    frame = patterns.frame_of(cal)
+    u, v = np.array([0.0, 1.0, 0.3, 0.5]), np.array([0.0, 0.2, 1.0, 0.5])
+    x0, y0 = cal.camera_of(u, v)
+    assert np.allclose(patterns.moved(cal.to_field, frame, frame), cal.to_field)
+    cx, cy, angle, w, h = frame
+    assert (cx, cy) == pytest.approx(tuple(float(a[0]) for a in cal.camera_of(np.array([0.5]), np.array([0.5]))))
+    shifted = patterns.Calibration(to_field=patterns.moved(cal.to_field, frame, (cx + 7, cy - 3, angle, w, h)))
+    x, y = shifted.camera_of(u, v)
+    assert np.allclose(x, x0 + 7) and np.allclose(y, y0 - 3)                    # every point moved with it
+    turned = patterns.Calibration(to_field=patterns.moved(cal.to_field, frame, (cx, cy, angle + 90, w, h)))
+    x, y = turned.camera_of(u, v)
+    assert np.allclose(x - cx, -(y0 - cy)) and np.allclose(y - cy, x0 - cx)     # a quarter turn about the centre
+    larger = patterns.Calibration(to_field=patterns.moved(cal.to_field, frame, (cx, cy, angle, 2 * w, 2 * h)))
+    assert larger.field_area_px() == pytest.approx(4 * cal.field_area_px())
+    across = patterns.flipped(cal.to_field, frame, across=True)
+    x, y = patterns.Calibration(to_field=across).camera_of(1 - u, v)
+    assert np.allclose(x, x0) and np.allclose(y, y0)                             # left for right
+    assert np.allclose(patterns.flipped(across, frame, across=True), cal.to_field)
+    down = patterns.Calibration(to_field=patterns.flipped(cal.to_field, frame, across=False))
+    x, y = down.camera_of(u, 1 - v)
+    assert np.allclose(x, x0) and np.allclose(y, y0)                             # top for bottom
+    # no map yet: the field unturned in the middle of the picture, as large as fits
+    guess = patterns.Calibration(to_field=patterns.guessed((200, 160)))
+    x, y = guess.camera_of(np.array([0.0, 1.0, 0.5]), np.array([0.0, 1.0, 0.5]))
+    assert (x[2], y[2]) == pytest.approx((100, 80)) and x[1] - x[0] == pytest.approx(200)
+    assert (y[1] - y[0]) / (x[1] - x[0]) == pytest.approx(patterns.FIELD_H / patterns.FIELD_W)
+
+
+def test_the_alignment_target_shows_which_way_round_the_field_lies():
+    t = patterns.alignment_target()
+    lit = lambda u, v: t.covers(u, v)                                            # noqa: E731
+    assert lit(0.62, 0.5) and not lit(0.38, 0.5)                                 # the long arm along u, not back
+    assert lit(0.5, 0.40) and not lit(0.5, 0.60)                                 # the short arm up, not down
+    assert not lit(0.5, 0.30) and lit(0.66, 0.5)                                 # one arm longer than the other
+    assert lit(0.001, 0.5) and lit(0.5, 0.999) and lit(0.15, 0.15) and lit(0.85, 0.85)   # the edge and spots
+    m = t.mirrors()
+    assert 0.02 < m.mean() < 0.15                                                # a target, not a full field
+
+
+def test_the_field_placed_by_hand_is_dragged_onto_the_target_kept_or_put_back(qapp, tmp_path):
+    from clampwise.app.screens import polygon_panel
+
+    sdk, rig = FakeSDK(), SimRig(255)
+    panel = _panel_with_scale(tmp_path)
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
+    dlg.take()
+    assert dlg.wait()
+    frame = patterns.frame_of(rig.cal)
+    cx, cy, angle, w, h = frame
+    off = patterns.moved(rig.cal.to_field, frame, (cx + 12, cy, angle, w, h))   # moved since: 12 px to the right
+    old = patterns.Calibration(255, True, off, (rig.w, rig.h), 0.2, dlg._objective(), [[1, 1, 1, 1]], 0.5,
+                               "2026-10-01 09:00")
+    dlg.calibrations.keep(old)
+    dlg._use_objective()
+    assert dlg.adjust() and dlg.wait()
+    assert dlg._lit == {"alignment target"} and (sdk.image == 255).sum() == dlg._target.mirrors().sum()
+    assert "not kept yet" in dlg.cal_ready.text() and dlg.calibrations.maps[dlg._objective()] is old
+    assert any(isinstance(i, pg_curve()) for i in dlg.outline_items)             # the target drawn through the map
+    roi = dlg._adjust["roi"]
+    assert roi.parentItem() is panel.box.childGroup and dlg._roi_frame() == pytest.approx(dlg._adjust["frame"])
+    roi.setPos(roi.pos() + pg_point(-12, 0))                                     # dragged back onto the lit target
+    assert np.allclose(dlg.calibration.to_field, rig.cal.to_field, atol=1e-9)
+    dlg.end_adjust(keep=True)
+    assert dlg.wait() and not (sdk.image == 255).any() and roi.parentItem() is None
+    kept = dlg.calibrations.maps[dlg._objective()]
+    assert kept is dlg.calibration and kept.by_hand and not kept.check and kept.measured != old.measured
+    assert "Placed by hand at 40x" in dlg.cal_ready.text() and "Placed by hand" in dlg._cal_text()
+    assert patterns.Calibration.from_dict(kept.to_dict()).by_hand                # kept between sessions
+    # the buttons: a nudge, a turn and a mirror, then Cancel puts back the map in use
+    assert dlg.adjust()
+    dlg.nudge(dx=dlg.nudge_step(), turn=polygon_panel.NUDGE_DEG, grow=1 + polygon_panel.NUDGE)
+    dlg.flip(across=True)
+    assert not np.allclose(dlg.calibration.to_field, kept.to_field)
+    dlg.adjust_from_start()
+    assert np.allclose(dlg.calibration.to_field, kept.to_field)
+    dlg.nudge(dy=5)
+    dlg.end_adjust(keep=False)
+    assert dlg.calibration is kept and np.allclose(kept.to_field, rig.cal.to_field, atol=1e-9)
+    # another objective, never calibrated: placing starts from a guess in the middle of the picture
+    panel.magnification = 10.0
+    dlg._use_objective()
+    assert not dlg.calibration.ready and dlg.adjust() and dlg.calibration.ready
+    assert dlg._roi_frame()[:2] == pytest.approx((rig.w / 2, rig.h / 2))
+    panel.magnification = 40.0
+    dlg._use_objective()                                                         # the objective changed: not kept
+    assert dlg._adjust is None and dlg.calibration is kept and "10x, adapter 1x" not in dlg.calibrations.maps
+    dlg.release()
+    assert dlg.wait()
+
+
+def pg_curve():
+    import pyqtgraph as pg
+
+    return pg.PlotCurveItem
+
+
+def pg_point(x, y):
+    from pyqtgraph.Qt import QtCore
+
+    return QtCore.QPointF(x, y)

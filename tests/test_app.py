@@ -779,6 +779,13 @@ def test_live_uses_the_camera_itself_on_request(qapp, window, tmp_path):
     assert p._cal["plan"][0][0] == "expose" and not panel._thread.follow_paused  # the exposure set first, then held
     win.stop.click()
     assert p.wait() and p._cal is None and "Stopped" in win.doing.text() and win.outcome.objectName() == "badge_bad"
+    win.place.click()                                                            # or the field placed by hand
+    assert p.wait() and p._adjust is not None and win.keep.isEnabled() and not win.start.isEnabled()
+    assert "Mirrors ON: alignment target" in p.state.text() and "not kept yet" in p.cal_ready.text()
+    win.hand_buttons[1].click()                                                  # a nudge to the right
+    win.keep.click()
+    assert p.wait() and p._adjust is None and "Placed by hand at 20x" in p.cal_ready.text()
+    assert "Mirrors off" in p.state.text() and not win.keep.isEnabled()
     win.close()
     live.held_buttons["light"].click()                                           # Let go from the section's header
     assert not light.own and live.patterned.wait() and not live.patterned.polygon.connected
