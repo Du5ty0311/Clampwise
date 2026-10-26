@@ -193,17 +193,19 @@ class Polygon:
         return False
 
     def run_sequence(self, masks: list[np.ndarray], on_value: int = 255, shown_us: int = 50_000,
-                     edge: int = EDGE_RISE, delay_us: int = 0, bit_depth: int = 1) -> bool:
+                     edge: int = EDGE_RISE, delay_us: int = 0, bit_depth: int = 1,
+                     trigger: int = TRIGGER_EXTERNAL) -> bool:
         """The steps loaded into the Polygon and stepped by its own trigger: each TTL at Trig In shows the next
         (after ``delay_us``) for ``shown_us``, so pulse 1 of a sweep can light one region and pulse 2 another,
-        timed by the protocol's digital output, not by this PC. ``bit_depth`` 1: each mirror on or off."""
+        timed by the protocol's digital output, not by this PC. ``bit_depth`` 1: each mirror on or off.
+        ``trigger`` TRIGGER_AUTO: each shown for ``shown_us`` then the next, with no trigger (a check)."""
         if not self.connected:
             self.status = "not connected"
             return False
         lib = self._lib
         r = lib.MTPLG_SetDevDisplayMode(self.index, DISPLAY_SEQUENCE)
         if r == 0:
-            r = lib.MTPLG_SetDevPtnSetting(self.index, PatternSetting(bit_depth, len(masks), 0, TRIGGER_EXTERNAL,
+            r = lib.MTPLG_SetDevPtnSetting(self.index, PatternSetting(bit_depth, len(masks), 0, int(trigger),
                                                                       int(delay_us), 0, int(shown_us), 0, int(edge)))
         images = [packed(patterns.image(m, on_value)) for m in masks]          # kept until the SDK has them
         for k, img in enumerate(images):

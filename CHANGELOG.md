@@ -15,6 +15,13 @@
   fitted to all the others, so no spot passes by having been part of the fit. A spot found far further off than
   the rest (one cut by the picture's edge, or a speck beside it) is left out, and the result says so. At the rig
   (20x), this brought the check from 5.7–7.2 um to 2.3 um.
+- **Step on each trigger was checked on the Polygon itself.** Two patterns were loaded into it and set to step on
+  their own every 0.5 s, and the camera saw them alternate every 0.5 s: patterns are stored in the device, the shown
+  time is in microseconds, and the first pattern is shown as soon as they are loaded. Once stored, each TTL at the
+  Polygon's Trig In shows the next one with no PC in the way (Mightex gives 50 us from the pulse). On the rig no
+  Digidata digital output reaches Trig In yet: a BNC from one to it is needed, and a digital pulse in the protocol
+  shortly before each LED pulse. `tools/rigtest/polygon_trigger_timing.py` finds which output is wired (`--find`)
+  and measures how soon after the pulse the new pattern takes the light (`--timing`).
 
 ## 1.8.0 — 2026-10-23
 
