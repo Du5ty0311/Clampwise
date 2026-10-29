@@ -321,6 +321,10 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     dlg.take()                                                                    # found on its own thread
     assert dlg._opening and dlg.wait() and dlg.polygon.connected and not dlg._opening
     assert dlg.led == "auto"                                                      # found out: on all the time
+    hand = patterns.Calibration(to_field=[[0.001, 0.0, 0.0], [0.0, 0.001, 0.0]], camera_size=(rig.w, rig.h),
+                                objective=dlg._objective(), by_hand=True)        # placed by hand before
+    dlg.calibrations.keep(hand)
+    dlg._use_objective()
     dlg.calibrate()
     for _ in range(200):
         if dlg._cal is None:
@@ -357,6 +361,8 @@ def test_the_light_test_finds_which_byte_lights_and_the_calibration_where_the_fi
     assert "Check: 8 of 8 spots found" in dlg.cal_status.text() and len(dlg.calibration.check) == 13
     assert dlg.calibration.check_errors_px().max() < 2.0
     assert dlg.calibration.measured and "measured today at" in dlg._cal_text()  # when: the map holds until moved
+    assert dlg.calibrations.maps[dlg._objective()] is dlg.calibration and not dlg.calibration.by_hand
+    assert dlg._cal_text().startswith("Calibrated at") and hand.by_hand          # fitted, the one by hand untouched
     dlg.release()
     assert dlg.wait() and ("uninit",) in sdk.calls
     assert not (sdk.image == on).any()                                           # let go with nothing lit
@@ -860,6 +866,74 @@ def test_another_objective_uses_its_own_calibration_or_says_why_not(qapp, tmp_pa
     dlg.add_shape("ellipse")
     dlg.make_steps()
     assert not dlg.steps and "calibrate with this objective" in dlg.pattern_note.text()
+
+
+def test_the_calibrations_kept_are_read_again_at_the_next_start(qapp, tmp_path):
+    # the camera's panel is not placed in the window when the light's is made: the window is found through it
+    from types import SimpleNamespace
+
+    from pyqtgraph.Qt import QtCore
+
+    from clampwise.app.screens import polygon_panel
+
+    kept = QtCore.QSettings(str(tmp_path / "kept.ini"), QtCore.QSettings.IniFormat)
+    main = SimpleNamespace(persist=True, _settings=lambda: kept, say=lambda *_: None)
+    rig = SimRig(255)
+
+    def start(mag):
+        panel = _panel_with_scale(tmp_path, mag=mag)
+        panel.window = main
+        assert panel.parentWidget() is None
+        return polygon_panel.PolygonPanel(panel, make=lambda: Polygon(FakeSDK(), polyscan_running=lambda: False))
+
+    for mag in (10.0, 20.0):                                                     # one session each
+        dlg = start(mag)
+        dlg.calibrations.keep(patterns.Calibration(255, True, rig.cal.to_field, (rig.w, rig.h), 0.1,
+                                                   dlg._objective()))
+        dlg.save()
+    again = start(20.0)                                                          # the next start
+    assert again.calibration.ready and "Calibrated at 20x" in again.cal_status.text()
+    assert sorted(again.calibrations.maps) == ["10x, adapter 1x", "20x, adapter 1x"]   # the first one not lost
+
+
+def test_a_calibration_saved_is_called_back_for_its_own_objective(qapp, tmp_path, monkeypatch):
+    from clampwise.app.screens import light_calibration, polygon_panel
+
+    monkeypatch.setattr(polygon_panel, "saved_folder", lambda: tmp_path / "saved")
+    monkeypatch.setattr(light_calibration, "saved_folder", lambda: tmp_path / "saved")
+    rig = SimRig(255)
+    panel = _panel_with_scale(tmp_path, mag=20.0)
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(FakeSDK(), polyscan_running=lambda: False))
+    assert dlg.save_calibration() is None                                        # nothing to save yet
+    for mag, when in ((20.0, "2026-10-26 15:49"), (40.0, "2026-10-29 16:02")):
+        panel.magnification = mag
+        dlg._use_objective()
+        dlg.calibrations.keep(patterns.Calibration(255, True, rig.cal.to_field, (rig.w, rig.h), 0.1,
+                                                   dlg._objective(), measured=when))
+        dlg._use_objective()
+        path = dlg.save_calibration()
+        assert path.name == f"{mag:g}x adapter 1x {when.replace(':', '')}.json"
+    assert dlg.save_calibration().name.endswith("(2).json")                      # saved again: a file of its own
+    # a later start that has lost them all, at 20x: the 20x one listed first and called back
+    panel.magnification = 20.0
+    again = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(FakeSDK(), polyscan_running=lambda: False))
+    assert not again.calibration.ready
+    win = light_calibration.CalibrationWindow(again)
+    win.fill_saved()
+    assert win.saved.count() == 3 and win.saved.itemText(0).startswith("20x, adapter 1x: 2026-10-26 15:49")
+    win.refresh()
+    assert win.use.isEnabled() and not win.save_now.isEnabled()
+    win._use_saved()
+    assert again.calibration.ready and again.calibration.measured == "2026-10-26 15:49"
+    assert "Calibrated at 20x" in again.cal_status.text() and win.save_now.isEnabled()
+    forty = next(p for p, c in again.saved_calibrations() if c.objective.startswith("40x"))
+    assert again.use_saved(forty) and again.calibration.measured == "2026-10-26 15:49"   # kept for 40x, not used
+    panel.magnification = 40.0
+    again._use_objective()
+    assert again.calibration.measured == "2026-10-29 16:02"
+    (tmp_path / "saved" / "broken.json").write_text("{", encoding="utf-8")
+    assert len(again.saved_calibrations()) == 3 and not again.use_saved(tmp_path / "saved" / "broken.json")
+    win.close()
 
 
 def test_a_recording_s_end_leaves_nothing_lit(qapp, tmp_path):

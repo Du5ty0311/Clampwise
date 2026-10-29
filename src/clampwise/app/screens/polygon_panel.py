@@ -24,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures
 import dataclasses
 import json
+import os
 import time
 from pathlib import Path
 
@@ -51,6 +52,11 @@ LIT = (90, 170, 255)           # the steps the patterned light shows now (lit wh
 TARGET = (255, 140, 0)         # placing the field by hand: its frame, and the target where the map puts it
 NUDGE = 0.0025                 # placing by hand, a button's step: this much of the picture's width (moved, sized)
 NUDGE_DEG = 0.25               # (turned)
+
+
+def saved_folder() -> Path:
+    """Where calibrations saved by hand are kept, a file each: ``%LOCALAPPDATA%\\Clampwise\\polygon calibrations``."""
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Clampwise" / "polygon calibrations"
 
 
 def _pct(value: float = 50.0, low: float = 0.0, high: float = 100.0, step: float = 1.0, suffix: str = " %"):
@@ -1351,6 +1357,8 @@ class PolygonPanel(QtWidgets.QWidget):
         cam = np.array([p for p, _ in c["spots"]])
         uv = np.array([q for _, q in c["spots"]])
         to_field, residual = patterns.fit_affine(cam, uv)
+        # a new map, not the kept one changed (kept only when the run ends), and fitted: not placed by hand
+        self.calibration = dataclasses.replace(self.calibration, by_hand=False)
         self.calibration.to_field = to_field
         self.calibration.residual_px = residual
         self.calibration.camera_size = self._frame_size()
@@ -1461,6 +1469,8 @@ class PolygonPanel(QtWidgets.QWidget):
             self.save()
             if self.calibration.ready and self.source.currentText() == "Grid" and self.grid_on_picture.isChecked():
                 self.make_steps()                     # the grid laid over the picture now that it can be
+        else:                                         # not finished: the map kept for this objective stays in use
+            self.calibration = self.calibrations.at(self._objective())
         self.draw_outlines()
         self._said()
         self.show_state()
@@ -1652,8 +1662,14 @@ class PolygonPanel(QtWidgets.QWidget):
         self.draw_outlines()
         self.show_state()
 
+    def _main(self):
+        """The Clampwise window, which keeps the settings. The camera's panel names it: at start it is not placed in
+        the window yet, so its parents do not lead there (the calibrations kept were then never read)."""
+        main = getattr(self.panel, "window", None)
+        return main if hasattr(main, "persist") else widgets._main_window(self.panel)
+
     def load(self) -> None:
-        main = widgets._main_window(self.panel)
+        main = self._main()
         if main is not None and getattr(main, "persist", False):
             try:
                 self.calibrations = patterns.Calibrations.from_dict(json.loads(str(main._settings().value(
@@ -1677,10 +1693,78 @@ class PolygonPanel(QtWidgets.QWidget):
             self.project()
 
     def save(self) -> None:
-        main = widgets._main_window(self.panel)
+        main = self._main()
         if main is not None and getattr(main, "persist", False):
             main._settings().setValue("polygon/calibration", json.dumps(self.calibrations.to_dict()))
             main._settings().setValue("polygon/led", self.led)
+
+    # ---------------------------------------------------------------- calibrations saved, to call back
+    def save_calibration(self) -> Path | None:
+        """The calibration in use written to a file of its own in ``saved_folder()``, named by its objective and
+        when it was measured, to be called back later for that objective (``use_saved``). None when there is none."""
+        c = self.calibration
+        if not c.ready:
+            self.panel.window.say(f"Nothing to save: not calibrated at {self._objective() or 'this objective'}.")
+            return None
+        folder = saved_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = " ".join(f"{c.objective or 'objective not noted'} {c.measured or time.strftime('%Y-%m-%d %H:%M')}"
+                        .replace(",", "").replace(":", "").split())
+        path, k = folder / f"{stem}.json", 2
+        while path.exists():
+            path, k = folder / f"{stem} ({k}).json", k + 1
+        path.write_text(json.dumps(c.to_dict(), indent=1), encoding="utf-8")
+        self.panel.window.say(f"Calibration saved: {path}")
+        return path
+
+    def saved_calibrations(self) -> list[tuple[Path, patterns.Calibration]]:
+        """Every calibration saved, the objective in use's first, then the newest first."""
+        out = []
+        for path in saved_folder().glob("*.json"):
+            try:
+                c = patterns.Calibration.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+            if c.ready:
+                out.append((path, c))
+        out.sort(key=lambda pc: pc[1].measured, reverse=True)
+        out.sort(key=lambda pc: pc[1].objective != self._objective())
+        return out
+
+    @staticmethod
+    def saved_words(c: patterns.Calibration) -> str:
+        how = "placed by hand" if c.by_hand else "calibrated"
+        if c.check and c.um_per_px:
+            how += f", within {float(c.check_errors_px().max() * c.um_per_px):.1f} um"
+        return f"{c.objective or 'objective not noted'}: {c.measured or 'when not noted'}, {how}"
+
+    def use_saved(self, path: Path) -> bool:
+        """A saved calibration called back: kept again for its objective, and in use now when that is the objective
+        in use."""
+        try:
+            c = patterns.Calibration.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            self.panel.window.say(f"That calibration could not be read: {e}")
+            return False
+        if not c.ready or self._cal is not None or self._adjust is not None:
+            self.panel.window.say("Not called back: " + ("the file holds no calibration." if not c.ready else
+                                                          "a calibration or placing by hand is under way."))
+            return False
+        self.calibrations.keep(c)
+        self.save()
+        here = c.objective == self._objective()
+        if here:
+            self.calibration = self.calibrations.at(self._objective())
+            if self.source.currentText() == "Grid" and self.grid_on_picture.isChecked():
+                self.make_steps()
+            elif self.drawn:
+                self._drawn_moved()
+        self.cal_status.setText(self._cal_text())
+        self.draw_outlines()
+        self.show_state()
+        self.panel.window.say(f"Calibration called back for {c.objective}" + ("." if here else
+                              f" (in use when the objective is {c.objective}; now it is {self._objective()})."))
+        return True
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

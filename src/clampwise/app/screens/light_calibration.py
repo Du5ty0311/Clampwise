@@ -5,11 +5,11 @@ rig.patterns its geometry)."""
 
 from __future__ import annotations
 
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from .. import theme, widgets
 from ..widgets import box, label
-from .polygon_panel import LED_MODES, NUDGE, NUDGE_DEG, PolygonPanel
+from .polygon_panel import LED_MODES, NUDGE, NUDGE_DEG, PolygonPanel, saved_folder
 
 
 class CalibrationWindow(QtWidgets.QDialog):
@@ -32,6 +32,24 @@ class CalibrationWindow(QtWidgets.QDialog):
         lay.addWidget(label("Where the mirrors' field lies on the camera's picture, so regions drawn on the picture "
                             "land on the slice where they are drawn. Once for each objective; again whenever the "
                             "camera or the patterned light is moved.", "muted", wrap=True))
+        lay.addWidget(label("Saved calibrations", "section"))
+        lay.addWidget(label("Save a good calibration to call it back later for its objective (20x, 40x, 63x...), "
+                            "while neither the camera nor the patterned light has moved since.", "muted", wrap=True))
+        self.saved = QtWidgets.QComboBox()
+        self.saved.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        lay.addWidget(self.saved)
+        saved = box("h", "s")
+        self.use = widgets.button("Use this one", self._use_saved, "Call back the calibration chosen: kept again "
+                                  "for its objective, and in use now when that is the objective in use")
+        self.save_now = widgets.button("Save the one in use", self._save, "Save the calibration in use at this "
+                                       "objective to a file of its own", quiet=True)
+        self.folder = widgets.button("Folder", lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(
+            str(saved_folder()))), "Open the folder the calibrations are saved in", quiet=True)
+        for b in (self.use, self.save_now, self.folder):
+            saved.addWidget(b)
+        saved.addStretch(1)
+        lay.addLayout(saved)
+        lay.addWidget(label("Or calibrate", "section"))
         self.needs = widgets.Badge("muted", "")
         self.needs.setWordWrap(True)
         lay.addWidget(self.needs)
@@ -140,7 +158,30 @@ class CalibrationWindow(QtWidgets.QDialog):
         self.led.setCurrentIndex(max(0, self.led.findData(self.light.led)))
         self.led.blockSignals(False)
         self.led_help.setText(self.HELP[self.light.led])
+        self.fill_saved()
         self._timer.start()
+
+    def fill_saved(self, chosen=None) -> None:
+        """The calibrations saved, the objective in use's first (``chosen``, a file, picked)."""
+        self.saved.clear()
+        for path, c in self.light.saved_calibrations():
+            self.saved.addItem(self.light.saved_words(c), str(path))
+        if not self.saved.count():
+            self.saved.addItem("None saved yet", None)
+        if chosen is not None:
+            self.saved.setCurrentIndex(max(0, self.saved.findData(str(chosen))))
+
+    def _save(self) -> None:
+        path = self.light.save_calibration()
+        if path is not None:
+            self.fill_saved(path)
+        self.refresh()
+
+    def _use_saved(self) -> None:
+        path = self.saved.currentData()
+        if path and self.light.use_saved(path):
+            self._ran = True                          # its outcome said, as after a calibration
+        self.refresh()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
@@ -207,6 +248,8 @@ class CalibrationWindow(QtWidgets.QDialog):
             b.setEnabled(placing)
         self.stop.setEnabled(running)
         self.led.setEnabled(not running)
+        self.use.setEnabled(not running and not placing and self.saved.currentData() is not None)
+        self.save_now.setEnabled(not running and not placing and p.calibration.ready)
         done, total = p.calibration_progress()
         self.bar.setVisible(running)
         if running:

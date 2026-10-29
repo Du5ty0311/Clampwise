@@ -2,6 +2,21 @@
 
 ## 1.8.1 — not released yet
 
+- **Patterned-light calibrations can be saved and called back for each objective.** Calibrate... starts with
+  **Saved calibrations**. **Save the one in use** writes the calibration to a file of its own, named by its objective
+  and when it was measured, in `%LOCALAPPDATA%\Clampwise\polygon calibrations`. Pick one from the list (the
+  objective in use's first, each with its date and how close its check came) and **Use this one**: it is kept again
+  for its objective, and used at once when that is the objective in use. No camera or light is needed to call one
+  back. A saved calibration holds only while neither the camera nor the patterned light has moved since.
+
+- **The patterned light's calibration is there again after a restart.** It was saved, but at start Clampwise looked
+  for it before the camera's panel was in the window, found nowhere to read it from, and said "Not calibrated". The
+  next calibration then saved over the ones kept for other objectives. Now each objective's calibration is read at
+  start and kept until it is measured again.
+
+- **A calibration made after placing the field by hand is called a calibration.** It kept the "Placed by hand"
+  label. A calibration stopped before it finishes now leaves the one kept in use, unchanged.
+
 - **Acquisition shows everything a protocol sends.** The protocol was drawn as one output only, the one Clampex
   calls active. In the photostim protocols that is the LED's, so the current step injected on the amplifier's
   command never showed. Now every output a protocol changes is drawn: the amplifier's command in its present unit,
