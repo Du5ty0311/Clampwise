@@ -18,6 +18,7 @@ from ..widgets import box, label
 
 KEEP = 8                                     # sweeps drawn at once, the newest strongest
 GAP_FREE_SHOWN_S = 2.0
+LEFT_AXIS_PX = 64                            # each plot's left axis: its label and numbers
 
 
 
@@ -44,7 +45,10 @@ class AcquisitionPanel(QtWidgets.QWidget):
         self._drawn = -1                     # the last sweep drawn
         lay = box("v", "xs")
         self.scope = pg.GraphicsLayoutWidget()
-        self.plots: list[pg.PlotItem] = []
+        self.plots: list[pg.PlotItem] = []          # the inputs recorded, one a plot
+        self.sent_plots: list[pg.PlotItem] = []     # under them, what the protocol sends: every output it changes
+        self._sent: list[acquire.Sent] = []
+        self._sent_sweep = -1                        # the sweep whose outputs are drawn
         from .membrane_test_panel import MembraneTestView
 
         self.test_view = MembraneTestView(window.palette)
@@ -402,16 +406,24 @@ class AcquisitionPanel(QtWidgets.QWidget):
         return pr
 
     def _inputs_of(self, path: str) -> list:
+        """The protocol's inputs, as recorded; what it sends kept for drawing under them."""
+        self._sent = []
         try:
             pr = self._protocol_now(path)
             self._n_sweeps = pr.sweeps if pr.mode != acquire.GAP_FREE else 0
             self._span = (pr.per_episode // max(1, len(pr.ai))) * pr.interval_us * 1e-6 if self._n_sweeps else None
-            return acquire.inputs(pr)
+            got = acquire.inputs(pr)
         except Exception:
             return []
+        try:
+            self._sent = acquire.sent(pr)
+        except Exception:                                # the inputs still drawn
+            self._sent = []
+        return got
 
     def _preview(self) -> None:
-        """The chosen protocol drawn before it is played: every sweep's command, in the amplifier's present unit."""
+        """The chosen protocol drawn before it is played: every sweep of everything it sends (the amplifier's command
+        in its present unit, a light, any other output it changes, its digital outputs)."""
         if self.busy or self.test.running:
             return
         self.stack.setCurrentWidget(self.scope)
@@ -428,23 +440,21 @@ class AcquisitionPanel(QtWidgets.QWidget):
                 self.note.setText(f"<b>{name}</b>: gap-free, every input recorded without a break. Play draws "
                                   "them as they come (nothing kept); Record also keeps them.")
                 return
-            out, _ = acquire.waveforms(pr)
+            self._sent = acquire.sent(pr)
         except Exception as exc:
             self._setup_plots([])
             self.note.setText(f"<b>{name}</b>: not drawn ({exc}). Play still plays it.")
             return
-        d = pr.active_dac if 0 <= pr.active_dac < out.shape[1] else 0
-        unit = pr.dac_units[d] if d < len(pr.dac_units) else ""
-        self._setup_plots([("Command", unit, 1.0)])
+        self._setup_plots([], self._sent)
         fs = 1e6 / pr.interval_us
-        t = np.arange(out.shape[2]) / fs
-        colour = theme.series(self.window.palette)[1]
-        for k in range(out.shape[0]):
-            self.plots[0].plot(t, out[k, d], pen=pg.mkPen(colour, width=1))
-        self.plots[0].setXRange(0, t[-1] if t.size else 1.0, padding=0.01)
-        self.note.setText(f"<b>{name}</b>, as it will play: {pr.sweeps} sweep(s) of {t.size / fs:.2f} s, one every "
-                          f"{pr.start_to_start_s:g} s. <b>Play</b> draws the cell's response as it is recorded "
-                          "(nothing kept); <b>Record</b> also keeps it.")
+        n = self._sent[0].values.shape[-1] if self._sent else 0
+        self._draw_sent(range(pr.sweeps), fs)
+        for p in self.sent_plots:
+            p.setXRange(0, n / fs if n else 1.0, padding=0.01)
+        self.note.setText(f"<b>{name}</b>, as it will play: {pr.sweeps} sweep(s) of {n / fs:.2f} s, one every "
+                          f"{pr.start_to_start_s:g} s; sends " + ", ".join(self._sent_label(o) for o in self._sent) +
+                          ". <b>Play</b> draws the cell's response as it is recorded, over what is sent (nothing "
+                          "kept); <b>Record</b> also keeps it.")
 
     def _say_run(self, st) -> None:
         """Above the scope, what it is showing or waiting for."""
@@ -478,26 +488,67 @@ class AcquisitionPanel(QtWidgets.QWidget):
             text = ""
         self.note.setText(text)
 
-    def _setup_plots(self, inputs) -> None:
+    @staticmethod
+    def _sent_label(o: "acquire.Sent") -> str:
+        if o.bits:
+            return "digital output" + ("s " if len(o.bits) > 1 else " ") + ", ".join(map(str, o.bits))
+        return f"{o.name} ({o.unit})" if o.unit else o.name
+
+    def _setup_plots(self, inputs, sent=None) -> None:
+        """A plot for each input recorded and, under them and smaller, one for each output the protocol sends
+        (``sent``: by default the protocol's, kept by ``_inputs_of``), all on one time axis."""
+        sent = self._sent if sent is None else sent
         self.scope.clear()
-        self.plots = []
+        self.plots, self.sent_plots, self._sent_sweep = [], [], -1
         self._plot_inputs = [(name, unit) for name, unit, _ in inputs]
         pal = self.window.palette
         self.scope.setBackground(pal.plot_background)
-        for k, (name, unit, _) in enumerate(inputs):
+        rows = [(name, unit, False) for name, unit, _ in inputs] + [(o, None, True) for o in sent]
+        for k, (name, unit, is_sent) in enumerate(rows):
             p = self.scope.addPlot(row=k, col=0)
-            p.getAxis("left").setLabel(f"{name} ({unit})")
+            self.scope.ci.layout.setRowStretchFactor(k, 1 if is_sent else 3)
+            if is_sent and name.bits:
+                p.getAxis("left").setLabel("Digital out")
+                p.getAxis("left").setTicks([[(1.2 * r + 0.4, str(b)) for r, b in enumerate(name.bits)], []])
+                p.setYRange(-0.2, 1.2 * len(name.bits), padding=0)
+            elif is_sent:
+                p.getAxis("left").setLabel(self._sent_label(name))
+            else:
+                p.getAxis("left").setLabel(f"{name} ({unit})")
             # each pixel column drawn from its samples' minimum and maximum, so no spike or transient is lost; a
             # 2 s gap-free view at 20 kHz drawn whole took 0.93 s a redraw (the rig PC), the scope a second behind
             p.setDownsampling(auto=True, mode="peak")
             p.setClipToView(True)
             p.getViewBox().setLimits(xMin=0)              # time never before the sweep's start, however zoomed
-            if k:
-                p.setXLink(self.plots[0])
-            if k == len(inputs) - 1:
+            p.getAxis("left").setWidth(LEFT_AXIS_PX)       # every plot's time lined up, whatever its numbers
+            first = (self.plots + self.sent_plots)[:1]
+            if first:
+                p.setXLink(first[0])
+            if k == len(rows) - 1:
                 p.setLabel("bottom", "Time (s)")
             theme.style_plot(p, pal)
-            self.plots.append(p)
+            (self.sent_plots if is_sent else self.plots).append(p)
+
+    def _draw_sent(self, sweeps, fs: float, faint_before: bool = False) -> None:
+        """What is sent in ``sweeps`` drawn in its plots, each output in its own colour (with ``faint_before``,
+        the last sweep strong and those before it faint)."""
+        series = theme.series(self.window.palette)
+        sweeps = list(sweeps)
+        for j, (o, p) in enumerate(zip(self._sent, self.sent_plots)):
+            p.clear()
+            t = np.arange(o.values.shape[-1]) / fs
+            for i, k in enumerate(sweeps):
+                if not 0 <= k < o.values.shape[0]:
+                    continue
+                colour = pg.mkColor(series[(len(self.plots) + j) % len(series)])
+                if faint_before and i < len(sweeps) - 1:
+                    colour.setAlphaF(0.25)
+                pen = pg.mkPen(colour, width=1)
+                if o.bits:
+                    for r in range(len(o.bits)):
+                        p.plot(t, 1.2 * r + o.values[k, r], pen=pen)
+                else:
+                    p.plot(t, o.values[k], pen=pen)
 
     def _draw(self, st) -> None:
         """Live, as it is recorded (not drawn after the sweep ends): the sweep
@@ -523,6 +574,10 @@ class AcquisitionPanel(QtWidgets.QWidget):
             sweeps = [self._kept[k] for k in sorted(self._kept)] + [self._read(st, now * st.step_frames, into)]
             self._drawn = now if into == st.sweep_frames else now - 1
             span = st.sweep_frames / st.rate_hz
+            sweep = getattr(st, "sweeps_done", 0) + now     # the protocol's sweep (a resumed run goes on from it)
+            if self.sent_plots and sweep != self._sent_sweep:
+                self._sent_sweep = sweep                   # what this sweep sends, whole: known before it plays
+                self._draw_sent(range(max(0, sweep - 1), sweep + 1), st.rate_hz, faint_before=True)
         else:
             count = min(size, int(GAP_FREE_SHOWN_S * st.rate_hz))
             sweeps = [self._read(st, size - count, count)] if count else []
@@ -587,5 +642,5 @@ class AcquisitionPanel(QtWidgets.QWidget):
     def on_theme(self, palette) -> None:
         self.test_view.on_theme(palette)
         self.scope.setBackground(palette.plot_background)
-        for p in self.plots:
+        for p in self.plots + self.sent_plots:
             theme.style_plot(p, palette)

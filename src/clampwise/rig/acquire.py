@@ -317,6 +317,51 @@ def inputs(protocol: Protocol) -> list[tuple[str, str, float]]:
     return out
 
 
+def output_names(protocol: Protocol) -> list[tuple[str, str]]:
+    """Each analog output's (name, unit) as the header says (pyabf gives only the first two's)."""
+    head = protocol.head
+    sb, ss, _ = _section(head, STRINGS)
+    blob = head[sb * BLOCK:sb * BLOCK + ss]
+    names = [s.decode("ascii", "replace") for s in blob[blob.rfind(b"\x00\x00"):].split(b"\x00")[1:]]
+    pick = (lambda k: names[k] if 0 <= k < len(names) else "")
+    out = [(f"OUT {d}", "") for d in range(N_AO)]
+    block, size, n = _section(head, DAC_SECTION)
+    for i in range(n):
+        at = block * BLOCK + size * i
+        num, = struct.unpack_from("<h", head, at)
+        name_i, unit_i = struct.unpack_from("<ii", head, at + 24)
+        if 0 <= num < N_AO:
+            out[num] = (pick(name_i) or f"OUT {num}", pick(unit_i))
+    return out
+
+
+@dataclass
+class Sent:
+    """One output a protocol plays: its name and unit, and each sweep's values, (sweeps, sweep frames) in the
+    protocol's units; or, for the digital outputs, (sweeps, bits used, sweep frames), each bit 0 or 1."""
+
+    name: str
+    unit: str
+    values: np.ndarray
+    bits: tuple[int, ...] = ()
+
+
+def sent(protocol: Protocol) -> list[Sent]:
+    """Everything the protocol sends: every analog output it changes (the amplifier's command, a light, any other),
+    then the digital outputs when it changes any. Nothing changed: the amplifier's command alone, held. Gap-free
+    protocols play no epochs: nothing."""
+    if protocol.mode == GAP_FREE:
+        return []
+    out, dig = waveforms(protocol)
+    names = output_names(protocol)
+    shown = [Sent(*names[d], out[:, d]) for d in range(N_AO) if (out[:, d] != out[0, d, 0]).any()]
+    used = tuple(b for b in range(16) if ((dig >> b) & 1).any() and not ((dig >> b) & 1).all())
+    if used:
+        bits = np.stack([(dig >> b) & 1 for b in used], axis=1).astype(float)
+        shown.append(Sent("Digital", "", bits, used))
+    return shown or [Sent(*names[0], out[:, 0])]
+
+
 def _blocks_after(head: bytes, block: int) -> int:
     """Blocks from ``block`` to the next section's (the room a section has to grow in place)."""
     starts = sorted(_section(head, i)[0] for i in range(18) if _section(head, i)[0] > block)

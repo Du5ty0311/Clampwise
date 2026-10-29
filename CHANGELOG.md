@@ -2,6 +2,13 @@
 
 ## 1.8.1 — not released yet
 
+- **Acquisition shows everything a protocol sends.** The protocol was drawn as one output only, the one Clampex
+  calls active. In the photostim protocols that is the LED's, so the current step injected on the amplifier's
+  command never showed. Now every output a protocol changes is drawn: the amplifier's command in its present unit,
+  the LED, any other analog output, and the digital outputs, each named and in its unit as the protocol has it.
+  Before a run they are drawn for every sweep. While it plays or records they sit, smaller, under the recorded
+  inputs on the same time axis, the sweep under way strong and the one before it faint.
+
 - **The patterned light's field can be placed by hand.** Under Calibrate..., **Place by hand** lights a target on
   the mirrors (the field's edge, a ring of spots, and an L at its centre whose arms show which way round the field
   lies) and draws the same target in orange where Clampwise puts it. Drag the orange frame on the camera's picture

@@ -959,15 +959,16 @@ def test_live_records_in_clampwise_on_request(qapp, window, tmp_path):
     panel.fill_protocols()
     assert panel.protocol.currentText() == "sim" and not panel.seconds.isVisibleTo(panel)   # episodic: no length
     # never a blank scope: the protocol drawn first
-    assert "sim" in panel.note.text() and "as it will play" in panel.note.text() and len(panel.plots) == 1
-    assert len(panel.plots[0].listDataItems()) == 2                       # each sweep's command
-    panel.plots[0].getViewBox().setXRange(-1.0, 1.0, padding=0)           # time never before the sweep's start
-    assert panel.plots[0].getViewBox().viewRange()[0][0] >= 0
+    assert "sim" in panel.note.text() and "as it will play" in panel.note.text() and len(panel.sent_plots) == 1
+    assert not panel.plots and len(panel.sent_plots[0].listDataItems()) == 2      # each sweep of what it sends
+    panel.sent_plots[0].getViewBox().setXRange(-1.0, 1.0, padding=0)      # time never before the sweep's start
+    assert panel.sent_plots[0].getViewBox().viewRange()[0][0] >= 0
     panel.set_folder(str(tmp_path / "data"))
     assert panel.play_button.isEnabled() and panel.record_button.isEnabled() and not panel.pause_button.isEnabled()
     panel.play()                                                          # Play: drawn and measured, nothing kept
     assert fakes[-1].started[3] is False and not panel.record_button.isEnabled() and panel.stop_button.isEnabled()
     assert "sweep 1" in panel.note.text() and len(panel.plots) == 2      # the inputs' axes at once, and what it does
+    assert len(panel.sent_plots) == 1                                     # what it sends, under them
     fakes[-1].finish(tmp_path / "data")
     assert _wait(qapp, lambda: panel.status.text().startswith("Played"))
     assert panel.note.text() == "Played: nothing kept."

@@ -82,3 +82,35 @@ def test_a_recording_is_written_as_clampex_writes_one_and_read_back(tmp_path):
     for k in range(3):                                                    # each sweep cut at its start
         assert np.array_equal(raw[k], samples[k * step:k * step + pr.sweep_frames])
     assert [round(e.level) for e in rec.epochs[1][1:4]] == [-70, -75, -70]
+
+
+def test_everything_a_protocol_sends_is_listed_not_only_its_active_output(tmp_path, monkeypatch):
+    import dataclasses
+    import glob
+    from pathlib import Path
+
+    from clampwise.rig import protocol_edit
+
+    pr = _protocol(tmp_path)
+    (cmd,) = acquire.sent(pr)                                       # the command's test step alone
+    assert cmd.values.shape == (4, pr.sweep_frames) and cmd.values.min() == pytest.approx(-75.0)
+    e = protocol_edit.load(pr.path)                                 # a light on output 1, as a photostim protocol
+    e.epochs[1] = [protocol_edit.Epoch(1, 0.0, 0.0, 1000), protocol_edit.Epoch(1, 5.0, 0.0, 100)]
+    e.enabled[1] = True
+    both = acquire.sent(protocol_edit.save(e, tmp_path / "with_light"))
+    assert [s.values.max() for s in both] == [pytest.approx(-70.0), pytest.approx(5.0)]
+    assert [s.name for s in both] == [acquire.output_names(pr)[0][0], acquire.output_names(pr)[1][0]]
+
+    out, dig = acquire.waveforms(pr)                                # digital outputs 0 and 3 pulsed, 5 always high
+    dig[:, 100:200] |= 0b1001
+    dig |= 0b100000
+    monkeypatch.setattr(acquire, "waveforms", lambda _: (out, dig))
+    digital = acquire.sent(pr)[-1]
+    assert digital.bits == (0, 3) and digital.values.shape == (4, 2, pr.sweep_frames)
+    assert digital.values[:, :, 150].tolist() == [[1.0, 1.0]] * 4 and digital.values[:, :, 50].max() == 0
+    monkeypatch.undo()
+    assert acquire.sent(dataclasses.replace(pr, mode=growing.GAP_FREE)) == []
+
+    for p in glob.glob(str(Path(acquire.protocols_folder()) / "*Photostim*.pro")):    # the rig's, when here
+        names = [s.name for s in acquire.sent(acquire.read_protocol(p))]
+        assert len(names) == 2 and names[0] != names[1], p           # the current step and the light
