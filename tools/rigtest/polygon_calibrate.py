@@ -84,7 +84,8 @@ def _main() -> int:
     if args.lowest_gain:
         cam.gain.setValue(cam.gain.minimum())         # a mirror sends back far more than a cell: no gain needed
         cam._exposure()
-    if args.exposure > 0:
+    if args.exposure > 0:                             # held as given: the calibration does not set its own then
+        cam.auto.setChecked(False)
         cam.exposure.setValue(args.exposure)
         cam._exposure()
     elif args.auto_exposure:                          # the exposure follows the light: every mirror on, settled

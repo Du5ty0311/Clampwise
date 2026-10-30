@@ -2,6 +2,22 @@
 
 ## 1.8.1 — not released yet
 
+- **Protocol buttons, as Clampex's sequencing keys.** A row of buttons under Acquisition's transport, set up with
+  **Buttons...**: each one gets a protocol, a name, and what pressing it does (Record, Play, or choose the protocol
+  only). Ctrl+1 to Ctrl+8 press them from the keyboard. A membrane test running is stopped first; a run going is
+  never interrupted.
+
+- **Two screens.** Live's **Views** menu has **Two screens**: the acquisition (the sweeps and the membrane test)
+  fills the other screen, the camera takes the room it leaves in Live. Kept, and set up again at the next start;
+  closing the acquisition's window puts it back.
+
+- **The camera catches light pulses.** A photostimulation pulse of a few ms mostly fell between two pictures, so
+  the camera seldom showed it. **Catch light pulses** (in the Camera section, off by default) sets the exposure to
+  fill each frame's time (15 ms at the camera's 62.5 frames a second), raises the gain when the picture is dark
+  between pulses, and looks at every frame, not only those drawn. The picture that caught a pulse stays on screen
+  for a second, where the light landed in colour, with a count. Checked at the rig with the 375/475 ms photostim
+  protocol: 22 of 22 pulses caught, none falsely, each on screen 4 to 19 ms after it fired, inside the region drawn.
+
 - **Patterned-light calibrations can be saved and called back for each objective.** Calibrate... starts with
   **Saved calibrations**. **Save the one in use** writes the calibration to a file of its own, named by its objective
   and when it was measured, in `%LOCALAPPDATA%\Clampwise\polygon calibrations`. Pick one from the list (the

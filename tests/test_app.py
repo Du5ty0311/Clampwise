@@ -934,6 +934,52 @@ class FakeRecorder:
         return self.status
 
 
+def test_protocol_buttons_each_run_their_own_protocol_as_sequencing_keys(qapp, window, tmp_path):
+    from clampwise.rig import growing
+    from clampwise.simulate.abf_file import membrane_test_file
+
+    window.show()
+    window.go("live")
+    live = window.screens["live"]
+    view, panel = live.views["acquisition"], live.recorder
+    (tmp_path / "protocols").mkdir()
+    head = membrane_test_file(tmp_path / "sim.abf", n_sweeps=2).read_bytes()
+    for name in ("IV", "Photostim"):
+        (tmp_path / "protocols" / f"{name}.pro").write_bytes(head[:growing._section(head, growing.DATA)[0] *
+                                                                  growing.BLOCK])
+    fakes = []
+    panel.make = lambda: fakes.append(FakeRecorder(tmp_path)) or fakes[-1]
+    view.source = None
+    live.use_acquisition()
+    panel._protocols_dir = str(tmp_path / "protocols")
+    panel.fill_protocols()
+    panel.set_folder(str(tmp_path / "data"))
+    assert "none yet" in panel.quick_bar.itemAt(0).widget().text()
+    panel.quick = [{"name": "Stim", "protocol": "Photostim", "action": "record"},
+                   {"name": "", "protocol": "IV", "action": "play"},
+                   {"name": "Gone", "protocol": "Deleted", "action": "play"},
+                   {"name": "Pick", "protocol": "IV", "action": "choose"}]
+    panel.fill_quick()
+    assert [b.text() for b in panel.quick_buttons] == ["Stim", "IV", "Gone", "Pick"]
+    assert "Ctrl+1" in panel.quick_buttons[0].toolTip()
+    panel.quick_buttons[1].click()                                       # Play IV
+    assert panel.protocol.currentText() == "IV" and fakes[-1].started[3] is False
+    panel.press(0)                                                       # a run is going: refused
+    assert len(fakes) == 1 and "Stop it first" in panel.status.text()
+    fakes[-1].finish(tmp_path / "data")
+    assert _wait(qapp, lambda: not panel.busy)
+    panel.press(0)                                                       # Record the photostim protocol
+    assert panel.protocol.currentText() == "Photostim" and fakes[-1].started[3] is True
+    fakes[-1].finish(tmp_path / "data")
+    assert _wait(qapp, lambda: not panel.busy)
+    panel.press(2)
+    assert "Deleted is not in" in panel.status.text() and len(fakes) == 2
+    panel.press(3)                                                       # chosen only, nothing run
+    assert panel.protocol.currentText() == "IV" and len(fakes) == 2
+    live.set_two_screens(True)                                           # the tests' one screen: stays in Live
+    assert not live.two_screens and not view.popped
+
+
 def test_live_records_in_clampwise_on_request(qapp, window, tmp_path):
     # acquisition in Clampwise without Clampex, as the camera is used without its own program
     from clampwise.rig import windows

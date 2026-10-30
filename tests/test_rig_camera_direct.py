@@ -258,6 +258,28 @@ def test_auto_exposure_in_the_dark_stops_at_a_second_and_says_so_instead_of_hang
     assert said and "Dark at 1000 ms" in said[-1][1] and "light" in said[-1][1]
 
 
+def test_a_light_pulse_lighting_a_small_region_is_caught_in_the_frame_that_saw_it():
+    from clampwise.app.screens.camera_panel import CameraThread
+
+    rng = np.random.default_rng(1)
+
+    def frame(lit=0.0):
+        g = np.clip(rng.normal(120, 6, (480, 640)), 0, 255)
+        g[200:240, 300:340] += lit                                               # a 40 px region, lit by the pulse
+        g = np.clip(g, 0, 255).astype(np.uint8)
+        return lucam.Frame(np.broadcast_to(g[:, :, None], g.shape + (3,)), 15.0, 1.0)
+
+    t, caught = CameraThread(), []
+    t.flash.connect(lambda f, before, rise, when: caught.append((f, before, rise)))
+    t.catch = True
+    for k in range(40):
+        t._catch(frame(30.0 if k in (20, 31) else 0.0), float(k))
+    assert len(caught) == 2 and all(r > 10 for _, _, r in caught)                # each pulse, none from the noise
+    f, before, _ = caught[0]
+    assert f.rgb[220, 320, 0] > before.rgb[220, 320, 0] + 10                     # compared with a frame before it
+    assert len(t.trace) == 39 and max(r for when, r in t.trace if when not in (20.0, 31.0)) < 4.0
+
+
 def test_the_gain_that_keeps_a_shorter_exposure_as_bright():
     # a camera counting gain as a multiplier, one in dB, one in its own steps (left alone)
     assert picture.gain_for(1.0, 2.0, "linear", 1.0, 16.0) == (2.0, 2.0)

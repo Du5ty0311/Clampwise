@@ -404,6 +404,7 @@ class LiveScreen(Screen):
         self.body(split)
         self._hidden: set[str] = set()
         self._enlarged: str | None = None
+        self.two_screens = False                         # the acquisition's view on the other screen (Views)
         self._split_set = False
         self._details_folded = False
         self._load_layout()
@@ -558,6 +559,11 @@ class LiveScreen(Screen):
             a.setChecked(role not in self._hidden)
             a.toggled.connect(lambda on, r=role: self.set_view_shown(r, on))
         self.views_menu.addSeparator()
+        two = self.views_menu.addAction("Two screens: the acquisition large on the other screen")
+        two.setCheckable(True)
+        two.setChecked(self.two_screens)
+        two.setEnabled(self.two_screens or len(QtGui.QGuiApplication.screens()) > 1)
+        two.toggled.connect(self.set_two_screens)
         free = self.views_menu.addAction("In-app windows (move, resize, overlap them inside Clampwise)")
         free.setCheckable(True)
         free.setChecked(self.free)
@@ -712,10 +718,43 @@ class LiveScreen(Screen):
         QtCore.QTimer.singleShot(150, lambda: self.camera.box.autoRange(padding=0))
         self._save_layout()
 
+    def set_two_screens(self, on: bool) -> None:
+        """The acquisition's view (the sweeps, the membrane test) in a window of its own filling the screen Clampwise
+        is not on, the camera's taking the room it leaves in Live; or back into Live. Kept: set up again at start."""
+        view = self.views["acquisition"]
+        if on:
+            handle = self.window.windowHandle()
+            here = handle.screen() if handle is not None else QtGui.QGuiApplication.primaryScreen()
+            other = next((s for s in QtGui.QGuiApplication.screens() if s is not here), None)
+            if other is None:
+                self.window.say("Only one screen: the acquisition stays in Live.")
+                on = False
+            else:
+                self.set_view_shown("acquisition", True)
+                if not view.popped:
+                    self.toggle_popped("acquisition")
+                view.showNormal()
+                if view.windowHandle() is not None:
+                    view.windowHandle().setScreen(other)
+                view.setGeometry(other.availableGeometry())
+                view.showMaximized()
+                view.raise_()
+        elif view.popped:
+            view.showNormal()
+            self.two_screens = False                     # put back by hand from here on
+            self.toggle_popped("acquisition")
+        self.two_screens = on
+        if self.window.persist:
+            self.window._settings().setValue("live/two_screens", on)
+
     def toggle_popped(self, role: str) -> None:
         """A view out into a window of its own (resized, maximized, laid over another), or back into Live."""
         view = self.views[role]
         s = self.window._settings() if self.window.persist else None
+        if role == "acquisition" and view.popped and self.two_screens:    # its window closed: one screen again
+            self.two_screens = False
+            if s is not None:
+                s.setValue("live/two_screens", False)
         view._drop()
         if not view.popped:
             size, at = view.size() * 1.6, view.mapToGlobal(QtCore.QPoint(40, 40))
@@ -787,6 +826,8 @@ class LiveScreen(Screen):
             self._split_set = self.split.restoreState(state)
         if str(s.value("live/free", "false")).lower() == "true":
             QtCore.QTimer.singleShot(0, lambda: self.set_free(True))
+        if str(s.value("live/two_screens", "false")).lower() == "true" and len(QtGui.QGuiApplication.screens()) > 1:
+            QtCore.QTimer.singleShot(800, lambda: self.set_two_screens(True))     # once the window is on its screen
 
     def _save_layout(self) -> None:
         if not self.window.persist:

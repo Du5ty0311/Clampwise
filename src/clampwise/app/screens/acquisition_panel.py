@@ -5,12 +5,13 @@ in the folder chosen; Let go gives the view back to the program's window."""
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from ...rig import acquire, digidata, membrane_test, recorder, telegraph
 from .. import theme, widgets
@@ -19,7 +20,8 @@ from ..widgets import box, label
 KEEP = 8                                     # sweeps drawn at once, the newest strongest
 GAP_FREE_SHOWN_S = 2.0
 LEFT_AXIS_PX = 64                            # each plot's left axis: its label and numbers
-
+QUICK = 8                                    # protocol buttons at most (Ctrl+1 to Ctrl+8)
+QUICK_ACTIONS = {"record": "Record", "play": "Play", "choose": "Choose it only"}
 
 
 def _open_digitizer() -> None:
@@ -105,6 +107,14 @@ class AcquisitionPanel(QtWidgets.QWidget):
         bar.addStretch(1)
         bar.addWidget(self.test_button)
         lay.addLayout(bar)
+        # buttons that each run a protocol given them, as the acquisition program's sequencing keys (Ctrl+1 to 8)
+        self.quick: list[dict] = []                               # {"name", "protocol" (its name), "action"}
+        self.quick_buttons: list = []
+        self.quick_bar = box("h", "xs")
+        lay.addLayout(self.quick_bar)
+        for k in range(QUICK):
+            sc = QtWidgets.QShortcut(QtGui.QKeySequence(f"Ctrl+{k + 1}"), self, lambda *_, k=k: self.press(k))
+            sc.setContext(QtCore.Qt.WindowShortcut)
         self.progress = QtWidgets.QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setMaximumHeight(theme.SPACE["xs"])
@@ -231,6 +241,88 @@ class AcquisitionPanel(QtWidgets.QWidget):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Record into", self._folder or str(Path.home()))
         if d:
             self.set_folder(d)
+
+    # ---- protocol buttons, as the acquisition program's sequencing keys
+    def fill_quick(self) -> None:
+        """The protocol buttons as set up (each named, Ctrl+its number), then Buttons... to set them up."""
+        while self.quick_bar.count():
+            item = self.quick_bar.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self.quick_buttons = []
+        if not self.quick:
+            self.quick_bar.addWidget(label("Protocol buttons: none yet", "muted"))
+        for k, q in enumerate(self.quick):
+            b = widgets.button(q["name"] or q["protocol"], lambda *_, k=k: self.press(k),
+                               f"{QUICK_ACTIONS.get(q['action'], 'Record')}: {q['protocol']} (Ctrl+{k + 1})")
+            self.quick_bar.addWidget(b)
+            self.quick_buttons.append(b)
+        self.quick_bar.addStretch(1)
+        self.quick_bar.addWidget(widgets.button("Buttons...", self.set_up_quick, "Give each button a protocol, and "
+                                                "what pressing it does (Record, Play, or choose it only)", quiet=True))
+
+    def press(self, k: int) -> None:
+        """Protocol button ``k``: its protocol chosen, then recorded or played (a membrane test stopped first)."""
+        if k >= len(self.quick) or not self.isVisible():
+            return
+        q = self.quick[k]
+        if self.busy:
+            self.status.setText(f"{q['name'] or q['protocol']}: a run is going; Stop it first.")
+            return
+        i = self.protocol.findText(q["protocol"])
+        if i < 0:
+            self.status.setText(f"{q['name'] or q['protocol']}: {q['protocol']} is not in {self._protocols_dir} "
+                                "(Protocols... chooses the folder; Buttons... another protocol).")
+            return
+        self.protocol.setCurrentIndex(i)
+        if q["action"] == "choose":
+            self.status.setText(f"{q['protocol']} chosen.")
+            return
+        if self.test.running:                            # as the acquisition program: the protocol replaces it
+            self.test.stop()
+            self.test.wait(5)
+            self._test_tick()
+        self.record() if q["action"] == "record" else self.play()
+
+    def set_up_quick(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Protocol buttons")
+        lay = box("v", "s", "m")
+        lay.addWidget(label("Each button runs its protocol with one click, or Ctrl and its number. Leave a protocol "
+                            "blank for no button.", "muted", wrap=True))
+        grid = QtWidgets.QGridLayout()
+        for col, caption in enumerate(("", "Name on the button", "Protocol", "Pressed, it")):
+            grid.addWidget(label(caption, "muted"), 0, col)
+        names = [self.protocol.itemText(i) for i in range(self.protocol.count())]
+        rows = []
+        for k in range(QUICK):
+            q = self.quick[k] if k < len(self.quick) else {"name": "", "protocol": "", "action": "record"}
+            name, proto, action = QtWidgets.QLineEdit(q["name"]), QtWidgets.QComboBox(), QtWidgets.QComboBox()
+            proto.addItem("")
+            proto.addItems(names if q["protocol"] in names or not q["protocol"] else names + [q["protocol"]])
+            proto.setCurrentText(q["protocol"])
+            for key, words in QUICK_ACTIONS.items():
+                action.addItem(words, key)
+            action.setCurrentIndex(max(0, action.findData(q["action"])))
+            name.setPlaceholderText("the protocol's name")
+            grid.addWidget(label(f"Ctrl+{k + 1}", "muted"), k + 1, 0)
+            grid.addWidget(name, k + 1, 1)
+            grid.addWidget(proto, k + 1, 2)
+            grid.addWidget(action, k + 1, 3)
+            rows.append((name, proto, action))
+        grid.setColumnStretch(2, 1)
+        lay.addLayout(grid)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        lay.addWidget(buttons)
+        dialog.setLayout(lay)
+        dialog.resize(640, dialog.sizeHint().height())
+        if dialog.exec_():
+            self.quick = [{"name": n.text().strip(), "protocol": p.currentText(), "action": a.currentData()}
+                          for n, p, a in rows if p.currentText()]
+            self.fill_quick()
+            self.save_settings()
 
     def set_folder(self, folder: str) -> None:
         self._folder = folder
@@ -621,8 +713,17 @@ class AcquisitionPanel(QtWidgets.QWidget):
             self._folder = str(s.value("record/folder", "") or "")
             self.seconds.setValue(float(s.value("record/seconds", 60.0) or 60.0))
             keep = str(s.value("record/protocol", "") or "")
+            try:
+                kept = json.loads(str(s.value("record/buttons", "[]") or "[]"))
+            except ValueError:
+                kept = []
+            self.quick = [{"name": str(q.get("name", "")), "protocol": str(q["protocol"]),
+                           "action": q.get("action") if q.get("action") in QUICK_ACTIONS else "record"}
+                          for q in (kept if isinstance(kept, list) else []) if isinstance(q, dict) and q.get("protocol")
+                          ][:QUICK]
         else:
             keep = ""
+        self.fill_quick()
         self._loading = True
         self.fill_protocols()
         if keep:
@@ -638,6 +739,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
         s.setValue("record/folder", self._folder)
         s.setValue("record/protocol", self.protocol.currentText())
         s.setValue("record/seconds", self.seconds.value())
+        s.setValue("record/buttons", json.dumps(self.quick))
 
     def on_theme(self, palette) -> None:
         self.test_view.on_theme(palette)

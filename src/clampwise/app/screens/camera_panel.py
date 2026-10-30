@@ -9,6 +9,7 @@ window's thread; the camera is let go with one click (or when Clampwise closes).
 
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import time
@@ -34,6 +35,18 @@ OPEN_RETRY_S = 1.5                   # a camera that refuses to open is asked on
 FPS_SHARE = 0.97                     # of each frame's time, the exposure (the rest: the camera reading the sensor out)
 FOLLOW_EVERY_S = 0.5                 # auto exposure, on: how often it looks at the picture and corrects the exposure
 FOLLOW_STEP = 2.0                    # each correction at most twice or half the exposure (no jumping about)
+# catching light pulses: every frame compared, in blocks, with the last one no pulse lit; a block this much brighter
+# (grey levels, and this many times the blocks' usual rise) caught one. The exposure then fills each frame's time
+# (CATCH_MS when no frame rate is asked for), so a pulse of a few ms never falls between two pictures
+CATCH_BLOCK = 16                     # pixels a block, after every 2nd pixel is taken
+CATCH_GREY = 2.5                     # the rig (2026-10-29): a 5 ms pulse at 20x rose 4.2, frames between 0.4 (2.6
+CATCH_NOISE_X = 5.0                  # at most, under the LED on steadily)
+CATCH_MS = 15.0
+CATCH_DARK = 64.0                    # the picture's brightest under this (at the catching exposure): the gain raised,
+CATCH_GAIN = 4.0                     # at most this many times
+CATCH_HOLD_S = 1.0                   # the picture that caught a pulse stays on screen this long, its light in colour
+CATCH_SAME_S = 0.04                  # frames this close caught one pulse (split over two pictures): the brighter shown
+CATCH_TRACE = 20000                  # (when, rise) of each frame kept while catching: about 5 minutes at 60 fps
 
 
 def fps_limit(taken: float, shown: float, exposure_ms: float, average: int, draw_cap: float) -> str:
@@ -56,6 +69,23 @@ def fps_limit(taken: float, shown: float, exposure_ms: float, average: int, draw
     return why
 
 
+def catch_blocks(g: np.ndarray) -> np.ndarray:
+    """A grey picture's mean in blocks (every 2nd pixel, CATCH_BLOCK of them a side): a pulse lighting a small
+    region raises its blocks well clear of the noise, which averages out over each."""
+    s = g[::2, ::2]
+    h, w = s.shape[0] // CATCH_BLOCK * CATCH_BLOCK, s.shape[1] // CATCH_BLOCK * CATCH_BLOCK
+    return s[:h, :w].reshape(h // CATCH_BLOCK, CATCH_BLOCK, w // CATCH_BLOCK, CATCH_BLOCK).mean(axis=(1, 3),
+                                                                                               dtype=np.float32)
+
+
+def flash_rise(g: np.ndarray, before: np.ndarray, block: int = 8) -> np.ndarray:
+    """How much brighter ``g`` is than ``before``, in blocks of ``block`` pixels a side: a pulse of a few grey
+    levels is lost in each pixel's noise, not in a block's mean."""
+    h, w = g.shape[0] // block * block, g.shape[1] // block * block
+    d = g[:h, :w].astype(np.float32) - before[:h, :w].astype(np.float32)
+    return d.reshape(h // block, block, w // block, block).mean(axis=(1, 3))
+
+
 def grey(f: lucam.Frame) -> lucam.Frame:
     """The frame in grey: a colour camera's brightness, a monochrome one's own channel (as it is, no copy)."""
     if picture.is_grey(f.rgb):
@@ -72,6 +102,8 @@ class CameraThread(QtCore.QThread):
     frame = QtCore.Signal(object)            # the frame, grey, as taken
     exposure_set = QtCore.Signal(float, str)  # auto exposure's choice, and a note when it could not reach it
     failed = QtCore.Signal(str)
+    flash = QtCore.Signal(object, object, float, float)   # a frame that caught a light pulse, the frame before it,
+    #                                                       how much brighter (grey), when it came (time.monotonic)
 
     def __init__(self, make=cameras.make) -> None:
         super().__init__()
@@ -85,6 +117,10 @@ class CameraThread(QtCore.QThread):
         self.taken = 0                       # pictures taken: the frame rate's count
         self.drawing = False                 # a picture sent and not yet drawn: none other is sent meanwhile
         self.show_every_s = SHOW_EVERY_S     # low-power mode: fewer
+        self.catch = False                   # light pulses caught: every frame looked at, not only those drawn
+        self.trace: collections.deque = collections.deque(maxlen=CATCH_TRACE)   # (when, rise) of each frame
+        self._rest = self._rest_frame = None         # the last frame no pulse lit (its blocks, and itself)
+        self._noise = 1.0                            # the blocks' usual rise from one such frame to the next
         self._stop = False
 
     def stop(self) -> None:
@@ -122,6 +158,10 @@ class CameraThread(QtCore.QThread):
                     break
                 f = grey(f)
                 now = time.monotonic()
+                if self.catch:
+                    self._catch(f, now)
+                else:
+                    self._rest = None
                 if self.follow and not self.follow_paused and now - followed_at >= FOLLOW_EVERY_S:
                     followed_at = now
                     self._follow(cam, f, exposure)
@@ -139,6 +179,22 @@ class CameraThread(QtCore.QThread):
                 cam.close()
             except Exception:
                 logging.getLogger(__name__).exception("The camera could not be let go")
+
+    def _catch(self, f, now: float) -> None:
+        """Whether this frame caught a light pulse: its blocks compared with the last frame no pulse lit. Caught,
+        it is sent (``flash``) whether or not the screen is ready for a picture; not, it is the new one to compare
+        with."""
+        blocks = catch_blocks(f.rgb[:, :, 0])
+        if self._rest is None or self._rest.shape != blocks.shape:
+            self._rest, self._rest_frame, self._noise = blocks, f, 1.0
+            return
+        rise = float((blocks - self._rest).max())
+        self.trace.append((now, rise))
+        if rise >= max(CATCH_GREY, CATCH_NOISE_X * self._noise):
+            self.flash.emit(f, self._rest_frame, rise, now)
+            return
+        self._noise = 0.95 * self._noise + 0.05 * max(rise, 0.1)
+        self._rest, self._rest_frame = blocks, f
 
     def _follow(self, cam, f, exposure) -> None:
         """Auto exposure, one correction: the brightest 0.5% of the picture (every 4th pixel looked at) brought
@@ -388,6 +444,27 @@ class CameraPanel(QtWidgets.QWidget):
         controls.addWidget(self.auto, 4, 0, 1, 2)
         controls.addWidget(self.objective_caption, 5, 0, 1, 2)
         controls.addWidget(self.objective, 6, 0, 1, 2)
+        self.catch = QtWidgets.QCheckBox("Catch light pulses")
+        self.catch.setToolTip("A light pulse of a few ms (a protocol's photostimulation) mostly falls between two "
+                              "pictures. Ticked, the exposure fills each frame's time (auto exposure off; dim the "
+                              "transmitted light if the picture is too bright) and every frame is looked at: the one "
+                              "that caught a pulse stays on screen for a second, where the light landed in colour. "
+                              "Unticked, the exposure as it was.")
+        self.catch.toggled.connect(self._catch)
+        controls.addWidget(self.catch, 7, 0, 1, 2)
+        self._before_catch: tuple[bool, float] | None = None       # auto exposure and the exposure, as they were
+        self._held_until = 0.0                                     # a caught pulse on screen until then
+        self._held_rise = 0.0
+        self._caught_when = float("-inf")                          # when the last pulse caught was taken
+        self.caught = 0                                            # pulses caught since ticked
+        self.flash_item = pg.ImageItem(axisOrder="row-major")      # where the pulse's light landed, over the picture
+        self.flash_item.setZValue(5)
+        self.flash_item.setVisible(False)
+        self.box.addItem(self.flash_item)
+        self.flash_text = pg.TextItem("", color=(90, 170, 255), anchor=(0, 0), fill=pg.mkBrush(0, 0, 0, 150))
+        self.flash_text.setZValue(6)
+        self.flash_text.setVisible(False)
+        self.box.addItem(self.flash_text)
         self.objective.valueChanged.connect(self._objective_moved)
         self.exposure.editingFinished.connect(self._exposure)
         self.gain.editingFinished.connect(self._exposure)
@@ -477,9 +554,11 @@ class CameraPanel(QtWidgets.QWidget):
         self.failure = ""
         t = CameraThread(self.make)
         t.follow = self.auto.isChecked()
+        t.catch = self.catch.isChecked()
         self._power(t)
         t.opened.connect(self._opened)
         t.frame.connect(self._show)
+        t.flash.connect(self._flashed)
         t.exposure_set.connect(self._followed)
         t.failed.connect(self._failed)
         t.finished.connect(self._finished)
@@ -650,10 +729,79 @@ class CameraPanel(QtWidgets.QWidget):
     def _show(self, frame) -> None:
         self._shown += 1
         try:
-            self._draw(frame)
+            if time.monotonic() < self._held_until:   # a caught pulse stays on screen meanwhile
+                self.last = frame
+            else:
+                self.flash_item.setVisible(False)
+                self.flash_text.setVisible(False)
+                self._held_rise = 0.0
+                self._draw(frame)
         finally:
             if self._thread is not None:
                 self._thread.drawing = False
+
+    def _catch(self, on: bool) -> None:
+        """Catching light pulses on (the exposure filling each frame's time, auto exposure off) or off (both as they
+        were)."""
+        if on:
+            was = self.exposure.value()
+            self._before_catch = (self.auto.isChecked(), was, self.gain.value())
+            fps = self.frame_rate.value()
+            self.auto.setChecked(False)
+            self.exposure.setValue(min(FPS_SHARE * 1000.0 / fps if fps > 0 else CATCH_MS, self.exposure.maximum()))
+            said = ""
+            if self.last is not None:                 # dark between pulses (the light pulsed, the lamp off): the gain
+                bright = float(np.percentile(self.last.rgb[::4, ::4, 0], 99.5)) * self.exposure.value() / was
+                if bright < CATCH_DARK:               # raised, so a pulse stands far clear of the noise
+                    gain, got = picture.gain_for(self.gain.value(), min(CATCH_GAIN, 0.5 * CATCH_DARK / max(bright, 1)),
+                                                 self.gain_kind, self.gain.minimum(), self.gain.maximum())
+                    self.gain.setValue(gain)
+                    said = f", gain {gain:.3g}"
+            self._exposure()
+            self.caught, self._caught_when = 0, float("-inf")
+            self.status.setText(f"Catching light pulses: {self.exposure.value():.3g} ms exposures{said}, every frame "
+                                "looked at; a picture that caught one stays on screen a second.")
+        else:
+            self._held_until = 0.0
+            self.flash_item.setVisible(False)
+            self.flash_text.setVisible(False)
+            if self._before_catch is not None:
+                auto, ms, gain = self._before_catch
+                self.exposure.setValue(ms)
+                self.gain.setValue(gain)
+                self._exposure()
+                self.auto.setChecked(auto)
+            self._before_catch = None
+            self.status.setText("")
+        if self._thread is not None:
+            self._thread.catch = on
+
+    def _flashed(self, frame, before, rise: float, when: float) -> None:
+        """A frame caught a light pulse: drawn and held, where the light landed laid over it in colour (its rise
+        over the frame before, full colour at the most). A pulse split over two frames: the brighter one kept."""
+        since = when - self._caught_when                     # since the last pulse caught, as the frames were taken
+        if since < CATCH_SAME_S and rise <= self._held_rise:
+            return
+        if since >= CATCH_SAME_S:
+            self.caught += 1
+            self._caught_when = when
+        self._held_until, self._held_rise = time.monotonic() + CATCH_HOLD_S, rise
+        self._draw(frame)
+        d = flash_rise(frame.rgb[:, :, 0], before.rgb[:, :, 0])
+        noise = 1.4826 * float(np.median(np.abs(d - np.median(d))))           # the rise where no light landed
+        top = float(np.percentile(d, 99.9))
+        low = max(3.0 * noise, 0.5 * top)             # where it landed, not the glow it scatters over the slice
+        a = np.clip((d - low) / max(top - low, 1e-3), 0.0, 1.0)
+        rgba = np.zeros(a.shape + (4,), np.uint8)
+        rgba[..., 0], rgba[..., 1], rgba[..., 2] = 90, 170, 255
+        rgba[..., 3] = (a * 200).astype(np.uint8)
+        self.flash_item.setImage(rgba, autoLevels=False)
+        h, w = a.shape[0] * 8, a.shape[1] * 8            # its blocks laid over the pixels they were taken from
+        self.flash_item.setRect(QtCore.QRectF(0, 0, w, h))
+        self.flash_item.setVisible(True)
+        self.flash_text.setText(f" Light pulse {self.caught} caught: +{rise:.0f} grey ")
+        self.flash_text.setPos(0, 0)
+        self.flash_text.setVisible(True)
 
     def _draw(self, frame) -> None:
         """The frame as taken, grey, its 256 levels as they are: only as many pixels as the screen shows (zoomed out,
