@@ -2,6 +2,11 @@
 
 ## 1.8.1 — not released yet
 
+- **What a protocol sends can be hidden.** Acquisition's **Commands** lists each output the chosen protocol sends
+  (the amplifier's command, a light, digital outputs), each ticked when drawn under the inputs. Unticked, its plot
+  is gone and the inputs take its room; the protocol's description still names it, as hidden. Kept between
+  sessions; changed during a run, from the next run on.
+
 - **Protocol buttons, as Clampex's sequencing keys.** A row of buttons under Acquisition's transport, set up with
   **Buttons...**: each one gets a protocol, a name, and what pressing it does (Record, Play, or choose the protocol
   only). Ctrl+1 to Ctrl+8 press them from the keyboard. A membrane test running is stopped first; a run going is

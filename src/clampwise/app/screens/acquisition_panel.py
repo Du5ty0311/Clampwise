@@ -49,7 +49,9 @@ class AcquisitionPanel(QtWidgets.QWidget):
         self.scope = pg.GraphicsLayoutWidget()
         self.plots: list[pg.PlotItem] = []          # the inputs recorded, one a plot
         self.sent_plots: list[pg.PlotItem] = []     # under them, what the protocol sends: every output it changes
-        self._sent: list[acquire.Sent] = []
+        self._sent: list[acquire.Sent] = []          # those of them shown (Commands: each can be hidden)
+        self._all_sent: list[acquire.Sent] = []
+        self.hidden_sent: set[str] = set()           # the outputs not drawn, by name (kept)
         self._sent_sweep = -1                        # the sweep whose outputs are drawn
         from .membrane_test_panel import MembraneTestView
 
@@ -96,6 +98,14 @@ class AcquisitionPanel(QtWidgets.QWidget):
         bar.addWidget(self.protocol, 1)
         bar.addWidget(self._seconds_caption)
         bar.addWidget(self.seconds)
+        self.commands = QtWidgets.QToolButton()
+        self.commands.setText("Commands")
+        self.commands.setToolTip("What the protocol sends (the amplifier's command, a light, digital outputs): each "
+                                 "drawn under the inputs, or hidden to give them its room")
+        self.commands.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.commands.setMenu(QtWidgets.QMenu(self.commands))
+        self.commands.menu().aboutToShow.connect(self._fill_commands)
+        bar.addWidget(self.commands)
         bar.addWidget(widgets.button("Edit...", self.edit_protocol, "Edit a copy of this protocol (its epochs, "
                                      "holding, sweeps), saved under a new name", quiet=True))
         bar.addWidget(widgets.button("Protocols...", self.choose_protocols, "The folder your protocols are in",
@@ -499,7 +509,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
 
     def _inputs_of(self, path: str) -> list:
         """The protocol's inputs, as recorded; what it sends kept for drawing under them."""
-        self._sent = []
+        self._shown_sent([])
         try:
             pr = self._protocol_now(path)
             self._n_sweeps = pr.sweeps if pr.mode != acquire.GAP_FREE else 0
@@ -508,9 +518,9 @@ class AcquisitionPanel(QtWidgets.QWidget):
         except Exception:
             return []
         try:
-            self._sent = acquire.sent(pr)
+            self._shown_sent(acquire.sent(pr))
         except Exception:                                # the inputs still drawn
-            self._sent = []
+            self._shown_sent([])
         return got
 
     def _preview(self) -> None:
@@ -532,19 +542,21 @@ class AcquisitionPanel(QtWidgets.QWidget):
                 self.note.setText(f"<b>{name}</b>: gap-free, every input recorded without a break. Play draws "
                                   "them as they come (nothing kept); Record also keeps them.")
                 return
-            self._sent = acquire.sent(pr)
+            self._shown_sent(acquire.sent(pr))
         except Exception as exc:
             self._setup_plots([])
             self.note.setText(f"<b>{name}</b>: not drawn ({exc}). Play still plays it.")
             return
         self._setup_plots([], self._sent)
         fs = 1e6 / pr.interval_us
-        n = self._sent[0].values.shape[-1] if self._sent else 0
+        n = self._all_sent[0].values.shape[-1] if self._all_sent else 0
         self._draw_sent(range(pr.sweeps), fs)
         for p in self.sent_plots:
             p.setXRange(0, n / fs if n else 1.0, padding=0.01)
         self.note.setText(f"<b>{name}</b>, as it will play: {pr.sweeps} sweep(s) of {n / fs:.2f} s, one every "
-                          f"{pr.start_to_start_s:g} s; sends " + ", ".join(self._sent_label(o) for o in self._sent) +
+                          f"{pr.start_to_start_s:g} s; sends " + ", ".join(self._sent_label(o) for o in self._all_sent) +
+                          (f" ({', '.join(sorted(self.hidden_sent & {o.name for o in self._all_sent}))} hidden: "
+                           "Commands)" if self.hidden_sent & {o.name for o in self._all_sent} else "") +
                           ". <b>Play</b> draws the cell's response as it is recorded, over what is sent (nothing "
                           "kept); <b>Record</b> also keeps it.")
 
@@ -579,6 +591,34 @@ class AcquisitionPanel(QtWidgets.QWidget):
         else:
             text = ""
         self.note.setText(text)
+
+    def _shown_sent(self, sent: list) -> None:
+        """What the protocol sends: all of it kept (Commands lists it), those not hidden drawn."""
+        self._all_sent = list(sent)
+        self._sent = [o for o in sent if o.name not in self.hidden_sent]
+
+    def _fill_commands(self) -> None:
+        """Commands: each output the chosen protocol sends, ticked when drawn."""
+        menu = self.commands.menu()
+        menu.clear()
+        if not self._all_sent:
+            menu.addAction("This protocol sends nothing drawn").setEnabled(False)
+        for o in self._all_sent:
+            a = menu.addAction(self._sent_label(o))
+            a.setCheckable(True)
+            a.setChecked(o.name not in self.hidden_sent)
+            a.toggled.connect(lambda on, name=o.name: self.show_sent(name, on))
+
+    def show_sent(self, name: str, on: bool) -> None:
+        """An output the protocol sends drawn under the inputs, or hidden (its room theirs); kept."""
+        (self.hidden_sent.discard if on else self.hidden_sent.add)(name)
+        self.save_settings()
+        if self.busy:
+            self.status.setText(f"{name} {'shown' if on else 'hidden'} from the next run on.")
+            return
+        self._shown_sent(self._all_sent)
+        if not self.test.running:
+            self._preview()
 
     @staticmethod
     def _sent_label(o: "acquire.Sent") -> str:
@@ -713,6 +753,8 @@ class AcquisitionPanel(QtWidgets.QWidget):
             self._folder = str(s.value("record/folder", "") or "")
             self.seconds.setValue(float(s.value("record/seconds", 60.0) or 60.0))
             keep = str(s.value("record/protocol", "") or "")
+            hidden = s.value("record/hidden_sent", []) or []
+            self.hidden_sent = {str(h) for h in ([hidden] if isinstance(hidden, str) else hidden)}
             try:
                 kept = json.loads(str(s.value("record/buttons", "[]") or "[]"))
             except ValueError:
@@ -740,6 +782,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
         s.setValue("record/protocol", self.protocol.currentText())
         s.setValue("record/seconds", self.seconds.value())
         s.setValue("record/buttons", json.dumps(self.quick))
+        s.setValue("record/hidden_sent", sorted(self.hidden_sent))
 
     def on_theme(self, palette) -> None:
         self.test_view.on_theme(palette)

@@ -1009,6 +1009,13 @@ def test_live_records_in_clampwise_on_request(qapp, window, tmp_path):
     assert not panel.plots and len(panel.sent_plots[0].listDataItems()) == 2      # each sweep of what it sends
     panel.sent_plots[0].getViewBox().setXRange(-1.0, 1.0, padding=0)      # time never before the sweep's start
     assert panel.sent_plots[0].getViewBox().viewRange()[0][0] >= 0
+    name = panel._all_sent[0].name                                        # Commands: hidden, its room the inputs'
+    panel._fill_commands()
+    assert [a.text() for a in panel.commands.menu().actions()][0].startswith(name)
+    panel.commands.menu().actions()[0].setChecked(False)
+    assert not panel.sent_plots and name in panel.hidden_sent and "hidden: Commands" in panel.note.text()
+    panel.show_sent(name, True)
+    assert len(panel.sent_plots) == 1 and not panel.hidden_sent
     panel.set_folder(str(tmp_path / "data"))
     assert panel.play_button.isEnabled() and panel.record_button.isEnabled() and not panel.pause_button.isEnabled()
     panel.play()                                                          # Play: drawn and measured, nothing kept
