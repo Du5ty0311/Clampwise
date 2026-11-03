@@ -2,6 +2,20 @@
 
 ## 1.8.1 — not released yet
 
+- **The patterned light can step on with each sweep, with no trigger cable.** **Next step with each sweep** (the
+  patterned light's More options) shows the first step before a run's first sweep, and the next one in the gap
+  after each sweep, round again after the last. Grid maps and cell-by-cell connectivity protocols then light one
+  region a sweep without wiring a digital output to the Polygon's Trig In.
+
+- **A grid's cells can be sized in um.** The Grid's **Each cell** sets each cell's width and height (34 x 24 um,
+  say); the grid is centred on the picture, where the recorded cell is put. Left at 0 the grid tiles the whole
+  picture, as before.
+
+- **Photostimulation protocols for single-cell mapping.** `tools/make_photostim_protocols.py` writes, from a rig's
+  own photostim protocol, four current-clamp protocols: the light's level or its pulse length stepped sweep by sweep
+  (to find the cell's spike threshold), a 49-sweep grid map, and a 50-sweep connectivity run; a 5 ms pulse at 310 ms
+  and a -20 pA step at the end of each sweep for the input resistance.
+
 - **What a protocol sends can be hidden.** Acquisition's **Commands** lists each output the chosen protocol sends
   (the amplifier's command, a light, digital outputs), each ticked when drawn under the inputs. Unticked, its plot
   is gone and the inputs take its room; the protocol's description still names it, as hidden. Kept between

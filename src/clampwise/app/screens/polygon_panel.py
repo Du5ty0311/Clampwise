@@ -212,6 +212,13 @@ class PolygonPanel(QtWidgets.QWidget):
         go.addWidget(self.every)
         go.addStretch(1)
         more.body_layout.addLayout(go)
+        self.with_sweeps = QtWidgets.QCheckBox("Next step with each sweep (runs in Clampwise)")
+        self.with_sweeps.setToolTip("A protocol played or recorded here: step 1 shown before its first sweep, then "
+                                    "each step on in the gap after a sweep, round again after the last: one region a "
+                                    "sweep (a grid's squares, or cells and their controls). Needs no cable; each "
+                                    "sweep's step is kept with the recording.")
+        self.with_sweeps.toggled.connect(lambda *_: self.save())
+        more.add(self.with_sweeps)
         self.off_after = QtWidgets.QCheckBox("All mirrors off after each recording")
         self.off_after.setChecked(True)
         self.off_after.setToolTip("When a recording made here ends, no mirror is left lit: the next run never "
@@ -289,8 +296,17 @@ class PolygonPanel(QtWidgets.QWidget):
         self.grid_on_picture.setToolTip("The grid tiles what the camera sees (needs the calibration), so every cell "
                                         "is on the picture when the field is larger than it; unticked, the whole "
                                         "field, as its own program lays its grids out")
-        page(("Rows", self.rows), ("Columns", self.cols), ("Each spot, of its cell", self.fill), ("", self.round),
-             ("", self.grid_on_picture),
+        self.cell_w, self.cell_h = (_pct(0.0, 0.0, 2000.0, 1.0, " um") for _ in range(2))
+        for s, tip in ((self.cell_w, "wide"), (self.cell_h, "high")):
+            s.setSpecialValueText("tile the picture")
+            s.setToolTip(f"Each cell this many um {tip}, the grid centred on the picture's middle (where the cell "
+                         "patched is put); 0: the cells tile the whole picture. Over the camera's picture only.")
+        size_row = box("h", "xs")
+        size_row.addWidget(self.cell_w)
+        size_row.addWidget(label("x", "muted"))
+        size_row.addWidget(self.cell_h)
+        page(("Rows", self.rows), ("Columns", self.cols), ("Each cell", size_row), ("Each spot, of its cell", self.fill),
+             ("", self.round), ("", self.grid_on_picture),
              ("", label("Numbered from 1 at the top left along each row, as its own program numbers its grids. "
                         "Choose one cell or several (Ctrl+click) to light only those.", "muted", wrap=True)))
         self.l_u0, self.l_v0, self.l_u1, self.l_v1 = _pct(20), _pct(50), _pct(80), _pct(50)
@@ -589,10 +605,18 @@ class PolygonPanel(QtWidgets.QWidget):
                 size = self._frame_size()
                 if self.grid_on_picture.isChecked() and self.calibration.ready and size[0]:
                     cal = self.calibration.at_size(size)
+                    um = self._um_per_px()
+                    sized = um > 0 and self.cell_w.value() > 0 and self.cell_h.value() > 0
                     steps = patterns.grid_on_picture(self.rows.value(), self.cols.value(), cal, size,
-                                                     self.fill.value() / 100, self.round.isChecked())
+                                                     self.fill.value() / 100, self.round.isChecked(),
+                                                     (self.cell_w.value() / um, self.cell_h.value() / um) if sized
+                                                     else None)
                     note = ("Over the camera's picture. Part of the picture lies outside the field: cells there are "
                             "cut." if patterns.picture_outside_field(cal, size) else "Over the camera's picture.")
+                    if sized:
+                        note += (f" Cells of {self.cell_w.value():g} x {self.cell_h.value():g} um, the grid "
+                                 f"({self.cols.value() * self.cell_w.value():g} x "
+                                 f"{self.rows.value() * self.cell_h.value():g} um) centred on the picture.")
                 else:
                     steps = patterns.grid(self.rows.value(), self.cols.value(), fill=self.fill.value() / 100,
                                           round_spots=self.round.isChecked())
@@ -755,6 +779,19 @@ class PolygonPanel(QtWidgets.QWidget):
             self.shown_label.setText(self.shown_label.text() + " The last step was shown: stepping stopped.")
             return
         self.list.setCurrentRow(row % n, QtCore.QItemSelectionModel.ClearAndSelect)     # that step alone, not added to those chosen
+        self.project()
+
+    def run_starting(self) -> None:
+        """A run is starting here: with Next step with each sweep, step 1 shown for its first sweep."""
+        self.sweep_gap(0)
+
+    def sweep_gap(self, sweep: int) -> None:
+        """With Next step with each sweep, the step for sweep ``sweep`` (from 0; round again after the last) shown
+        now, in the gap before it."""
+        if not self.with_sweeps.isChecked() or not self.steps or not self.polygon.connected:
+            return
+        self.auto.setChecked(False)
+        self.list.setCurrentRow(sweep % len(self.steps), QtCore.QItemSelectionModel.ClearAndSelect)
         self.project()
 
     def off(self) -> None:
@@ -1678,6 +1715,9 @@ class PolygonPanel(QtWidgets.QWidget):
                 self.calibrations = patterns.Calibrations()
             led = str(main._settings().value("polygon/led", "auto") or "auto")
             self.led = led if led in LED_MODES else "auto"
+            self.with_sweeps.blockSignals(True)
+            self.with_sweeps.setChecked(str(main._settings().value("polygon/with_sweeps", "false")).lower() == "true")
+            self.with_sweeps.blockSignals(False)
         self.calibration = self.calibrations.at(self._objective())
         self.cal_status.setText(self._cal_text())
         self.swap.blockSignals(True)
@@ -1697,6 +1737,7 @@ class PolygonPanel(QtWidgets.QWidget):
         if main is not None and getattr(main, "persist", False):
             main._settings().setValue("polygon/calibration", json.dumps(self.calibrations.to_dict()))
             main._settings().setValue("polygon/led", self.led)
+            main._settings().setValue("polygon/with_sweeps", self.with_sweeps.isChecked())
 
     # ---------------------------------------------------------------- calibrations saved, to call back
     def save_calibration(self) -> Path | None:

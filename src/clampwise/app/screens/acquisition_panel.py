@@ -38,6 +38,8 @@ class AcquisitionPanel(QtWidgets.QWidget):
     released = QtCore.Signal()
     recording = QtCore.Signal(str)           # the folder being recorded into ("" when it ends)
     run_ended = QtCore.Signal(list)          # a run has ended: the files it recorded (none when played)
+    starting = QtCore.Signal()               # a run is about to start (the patterned light's first step is shown)
+    between_sweeps = QtCore.Signal(int)      # a sweep has ended: the next one's number (from 0), in the gap before it
 
     def __init__(self, window, make=recorder.Recorder, make_test=membrane_test.MembraneTest) -> None:
         super().__init__()
@@ -65,6 +67,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
         lay.addWidget(self.stack, 1)
         self._plot_inputs: list = []
         self._n_sweeps = 0
+        self._gap_for = 0                    # the sweep whose gap has been said (between_sweeps)
         # two lines under the scope, as an acquisition program's toolbar: the protocol and the transport, then where it
         # is written and the membrane test's pulse
         self.protocol = QtWidgets.QComboBox()
@@ -402,6 +405,8 @@ class AcquisitionPanel(QtWidgets.QWidget):
             self.status.setText("Choose a protocol" + (" and the folder to record into." if save else "."))
             return
         self.rec = self.make()
+        self._gap_for = 0
+        self.starting.emit()
         try:
             self.rec.start(path, self._folder or str(Path.home()), self.seconds.value() if self._gap_free else None,
                            save=save)
@@ -437,6 +442,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
             self._segment, self._kept, self._drawn = getattr(st, "segment", 0), {}, -1
         if st.raw is not None and st.inputs and st.state != "paused":
             self._draw(st)
+        self._gap(st)
         self._buttons()
         if not st.busy:
             self._timer.stop()
@@ -445,6 +451,18 @@ class AcquisitionPanel(QtWidgets.QWidget):
             if st.state == "done" and st.saving and files:
                 self.window.say(f"Recorded {', '.join(p.name for p in files)} into {files[0].parent}.")
             self.run_ended.emit([p for p in files if st.saving and Path(p).exists()])
+
+    def _gap(self, st) -> None:
+        """Once a sweep has ended (50 ms after, its outputs back at holding), the next one's number said, in the
+        gap before it; none after the last."""
+        if st.state not in ("recording", "playing") or not st.episodic or not st.step_frames or not st.rate_hz:
+            return
+        k, into = divmod(st.frames, st.step_frames)
+        nxt = st.sweeps_done + k + 1
+        last = self._n_sweeps and nxt >= self._n_sweeps
+        if into >= st.sweep_frames + 0.05 * st.rate_hz and nxt > self._gap_for and not last:
+            self._gap_for = nxt
+            self.between_sweeps.emit(nxt)
 
     # ---- the membrane test
     def _show_test_settings(self, mode: str) -> None:

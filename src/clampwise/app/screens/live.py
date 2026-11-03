@@ -219,6 +219,8 @@ class LiveScreen(Screen):
         self.recorder.released.connect(lambda: self.views["acquisition"].set_own(False))
         self.recorder.recording.connect(self._recording_into)
         self.recorder.run_ended.connect(self.patterned.after_run)    # the patterns kept with it; then Off
+        self.recorder.starting.connect(self.patterned.run_starting)          # a step a sweep, when asked
+        self.recorder.between_sweeps.connect(self.patterned.sweep_gap)
         side.addWidget(self.stack, 1)
         programs.setLayout(side)
         programs.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)

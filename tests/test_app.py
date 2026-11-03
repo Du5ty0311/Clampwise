@@ -980,6 +980,20 @@ def test_protocol_buttons_each_run_their_own_protocol_as_sequencing_keys(qapp, w
     assert not live.two_screens and not view.popped
 
 
+def test_the_end_of_each_sweep_is_said_once_in_the_gap_before_the_next(qapp, window):
+    from types import SimpleNamespace
+
+    panel = window.screens["live"].recorder
+    said = []
+    panel.between_sweeps.connect(said.append)
+    panel._n_sweeps, panel._gap_for = 3, 0
+    fs, sweep, step = 1000.0, 1000, 3000                                         # 1 s sweeps, one every 3 s
+    for frames in (500, 1020, 1100, 2000, 2900, 3500, 4100, 4500, 7100, 8000):
+        panel._gap(SimpleNamespace(state="playing", episodic=True, frames=frames, step_frames=step,
+                                   sweep_frames=sweep, rate_hz=fs, sweeps_done=0))
+    assert said == [1, 2]                         # 50 ms after each sweep's end, once; none after the third (last)
+
+
 def test_live_records_in_clampwise_on_request(qapp, window, tmp_path):
     # acquisition in Clampwise without Clampex, as the camera is used without its own program
     from clampwise.rig import windows

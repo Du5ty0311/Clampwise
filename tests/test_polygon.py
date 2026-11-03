@@ -936,6 +936,62 @@ def test_a_calibration_saved_is_called_back_for_its_own_objective(qapp, tmp_path
     win.close()
 
 
+def test_a_grid_of_cells_sized_in_um_is_centred_on_the_picture(qapp, tmp_path):
+    from clampwise.app.screens import polygon_panel
+
+    rig = SimRig(255)
+    panel = _panel_with_scale(tmp_path, um=0.5)                                 # 200 x 160 px, 0.5 um a pixel
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(FakeSDK(), polyscan_running=lambda: False))
+    dlg.calibration = patterns.Calibration(255, True, rig.cal.to_field, (rig.w, rig.h), 0.1, dlg._objective())
+    dlg.source.setCurrentText("Grid")
+    dlg.rows.setValue(3)
+    dlg.cols.setValue(3)
+    dlg.cell_w.setValue(17.0)                                                    # 34 x 24 px cells
+    dlg.cell_h.setValue(12.0)
+    dlg.make_steps()
+    assert len(dlg.steps) == 9 and "17 x 12 um" in dlg.pattern_note.text()
+    corners = []
+    for step in dlg.steps:
+        u, v = np.array(step.shapes[0].points).reshape(-1, 2).T
+        x, y = dlg.calibration.camera_of(u, v)
+        corners.append((x.min(), y.min(), x.max(), y.max()))
+    x0, y0, x1, y1 = corners[4]                                                  # the middle one, on the middle
+    assert ((x0 + x1) / 2, (y0 + y1) / 2) == pytest.approx((100, 80), abs=0.5)
+    assert (x1 - x0, y1 - y0) == pytest.approx((34, 24), abs=0.5)
+    assert corners[0][0] == pytest.approx(100 - 1.5 * 34, abs=0.5)               # 3 across, side by side
+    dlg.cell_w.setValue(0.0)                                                     # 0: the whole picture tiled again
+    dlg.make_steps()
+    assert np.array(dlg.steps[0].shapes[0].points).size and "um" not in dlg.pattern_note.text().split("picture")[-1]
+
+
+def test_with_each_sweep_the_light_steps_on_in_the_gap_and_round_again(qapp, tmp_path):
+    from clampwise.app.screens import polygon_panel
+
+    sdk = FakeSDK()
+    panel = _panel_with_scale(tmp_path)
+    dlg = polygon_panel.PolygonPanel(panel, make=lambda: Polygon(sdk, polyscan_running=lambda: False))
+    dlg.take()
+    assert dlg.wait()
+    dlg.source.setCurrentText("Grid")
+    dlg.grid_on_picture.setChecked(False)
+    dlg.rows.setValue(1)
+    dlg.cols.setValue(3)
+    dlg.make_steps()
+    dlg.run_starting()                                                          # not asked for: nothing shown
+    assert dlg.wait() and dlg.polygon.shown is None
+    dlg.with_sweeps.setChecked(True)
+    shown = []
+    for sweep in (None, 1, 2, 3, 4):                                             # the start, then each gap
+        dlg.run_starting() if sweep is None else dlg.sweep_gap(sweep)
+        assert dlg.wait()
+        shown.append(dlg.list.currentRow())
+        lit = np.flatnonzero((sdk.image == 255).any(axis=0))
+        assert lit.size and lit.min() >= shown[-1] * 912 // 3 - 1 and lit.max() < (shown[-1] + 1) * 912 // 3 + 1
+    assert shown == [0, 1, 2, 0, 1]                                              # a step a sweep, round again
+    dlg.release()
+    assert dlg.wait()
+
+
 def test_a_recording_s_end_leaves_nothing_lit(qapp, tmp_path):
     from clampwise.app.screens import polygon_panel
 

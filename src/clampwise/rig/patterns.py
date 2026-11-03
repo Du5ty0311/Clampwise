@@ -169,18 +169,20 @@ def grid(rows: int, columns: int, region: tuple[float, float, float, float] = (0
 
 
 def grid_on_picture(rows: int, columns: int, cal: "Calibration", size: tuple[int, int], fill: float = 1.0,
-                    round_spots: bool = False) -> list[Step]:
+                    round_spots: bool = False, cell_px: tuple[float, float] | None = None) -> list[Step]:
     """``rows`` x ``columns`` cells tiling the camera's picture (``size``: its width and height, ``cal`` the map at
     that size) rather than the whole field, numbered as ``grid`` numbers them (1 at the picture's top left, along
     each row): when the field is larger than the picture, every cell is one the camera sees. Each cell is a shape on
-    the field through the map; a round spot is round on the picture, and so on the slice."""
+    the field through the map; a round spot is round on the picture, and so on the slice. With ``cell_px`` (each
+    cell's width and height on the picture), cells of that size centred on the picture's middle instead."""
     w, h = size
-    cw, ch = w / columns, h / rows
+    cw, ch = cell_px if cell_px else (w / columns, h / rows)
+    x0, y0 = (w - columns * cw) / 2, (h - rows * ch) / 2
     t = np.linspace(0, 2 * np.pi, 48, endpoint=False)
     steps = []
     for i in range(rows):
         for j in range(columns):
-            cx, cy = (j + 0.5) * cw, (i + 0.5) * ch
+            cx, cy = x0 + (j + 0.5) * cw, y0 + (i + 0.5) * ch
             hw, hh = cw * fill / 2, ch * fill / 2
             if round_spots:
                 r = min(hw, hh)
