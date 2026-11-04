@@ -37,7 +37,7 @@ class FakeLucam:
         return 1
 
     def LucamQueryVersion(self, handle, v):
-        v._obj.serialnumber = 25050256
+        v._obj.serialnumber = 12345678
         return 1
 
     def LucamGetFormat(self, handle, fmt, rate):
@@ -95,7 +95,7 @@ def test_the_camera_is_taken_only_when_its_program_is_closed_and_let_go_at_once(
     held = lucam.Camera(fake, owner_check=lambda: True)
     assert not held.open() and "close it first" in held.status and fake.calls == []
     cam = lucam.Camera(fake, owner_check=lambda: False)
-    assert cam.open() and cam.serial == 25050256 and cam.exposure_ms == pytest.approx(37.18)
+    assert cam.open() and cam.serial == 12345678 and cam.exposure_ms == pytest.approx(37.18)
     s = cam.setting(lucam.EXPOSURE)
     assert (s.low, s.high) == (pytest.approx(0.016), 500.0)
     cam.close()

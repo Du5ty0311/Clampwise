@@ -7,7 +7,7 @@ from clampwise.rig import hardware, telegraph
 
 RIG = [(r"USB\VID_09C0&PID_0145\5&34E9DD7A&0&2", "DD1440"),
        (r"USB\VID_09C0&PID_0136\00123456", "USB Input Device"),
-       (r"USB\VID_1724&PID_0753\0025050256", "INFINITY USB 3.0 Camera"),
+       (r"USB\VID_1724&PID_0753\0012345678", "INFINITY USB 3.0 Camera"),
        (r"USB\VID_04B4&PID_0304\5&34E9DD7A&0&4", "Mightex PolyEcho IOBox"),
        (r"USB\VID_413C&PID_2105\5&34E9DD7A&0&7", "USB Input Device")]
 
@@ -22,7 +22,7 @@ def test_the_rig_s_devices_are_known_by_their_ids():
     d = hardware.identify(RIG[1][0])
     assert (d.role, d.name, d.serial) == ("amplifier", "Axon 700B", "00123456")
     d = hardware.identify(RIG[2][0])
-    assert (d.role, d.serial) == ("camera", "25050256")                             # as the camera reports it
+    assert (d.role, d.serial) == ("camera", "12345678")                             # as the camera reports it
     assert hardware.identify(RIG[4][0]) is None and hardware.identify("PCI\\VEN_8086") is None
 
 

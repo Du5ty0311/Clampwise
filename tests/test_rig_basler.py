@@ -289,7 +289,7 @@ def test_frames_that_never_come_are_said():
 
 def test_the_rig_s_camera_decides_the_library_and_its_pixel_the_scale():
     basler_rig = [(r"USB\VID_2676&PID_BA02\12345678", "Basler acA1920-40um")]
-    lumenera_rig = [(r"USB\VID_1724&PID_0753\0025050256", "INFINITY USB 3.0 Camera")]
+    lumenera_rig = [(r"USB\VID_1724&PID_0753\0012345678", "INFINITY USB 3.0 Camera")]
     assert cameras.kind(lambda: basler_rig) == "basler" and cameras.kind(lambda: lumenera_rig) == "lumenera"
     d = hardware.identify(*basler_rig[0])
     assert (d.role, d.name, d.serial) == ("camera", "Basler acA1920-40um", "12345678")

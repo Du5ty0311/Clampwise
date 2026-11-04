@@ -8,8 +8,8 @@ acquisition program", Infinity Analyze "the camera's program", Commander the amp
 The devices as they identify themselves (read on the rig PC, 2026-10-16):
 
 - Digidata 1440A: USB ``VID_09C0&PID_0145`` ("DD1440", Molecular Devices' driver)
-- MultiClamp 700B: USB ``VID_09C0&PID_0136``, its serial the device's own (``...\\00832251``)
-- the camera: USB ``VID_1724`` (Lumenera), "INFINITY USB 3.0 Camera", its serial the device's (``...\\0025050256``);
+- MultiClamp 700B: USB ``VID_09C0&PID_0136``, its serial the device's own (the instance path's last part)
+- the camera: USB ``VID_1724`` (Lumenera), "INFINITY USB 3.0 Camera", its serial the device's;
   on a rig with a Basler camera (an ace USB 3.0), USB ``VID_2676`` (Basler AG), its serial the device's
 - the Polygon's IOBox: USB ``VID_04B4&PID_0304`` ("Mightex PolyEcho IOBox")
 """
@@ -105,7 +105,7 @@ def identify(instance: str, description: str = "") -> Device | None:
         if vid == kvid and (kpid is None or pid == kpid):
             serial = rest if re.fullmatch(r"[0-9A-Za-z]{6,}", rest) and "&" not in rest else ""
             if role == "camera" and serial.isdigit():
-                serial = str(int(serial))                 # 0025050256 -> 25050256, as the camera reports it
+                serial = str(int(serial))                 # 0012345678 -> 12345678, as the camera reports it
             if vid == "2676" and description.lower().startswith("basler ") and "vision" not in description.lower():
                 name = description.strip()                # its model, when Windows names it (Basler acA1920-40um)
             return Device(role, name, serial, "", instance)
