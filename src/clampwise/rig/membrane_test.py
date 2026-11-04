@@ -15,10 +15,15 @@ and every pulse measured as pCLAMP measures it (the pCLAMP 10 User Guide, "Membr
 In current clamp (Clampex's test assumes voltage clamp) the input resistance, tau and Cm come from the charging
 fitted on the rising half. What it is reading is said: the pipette alone (Rt under the input-resistance floor), a seal
 (over the ceiling), or a cell. Nothing is saved: a test, not a recording.
+
+The amplifier's telegraph is read again while the test runs, as Clampex follows it: a new gain or feedback resistor
+is used at once (only the pulses recorded after it averaged), and a new mode or command sensitivity ends the test,
+said why (its pulse was made for the old one).
 """
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -36,6 +41,7 @@ RING_PULSES = 200                                # pulses the raw file holds bef
 SAMPLES = 500                                    # samples a period, as Clampex's (250 a step)
 MAX_RATE_HZ = 250_000.0                          # the Digidata 1440A, one input
 READ_EVERY_S = 0.05                              # how often the newest pulses are measured (the screen draws as often)
+TELEGRAPH_EVERY_S = 0.5                          # how often the amplifier's telegraph is read again during a test
 
 
 @dataclass
@@ -71,6 +77,13 @@ class Reading:
     t_ms: np.ndarray = field(default_factory=lambda: np.zeros(0))
     trace: np.ndarray = field(default_factory=lambda: np.zeros(0))       # the averaged period, rising edge at 1/4
     fits: list = field(default_factory=list)      # (t_ms, y) of each edge's fitted exponential, drawn over the trace
+
+
+def scale_words(tg) -> str:
+    """The output scale a telegraph gives, as Commander says it (0.5 V/nA; 10 mV/mV), the gain with it."""
+    v = tg.primary_v_per_unit * 1e3                          # V a pA -> V a nA; V a mV -> mV a mV
+    unit = "V/nA" if tg.primary_unit == "pA" else "mV/mV"
+    return f"{v:g} {unit}" + (f" (gain x{tg.primary_gain:g})" if tg.primary_gain and tg.primary_gain != 1 else "")
 
 
 def _edge(d: np.ndarray, fs: float) -> tuple[float, float, tuple[np.ndarray, np.ndarray] | None]:
@@ -203,6 +216,9 @@ class MembraneTest:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._frames = 0
+        self._scale = NAN                         # volts at the digitizer a pA (VC) or a mV (IC), as now telegraphed
+        self._fresh_from = 0                      # the first pulse recorded at that scale
+        self._ended, self._head = "", ""            # why the amplifier ended a test; what it plays
 
     @property
     def running(self) -> bool:
@@ -255,19 +271,26 @@ class MembraneTest:
             for f in (wfile, raw, Path(str(raw) + ".stop")):
                 f.unlink(missing_ok=True)
             wave.tofile(wfile)
-            scale = tg.primary_v_per_unit                     # volts at the digitizer a pA (VC) or a mV (IC)
-            reader = threading.Thread(target=self._read, args=(raw, period, scale, tg), daemon=True)
-            self.state, self.message = "running", (f"{s.amplitude:g} {tg.command_unit} peak to peak at {s.hz:g} Hz "
-                                                   f"({s.rate_hz / 1e3:g} kHz), {tg.mode}")
+            self._scale, self._fresh_from = tg.primary_v_per_unit, 0
+            self._ended = ""
+            reader = threading.Thread(target=self._read, args=(raw, period, tg), daemon=True)
+            watcher = threading.Thread(target=self._watch, args=(tg,), daemon=True)
+            self._head = (f"{s.amplitude:g} {tg.command_unit} peak to peak at {s.hz:g} Hz ({s.rate_hz / 1e3:g} kHz), "
+                          f"{tg.mode}")
+            self.state, self.message = "running", f"{self._head}, {scale_words(tg)}"
             reader.start()
+            watcher.start()
             line = helper.record({"ai": [0], "period_us": 1e6 / s.rate_hz, "frames": int(s.hours * 3600 * s.rate_hz),
                                   "hold": acquire.holding_codes(None, cal), "waveform": str(wfile), "repeat": True,
                                   "out": str(raw), "ring_frames": period * RING_PULSES, "say_s": READ_EVERY_S},
                                  self._progress)
             self._stop.set()
             reader.join()
+            watcher.join()
             if "error" in line:
                 raise RuntimeError(line["error"])
+            if self._ended:
+                raise RuntimeError(self._ended)
             self.state, self.message = "idle", "stopped"
         except Exception as exc:
             self._stop.set()
@@ -283,16 +306,40 @@ class MembraneTest:
         if self._stop.is_set():
             (self.work / "test.raw.stop").touch()
 
-    def _read(self, raw: Path, period: int, scale: float, tg) -> None:
+    def _watch(self, tg) -> None:
+        """The telegraph read again while the test runs: a new output scale used from the next pulse on; a new mode
+        or command sensitivity ends the test (its pulse no longer what was asked)."""
+        while not self._stop.wait(TELEGRAPH_EVERY_S):
+            try:
+                # by its serial: no Broadcast to every window twice a second
+                now = self.read_telegraph(self.serial or tg.serial or None, self.channel)
+            except Exception:
+                continue
+            if now is None:                                  # Commander busy or closed a moment: the last kept
+                continue
+            if now.mode != tg.mode or not math.isclose(now.command_per_volt, tg.command_per_volt, rel_tol=1e-3):
+                self._ended = (f"the amplifier changed from {tg.mode} ({tg.command_per_volt:g} {tg.command_unit}/V) "
+                               f"to {now.mode}" + (f" ({now.command_per_volt:g} {now.command_unit}/V)"
+                                                  if now.command_per_volt else "")
+                               + ": start the test again for it")
+                self.stop()
+                return
+            if not math.isclose(now.primary_v_per_unit, self._scale, rel_tol=1e-3) and now.primary_v_per_unit > 0:
+                self._fresh_from = self._frames // max(1, self.settings.period) + 1
+                self._scale = now.primary_v_per_unit
+                self.message = f"{self._head}, {scale_words(now)} (changed on the amplifier: used from now on)"
+
+    def _read(self, raw: Path, period: int, tg) -> None:
         s = self.settings
         t0 = time.monotonic()
         measured = 0
         while not self._stop.is_set():
             time.sleep(READ_EVERY_S)
             whole = self._frames // period                   # pulses recorded so far (the file holds the last ones)
-            if whole < 1 or whole == measured:
+            if whole < 1 or whole == measured or whole <= self._fresh_from:
                 continue
-            n = min(s.average, whole, RING_PULSES - 1)
+            n = min(s.average, whole - self._fresh_from, RING_PULSES - 1)    # none from before a new scale
+            scale = self._scale
             try:
                 with open(raw, "rb") as fh:
                     parts = []

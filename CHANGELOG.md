@@ -2,6 +2,13 @@
 
 ## 1.8.1 — not released yet
 
+- **The membrane test follows the amplifier while it runs.** It read the amplifier's output scale once, when it
+  started: a gain or feedback resistor changed on Commander during the test went on being read with the old one, and
+  Rt came out wrong by the same factor (x5 to x1: a 7.5 MOhm pipette read 37.5). The telegraph is now read again
+  twice a second, as Clampex follows it: a new scale is used at once (the pulses before it left out of the average),
+  and the status line says the scale in use (0.05 V/nA). A new mode or command sensitivity ends the test, saying
+  why. `tools/rigtest/membrane_test_check.py` measures, with the secondary output, the step that reached the pipette.
+
 - **The patterned light can step on with each sweep, with no trigger cable.** **Next step with each sweep** (the
   patterned light's More options) shows the first step before a run's first sweep, and the next one in the gap
   after each sweep, round again after the last. Grid maps and cell-by-cell connectivity protocols then light one

@@ -131,3 +131,42 @@ def test_the_test_runs_live_until_stopped_and_keeps_nothing(tmp_path):
     test.stop()
     test.wait(10)
     assert test.state == "idle" and not list(tmp_path.glob("test.*"))
+
+
+def _telegraph(scale=5e-5, mode="VC", gain=1.0):
+    return telegraph.Telegraph(mode, "pA" if mode == "VC" else "mV", scale, gain, 10_000.0, "mV", 0.01, 1.0,
+                               20.0 if mode == "VC" else 400.0, "00123456", 1, 0.0, 0.0)
+
+
+def test_a_gain_changed_on_the_amplifier_during_the_test_is_followed(tmp_path, monkeypatch):
+    # started at x5 (0.25 V/nA), then put back to x1 on Commander: read once at the start, Rt stayed 5x too high
+    monkeypatch.setattr(mt, "TELEGRAPH_EVERY_S", 0.1)
+    now = {"tg": _telegraph(2.5e-4, gain=5.0)}
+    test = mt.MembraneTest(work=tmp_path, read_telegraph=lambda *a, **k: now["tg"], make_helper=FakeHelper)
+    test.start()
+    end = time.time() + 15
+    while time.time() < end and len(test.history) < 2:
+        time.sleep(0.05)
+    assert test.latest.rt_mohm == pytest.approx(5 * 510, rel=0.1) and "0.25 V/nA (gain x5)" in test.message
+    now["tg"] = _telegraph(5e-5)
+    end = time.time() + 15
+    while time.time() < end and not (test.latest.rt_mohm < 1000 and "changed on the amplifier" in test.message):
+        time.sleep(0.05)
+    assert test.latest.rt_mohm == pytest.approx(510, rel=0.1) and "0.05 V/nA" in test.message
+    test.stop()
+    test.wait(10)
+    assert test.state == "idle"
+
+
+def test_a_mode_changed_during_the_test_ends_it_saying_why(tmp_path, monkeypatch):
+    monkeypatch.setattr(mt, "TELEGRAPH_EVERY_S", 0.1)
+    now = {"tg": _telegraph()}
+    test = mt.MembraneTest(work=tmp_path, read_telegraph=lambda *a, **k: now["tg"], make_helper=FakeHelper)
+    test.start()
+    end = time.time() + 15
+    while time.time() < end and test.latest is None:
+        time.sleep(0.05)
+    now["tg"] = _telegraph(1e-2, mode="IC")
+    test.wait(10)
+    assert test.state == "failed" and "from VC" in test.message and "to IC" in test.message
+    assert "start the test again" in test.message and not list(tmp_path.glob("test.*"))
