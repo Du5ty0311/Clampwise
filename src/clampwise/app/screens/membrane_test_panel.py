@@ -58,6 +58,8 @@ class MembraneTestView(QtWidgets.QWidget):
         side.setLayout(grid)
         lay.addWidget(side, 1)
         self.setLayout(lay)
+        self.fixed: float | None = None               # the pulse's scale fixed this far above and below 0, or None
+        self.unit = ""                                # the last reading's unit (pA or mV)
         self.on_theme(palette)
 
     def on_theme(self, palette) -> None:
@@ -90,6 +92,9 @@ class MembraneTestView(QtWidgets.QWidget):
         self._shown = None
         self.pulse.getPlotItem().enableAutoRange(y=False)
         self._yrange = None
+        self.unit = ""
+        if self.fixed is not None:
+            self.pulse.getPlotItem().setYRange(-self.fixed, self.fixed, padding=0)
         self.rt_curve.setData([], [])
         self.rs_curve.setData([], [])
         for v in self.values.values():
@@ -101,6 +106,7 @@ class MembraneTestView(QtWidgets.QWidget):
         if r is None or r is self._shown:
             return
         self._shown = r
+        self.unit = r.unit
         self.trace.setData(r.t_ms, r.trace)
         for k, c in enumerate(self.fit_curves):          # each edge's fitted exponential, red, as Clampex draws it
             if k < len(r.fits):
@@ -132,10 +138,20 @@ class MembraneTestView(QtWidgets.QWidget):
             self.rt_curve.setData(t, np.array([x.rt_mohm for x in h], float), connect="finite")
             self.rs_curve.setData(t, np.array([x.rs_mohm for x in h], float), connect="finite")
 
+    def set_fixed(self, half: float | None) -> None:
+        """The pulse's scale fixed this far above and below 0 (the acquisition's scale arrows), or None: following
+        the trace again."""
+        self.fixed = half
+        self._yrange = None
+        if half is not None:
+            self.pulse.getPlotItem().setYRange(-half, half, padding=0)
+        elif self._shown is not None:
+            self._steady_y(np.asarray(self._shown.trace))
+
     def _steady_y(self, y: np.ndarray) -> None:
         """The scale kept still while the trace fits it (a scale that follows every pulse jumps with the noise):
         set afresh only when the trace leaves it or fills less than a third of it."""
-        if not y.size:
+        if not y.size or self.fixed is not None:
             return
         lo, hi = float(np.min(y)), float(np.max(y))
         span = max(hi - lo, 1e-9)

@@ -47,7 +47,11 @@ class WindowView(QtWidgets.QFrame):
         self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.setMinimumSize(160, 110)
         self.setCursor(QtCore.Qt.PointingHandCursor)
-        lay = box("v", "xs", "s")
+        outer = box("h", "s", "s")                     # what it shows, then a side beside it (set_side), if any
+        lay = box("v", "xs")
+        outer.addLayout(lay, 1)
+        self._main = lay
+        self.side: QtWidgets.QWidget | None = None
         head = box("h", "s")
         self.name = label(rig_windows.ROLES[role][0], "heading")
         self.name.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)   # clipped, not wider
@@ -77,7 +81,7 @@ class WindowView(QtWidgets.QFrame):
         self.state.setAlignment(QtCore.Qt.AlignCenter)
         lay.addWidget(self.state)
         lay.addStretch(1)
-        self.setLayout(lay)
+        self.setLayout(outer)
         self.source: rig_windows.AppWindow | None = None
         self._thumb = None
         self._timer = QtCore.QTimer(self)                  # the frame can move with the layout: follow it
@@ -111,7 +115,7 @@ class WindowView(QtWidgets.QFrame):
              held: str = "the camera itself, held by Clampwise (Let go gives it back)") -> None:
         """Let Clampwise's own ``panel`` replace the program's window here: ``take`` and ``release`` it."""
         self.panel, self.held = panel, held
-        self.layout().insertWidget(2, panel, 10)
+        self._main.insertWidget(2, panel, 10)
         panel.hide()
         self.use_button = widgets.button("Use here", lambda: release() if self.own else take(), tip, quiet=True)
         self.head.insertWidget(2, self.use_button)
@@ -123,7 +127,7 @@ class WindowView(QtWidgets.QFrame):
             self.panel.setVisible(on)
             self.use_button.setText("Let go" if on else "Use here")
         self.state.setVisible(not on)
-        lay = self.layout()                            # the spacers round "Not open" give way to the picture
+        lay = self._main                               # the spacers round "Not open" give way to the picture
         for k in range(lay.count()):
             if lay.itemAt(k).spacerItem() is not None:
                 lay.setStretch(k, 0 if on else 1)
@@ -133,6 +137,26 @@ class WindowView(QtWidgets.QFrame):
         else:
             self.show_window(self.source)
         self.own_changed.emit(self.role, on)
+
+    def set_side(self, widget: QtWidgets.QWidget | None) -> QtWidgets.QWidget | None:
+        """``widget`` beside what the view shows, on its right (None: the side taken away); the side there before
+        is returned, out of the view."""
+        before = self.side
+        if before is not None:
+            self.layout().removeWidget(before)
+            before.setParent(None)
+        self.side = widget
+        if widget is not None:
+            widget.setCursor(QtCore.Qt.ArrowCursor)
+            self.layout().addWidget(widget)
+        QtCore.QTimer.singleShot(0, self._place)         # the program's window fitted to the room left
+        return before
+
+    def _side_width(self) -> int:
+        """The room the side takes, with the gap before it (0 without one)."""
+        if self.side is None or self.side.isHidden():
+            return 0
+        return self.side.width() + self.layout().spacing()
 
     def _attach(self) -> None:
         if self.own or self._thumb is not None or self.source is None or not self.isVisible():
@@ -161,7 +185,8 @@ class WindowView(QtWidgets.QFrame):
         pad = theme.SPACE["s"]
         head = self.detail.geometry().bottom() + pad
         self._thumb.place(int((origin.x() + pad) * ratio), int((origin.y() + head) * ratio),
-                          int((self.width() - 2 * pad) * ratio), int((self.height() - head - pad) * ratio),
+                          int((self.width() - self._side_width() - 2 * pad) * ratio),
+                          int((self.height() - head - pad) * ratio),
                           visible=self.isVisible(), part=self.shown_part(), fill=self.fill)
 
     def showEvent(self, event) -> None:
@@ -193,7 +218,7 @@ class WindowView(QtWidgets.QFrame):
         self.bare = on
         m = 0 if self.isFullScreen() or getattr(self, "_going_full", False) else self.margin
         self.layout().setContentsMargins(m, m, m, m)
-        self.layout().setSpacing(0 if on else theme.SPACE["xs"])
+        self._main.setSpacing(0 if on else theme.SPACE["xs"])
         self.setObjectName("bare" if on else "desk")             # no border drawn round it
         self.style().unpolish(self)
         self.style().polish(self)
@@ -264,10 +289,10 @@ class WindowView(QtWidgets.QFrame):
         pad = theme.SPACE["s"]
         head = self.detail.geometry().bottom() + pad
         ratio = self.devicePixelRatioF()
-        room_w = screen.width() - frame.width() - 2 * pad
+        room_w = screen.width() - frame.width() - 2 * pad - self._side_width()
         room_h = screen.height() - frame.height() - head - pad
         scale = min(room_w / (pw / ratio), room_h / (ph / ratio))
-        w, h = int(pw / ratio * scale) + 2 * pad, int(ph / ratio * scale) + head + pad
+        w, h = int(pw / ratio * scale) + 2 * pad + self._side_width(), int(ph / ratio * scale) + head + pad
         self.showNormal()
         self.resize(w, h)
         self.move(screen.x() + (screen.width() - w - frame.width()) // 2, screen.y())
@@ -367,7 +392,8 @@ class WindowView(QtWidgets.QFrame):
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event) -> None:
-        if self.own:                                    # Clampwise's own picture: nothing to bring forward
+        beside = self.side is not None and self.side.geometry().contains(event.pos())
+        if self.own or beside:                          # Clampwise's own picture, or the side: nothing brought forward
             super().mousePressEvent(event)
             return
         if self._choosing():

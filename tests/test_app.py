@@ -1161,6 +1161,76 @@ def test_the_membrane_test_s_plot_marks_zero_and_the_holding_and_time_never_star
     assert view.zero.scene() is not None and view.holding_line.scene() is not None
 
 
+def test_the_acquisition_s_scale_arrows_fix_the_trace_about_0_in_steps_or_let_it_follow(qapp, window):
+    # near a seal the trace is flat: a scale that follows it blows the noise up, so breaking in looks no different;
+    # fixed (+-500 pA, a step each arrow), the seal stays flat and the cell's transients show as they are
+    from clampwise.rig import membrane_test
+
+    window.go("live")
+    panel = window.screens["live"].recorder
+    panel.scales = {}
+    panel._setup_plots([("IN 0", "pA", 5e-5), ("I", "mV", 0.01)])
+    current, potential = (p.getViewBox() for p in panel.plots)
+    assert panel.scale_auto.isChecked() and panel.scale_shown.text() == "Auto\npA" and current.autoRangeEnabled()[1]
+    panel.scale_up.click()                                                # from Auto: fixed at the first step
+    assert panel.scale_range() == 500 and not panel.scale_auto.isChecked() and panel.scale_shown.text() == "±500\npA"
+    assert current.viewRange()[1] == pytest.approx([-500, 500]) and potential.autoRangeEnabled()[1]   # mV: its own
+    panel.scale_up.click()
+    panel.scale_up.click()
+    assert current.viewRange()[1] == pytest.approx([-1500, 1500])
+    panel.plots[0].plot(np.arange(10.0), np.full(10, 3.0))                # a seal's flat trace: the scale stays
+    _settle(qapp, 0.1)
+    assert current.viewRange()[1] == pytest.approx([-1500, 1500])
+    for _ in range(5):
+        panel.scale_down.click()
+    assert panel.scale_range() == 500 and not panel.scale_down.isEnabled()   # never narrower than one step
+    panel.scale_step.setCurrentIndex(panel.scale_step.findData(200.0))
+    assert panel.scale_range() == 200 and current.viewRange()[1] == pytest.approx([-200, 200])
+    panel.scale_auto.click()
+    assert panel.scale_range() is None and current.autoRangeEnabled()[1]
+    panel._setup_plots([("IN 0", "pA", 5e-5)])                            # new plots (the next run): kept
+    panel.scale_by(1)
+    panel._setup_plots([("IN 0", "pA", 5e-5)])
+    assert panel.plots[0].getViewBox().viewRange()[1] == pytest.approx([-200, 200])
+    # the membrane test's pulse: a seal (10 mV through 2 GOhm, +-2.5 pA) drawn on the same fixed scale
+    panel.scales["pA"].update(fixed=True, n=1, step=500.0)
+    panel.stack.setCurrentWidget(panel.test_view)
+    panel.test_view.clear()
+    panel._apply_scale()
+    y = np.where((np.arange(500) >= 125) & (np.arange(500) < 375), 2.5, -2.5)
+    r = membrane_test.measure(y, 25000.0, 10.0, "VC")
+    panel.test_view.show_reading(r, [r])
+    pulse = panel.test_view.pulse.getViewBox()
+    assert pulse.viewRange()[1] == pytest.approx([-500, 500])
+    panel.set_scale_auto(True)                                            # following the pulse again
+    lo, hi = pulse.viewRange()[1]
+    assert -10 < lo < -2.5 and 2.5 < hi < 10
+    panel.stack.setCurrentWidget(panel.scope)
+    panel.scales = {}
+
+
+def test_with_the_acquisition_on_the_other_screen_the_amplifier_s_sections_go_with_it(qapp, window):
+    # the cell's amplifier read and worked beside its trace, on the acquisition's screen; back in Live after
+    window.go("live")
+    live = window.screens["live"]
+    view, sections = live.views["acquisition"], live.sections
+    order = sections.order()
+    amp, controls = sections.sections["amplifier"], sections.sections["controls"]
+    live.toggle_popped("acquisition")                 # its own window (two screens: maximized on the other screen)
+    live.lend_amplifier(True)
+    _settle(qapp, 0.1)
+    assert view.side is not None and amp.window() is view and controls.window() is view
+    assert live.readouts["mode"].value.window() is view and live.amp_controls.window() is view
+    assert sections.order() == order and sections.lent("amplifier")      # their places kept in Live's panel
+    sections.move("health", -1)                       # Live's own sections still move, past the places kept
+    assert sections.order().index("health") == order.index("health") - 1
+    sections.move("health", 1)
+    live.toggle_popped("acquisition")                 # back into Live: the sections back in their places
+    _settle(qapp, 0.1)
+    assert view.side is None and amp.window() is window and controls.window() is window
+    assert sections.order() == order and not sections.lent("amplifier") and not amp.isHidden()
+
+
 def test_the_amplifier_s_controls_are_laid_out_as_commander_s(qapp):
     # the mode as three buttons; each Auto on the line of the value it sets; each switch beside its value; the
     # groups in the order a cell is patched; only the mode's own shown

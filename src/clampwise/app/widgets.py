@@ -350,6 +350,7 @@ class Sections(QtWidgets.QWidget):
         super().__init__()
         self.key, self._settings, self._folded = key, settings, set(folded)
         self.sections: dict[str, Section] = {}
+        self._lent: dict[str, QtWidgets.QWidget] = {}   # sections lent to another window: the hidden place kept
         self._lay = box("v", "s")
         self._lay.addStretch(1)
         self.setLayout(self._lay)
@@ -378,9 +379,37 @@ class Sections(QtWidgets.QWidget):
         k = keys.index(key)
         to = min(max(k + by, 0), len(keys) - 1)
         if to != k:
-            self._lay.removeWidget(self.sections[key])
-            self._lay.insertWidget(to, self.sections[key])
+            w = self._lay.itemAt(k).widget()             # the section, or the place kept for a lent one
+            self._lay.removeWidget(w)
+            self._lay.insertWidget(to, w)
             self.save()
+
+    def lend(self, key: str) -> Section:
+        """A section taken out to be shown in another window (the caller lays it out there); a hidden place keeps
+        its position here, so the order kept is unchanged and ``give_back`` returns it to it."""
+        section = self.sections[key]
+        if key not in self._lent:
+            place = QtWidgets.QWidget()
+            place.key = key
+            place.hide()
+            i = self._lay.indexOf(section)
+            self._lay.removeWidget(section)
+            self._lay.insertWidget(i, place)
+            self._lent[key] = place
+        return section
+
+    def give_back(self, key: str) -> None:
+        """A lent section back in its place here."""
+        place = self._lent.pop(key, None)
+        if place is None:
+            return
+        i = self._lay.indexOf(place)
+        self._lay.removeWidget(place)
+        place.deleteLater()
+        self._lay.insertWidget(i, self.sections[key])
+
+    def lent(self, key: str) -> bool:
+        return key in self._lent
 
     def only(self, key: str) -> None:
         """This section unfolded, every other one folded."""
@@ -402,10 +431,11 @@ class Sections(QtWidgets.QWidget):
         m.addAction("Only this one unfolded", lambda: self.only(key))
         m.addAction("Unfold all", lambda: self.every(True))
         m.addAction("Fold all", lambda: self.every(False))
-        m.addSeparator()
-        keys = [k for k in self.order() if not self.sections[k].isHidden()]
-        m.addAction("Move up", lambda: self.move(key, -1)).setEnabled(keys[:1] != [key])
-        m.addAction("Move down", lambda: self.move(key, 1)).setEnabled(keys[-1:] != [key])
+        if key not in self._lent:                       # a lent section is moved where it is shown
+            m.addSeparator()
+            keys = [k for k in self.order() if k not in self._lent and not self.sections[k].isHidden()]
+            m.addAction("Move up", lambda: self.move(key, -1)).setEnabled(keys[:1] != [key])
+            m.addAction("Move down", lambda: self.move(key, 1)).setEnabled(keys[-1:] != [key])
         m.exec_(at)
 
     def load(self) -> None:

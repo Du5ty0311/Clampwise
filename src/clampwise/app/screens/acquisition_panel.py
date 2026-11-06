@@ -22,6 +22,9 @@ GAP_FREE_SHOWN_S = 2.0
 LEFT_AXIS_PX = 64                            # each plot's left axis: its label and numbers
 QUICK = 8                                    # protocol buttons at most (Ctrl+1 to Ctrl+8)
 QUICK_ACTIONS = {"record": "Record", "play": "Play", "choose": "Choose it only"}
+# the trace's vertical scale, fixed about 0 in steps (the arrows beside it: one step more or less each way), or Auto
+SCALE_STEPS = (0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0)
+SCALE_STEP = {"pA": 500.0, "nA": 0.5, "mV": 50.0}          # each unit's first step (another: 1)
 
 
 def _open_digitizer() -> None:
@@ -64,8 +67,14 @@ class AcquisitionPanel(QtWidgets.QWidget):
         self.note = label("", "muted", wrap=True)   # what the scope shows, or is waiting for (never blank)
         self.note.setTextFormat(QtCore.Qt.RichText)
         lay.addWidget(self.note)
-        lay.addWidget(self.stack, 1)
+        self.scales: dict[str, dict] = {}            # each unit's scale: {"fixed", "n", "step"}, kept (Auto unless fixed)
+        self._scaled_unit: str | None = None         # the unit the scale column is showing
+        self._test_mode = "VC"
         self._plot_inputs: list = []
+        view = box("h", "xs")
+        view.addWidget(self.stack, 1)
+        view.addWidget(self._scale_column())
+        lay.addLayout(view, 1)
         self._n_sweeps = 0
         self._gap_for = 0                    # the sweep whose gap has been said (between_sweeps)
         # two lines under the scope, as an acquisition program's toolbar: the protocol and the transport, then where it
@@ -153,7 +162,6 @@ class AcquisitionPanel(QtWidgets.QWidget):
             line.addWidget(label(caption, "muted"))
             line.addWidget(w)
         lay.addLayout(line)
-        self._test_mode = "VC"
         self._test_settings = {"VC": (10.0, 50.0, 5), "IC": (50.0, 5.0, 3)}     # each mode's own pulse (VC: Clampex's Cell stage)
         self._show_test_settings("VC")
         for w in (self.test_amp, self.test_hz, self.test_avg):
@@ -498,6 +506,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
             return
         self.test_view.clear()
         self.stack.setCurrentWidget(self.test_view)
+        self._apply_scale()
         self.note.setText("")
         self.test_button.setText("Stop test")
         self._buttons()
@@ -506,6 +515,8 @@ class AcquisitionPanel(QtWidgets.QWidget):
     def _test_tick(self) -> None:
         t = self.test
         self.test_view.show_reading(t.latest, t.history)
+        if self.stack.currentWidget() is self.test_view and self._scale_unit() != self._scaled_unit:
+            self._apply_scale()                          # the amplifier's mode changed: that unit's scale
         self.status.setText({"starting": "Membrane test: starting", "running": f"Membrane test: {t.message}",
                              "failed": f"Membrane test stopped: {t.message}"}.get(t.state, "Membrane test: stopped")
                             + ".")
@@ -678,6 +689,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
                 p.setLabel("bottom", "Time (s)")
             theme.style_plot(p, pal)
             (self.sent_plots if is_sent else self.plots).append(p)
+        self._apply_scale()
 
     def _draw_sent(self, sweeps, fs: float, faint_before: bool = False) -> None:
         """What is sent in ``sweeps`` drawn in its plots, each output in its own colour (with ``faint_before``,
@@ -763,6 +775,121 @@ class AcquisitionPanel(QtWidgets.QWidget):
         frames = raw[: raw.size // n * n].reshape(-1, n).astype(float) * (10.0 / 32768)
         return frames / np.array([v or 1.0 for _, _, v in st.inputs])
 
+    # ---- the trace's vertical scale: Auto (following the trace) or fixed about 0, in steps, with the arrows beside it
+    def _scale_column(self) -> QtWidgets.QWidget:
+        """Beside the trace: up widens the scale by a step each way (+-500 pA, +-1000, ...), down narrows it, Auto
+        follows the trace again. Fixed, a seal's flat trace stays flat and breaking in shows as it is."""
+        col = QtWidgets.QWidget()
+        lay = box("v", "xs")
+        lay.addStretch(1)
+        lay.addWidget(label("Scale", "muted"), 0, QtCore.Qt.AlignHCenter)
+        self.scale_up, self.scale_down = QtWidgets.QToolButton(), QtWidgets.QToolButton()
+        for b, arrow, by, tip in ((self.scale_up, QtCore.Qt.UpArrow, 1, "A wider scale: one step more above and "
+                                   "below 0 (from Auto: fixed at the scale last used)"),
+                                  (self.scale_down, QtCore.Qt.DownArrow, -1, "A narrower scale: one step less above "
+                                   "and below 0 (from Auto: fixed at the scale last used)")):
+            b.setArrowType(arrow)
+            b.setFixedSize(44, 36)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda *_, by=by: self.scale_by(by))
+        self.scale_shown = label("Auto", "")
+        self.scale_shown.setAlignment(QtCore.Qt.AlignCenter)
+        self.scale_shown.setToolTip("The trace's vertical scale: this far above and below 0, or Auto (following "
+                                    "the trace)")
+        self.scale_auto = QtWidgets.QToolButton()
+        self.scale_auto.setText("Auto")
+        self.scale_auto.setCheckable(True)
+        self.scale_auto.setFixedWidth(44)
+        self.scale_auto.setToolTip("The scale follows the trace; unticked, it stays fixed about 0 (the arrows step it)")
+        self.scale_auto.toggled.connect(self.set_scale_auto)
+        self.scale_step = QtWidgets.QComboBox()
+        for v in SCALE_STEPS:
+            self.scale_step.addItem(f"{v:g}", v)
+        self.scale_step.setToolTip("Each arrow's step, in the trace's unit (fixed: the scale is a whole number of "
+                                   "steps above and below 0)")
+        self.scale_step.currentIndexChanged.connect(self._scale_step_chosen)
+        lay.addWidget(self.scale_up, 0, QtCore.Qt.AlignHCenter)
+        lay.addWidget(self.scale_shown)
+        lay.addWidget(self.scale_down, 0, QtCore.Qt.AlignHCenter)
+        lay.addWidget(self.scale_auto, 0, QtCore.Qt.AlignHCenter)
+        lay.addWidget(label("Step", "muted"), 0, QtCore.Qt.AlignHCenter)
+        lay.addWidget(self.scale_step)
+        lay.addStretch(1)
+        col.setLayout(lay)
+        col.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Preferred)
+        return col
+
+    def _scale_unit(self) -> str | None:
+        """The unit of the trace the scale is for: the membrane test's while it is shown (its mode's before its
+        first reading), else the first input's (the amplifier's primary); None while no input is drawn."""
+        if self.stack.currentWidget() is self.test_view:
+            return self.test_view.unit or ("pA" if self._test_mode == "VC" else "mV")
+        return self._plot_inputs[0][1] if self._plot_inputs else None
+
+    def _scale(self, unit: str) -> dict:
+        return self.scales.setdefault(unit, {"fixed": False, "n": 1, "step": SCALE_STEP.get(unit, 1.0)})
+
+    def scale_by(self, by: int) -> None:
+        """One step wider (1) or narrower (-1) each way; from Auto, fixed at the scale last used."""
+        unit = self._scale_unit()
+        if unit is None:
+            return
+        s = self._scale(unit)
+        s["n"] = max(1, s["n"] + by) if s["fixed"] else s["n"]
+        s["fixed"] = True
+        self._apply_scale()
+        self.save_settings()
+
+    def set_scale_auto(self, on: bool) -> None:
+        unit = self._scale_unit()
+        if unit is None:
+            return
+        self._scale(unit)["fixed"] = not on
+        self._apply_scale()
+        self.save_settings()
+
+    def _scale_step_chosen(self, *_) -> None:
+        unit = self._scale_unit()
+        if unit is None:
+            return
+        self._scale(unit)["step"] = float(self.scale_step.currentData())
+        self._apply_scale()
+        self.save_settings()
+
+    def scale_range(self, unit: str | None = None) -> float | None:
+        """The fixed scale's half range (this far above and below 0) for ``unit`` (the trace's), or None: Auto."""
+        unit = unit or self._scale_unit()
+        if unit is None:
+            return None
+        s = self._scale(unit)
+        return s["n"] * s["step"] if s["fixed"] else None
+
+    def _apply_scale(self) -> None:
+        """The scale column said as it stands for the trace shown, and that trace drawn at it: the inputs in its unit,
+        or the membrane test's pulse."""
+        unit = self._scale_unit()
+        self._scaled_unit = unit
+        half = self.scale_range(unit)
+        for w in (self.scale_up, self.scale_auto, self.scale_step):
+            w.setEnabled(unit is not None)
+        self.scale_down.setEnabled(unit is not None and (half is None or self._scale(unit)["n"] > 1))
+        self.scale_shown.setText("–" if unit is None else f"Auto\n{unit}" if half is None else f"±{half:g}\n{unit}")
+        self.scale_auto.blockSignals(True)
+        self.scale_auto.setChecked(half is None)
+        self.scale_auto.blockSignals(False)
+        self.scale_step.blockSignals(True)
+        self.scale_step.setCurrentIndex(self.scale_step.findData(self._scale(unit)["step"]) if unit else -1)
+        self.scale_step.blockSignals(False)
+        for p, (_, u) in zip(self.plots, self._plot_inputs):
+            if u != unit:
+                continue
+            if half is None:
+                p.enableAutoRange(y=True)
+            else:
+                p.setYRange(-half, half, padding=0)
+        if self.stack.currentWidget() is self.test_view:
+            self.test_view.set_fixed(half)
+
     # ---- kept for the user
     def load_settings(self) -> None:
         if getattr(self.window, "persist", False):
@@ -781,6 +908,17 @@ class AcquisitionPanel(QtWidgets.QWidget):
                            "action": q.get("action") if q.get("action") in QUICK_ACTIONS else "record"}
                           for q in (kept if isinstance(kept, list) else []) if isinstance(q, dict) and q.get("protocol")
                           ][:QUICK]
+            try:
+                scales = json.loads(str(s.value("record/scales", "{}") or "{}"))
+            except ValueError:
+                scales = {}
+            for unit, sc in (scales.items() if isinstance(scales, dict) else ()):
+                try:
+                    step = float(sc["step"])
+                    self.scales[str(unit)] = {"fixed": bool(sc["fixed"]), "n": max(1, int(sc["n"])),
+                                              "step": step if step in SCALE_STEPS else SCALE_STEP.get(unit, 1.0)}
+                except (KeyError, TypeError, ValueError):
+                    pass
         else:
             keep = ""
         self.fill_quick()
@@ -801,6 +939,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
         s.setValue("record/seconds", self.seconds.value())
         s.setValue("record/buttons", json.dumps(self.quick))
         s.setValue("record/hidden_sent", sorted(self.hidden_sent))
+        s.setValue("record/scales", json.dumps(self.scales))
 
     def on_theme(self, palette) -> None:
         self.test_view.on_theme(palette)

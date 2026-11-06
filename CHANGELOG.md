@@ -2,6 +2,16 @@
 
 ## 1.8.1 — not released yet
 
+- **The acquisition's trace can keep a fixed scale.** Beside the trace, the up and down arrows set its vertical
+  scale about 0 a step at a time (+-500 pA, +-1000, +-1500...); **Auto** follows the trace again, as before. Fixed,
+  a seal's flat trace stays flat instead of being blown up to fill the plot, so breaking in shows plainly. It
+  applies to the protocol's traces and the membrane test's pulse; the step (500 pA, 50 mV at first) can be changed,
+  and each unit's scale is kept between sessions.
+
+- **With two screens, the amplifier goes with the acquisition.** In Views > Two screens, the **Amplifier** and
+  **Amplifier controls** sections move into the acquisition's window, beside the trace, so the cell is patched from
+  one screen; they go back to Live's side panel, in their places, when the acquisition comes back.
+
 - **The membrane test follows the amplifier while it runs.** It read the amplifier's output scale once, when it
   started: a gain or feedback resistor changed on Commander during the test went on being read with the old one, and
   Rt came out wrong by the same factor (x5 to x1: a 7.5 MOhm pipette read 37.5). The telegraph is now read again

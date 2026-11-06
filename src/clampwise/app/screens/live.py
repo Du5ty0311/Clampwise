@@ -37,6 +37,7 @@ COLUMNS = (2, 1, 1)                    # the camera's column twice the others' (
 ROWS = (2, 1)                          # the acquisition's row twice the one under it
 SIDE = ("camera", "health", "amplifier", "controls", "light", "hardware", "recorded")   # the side panel, by use
 SIDE_FOLDED = ("light", "hardware", "recorded")
+TWO_SCREENS_SIDE = ("amplifier", "controls")     # with the acquisition on the other screen, in its window beside it
 
 
 class RigThread(QtCore.QThread):
@@ -407,6 +408,7 @@ class LiveScreen(Screen):
         self._hidden: set[str] = set()
         self._enlarged: str | None = None
         self.two_screens = False                         # the acquisition's view on the other screen (Views)
+        self._lent_side: QtWidgets.QScrollArea | None = None   # the amplifier's sections in that window, then
         self._split_set = False
         self._details_folded = False
         self._load_layout()
@@ -739,6 +741,7 @@ class LiveScreen(Screen):
                 if view.windowHandle() is not None:
                     view.windowHandle().setScreen(other)
                 view.setGeometry(other.availableGeometry())
+                self.lend_amplifier(True)
                 view.showMaximized()
                 view.raise_()
         elif view.popped:
@@ -749,6 +752,37 @@ class LiveScreen(Screen):
         if self.window.persist:
             self.window._settings().setValue("live/two_screens", on)
 
+    def lend_amplifier(self, on: bool) -> None:
+        """The amplifier's sections (its readings, its controls) in the acquisition's window beside the trace, while
+        it is on the other screen: the cell and its amplifier worked from one screen. Off: back in Live's side panel,
+        in their places."""
+        view = self.views["acquisition"]
+        if on and self._lent_side is None:
+            holder = QtWidgets.QWidget()
+            holder.setObjectName("dense")                # close together, as in Live's side panel
+            lay = box("v", "s")
+            for key in TWO_SCREENS_SIDE:
+                lay.addWidget(self.sections.lend(key))
+            lay.addStretch(1)
+            holder.setLayout(lay)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(holder)
+            bar = scroll.verticalScrollBar().sizeHint().width()
+            scroll.setMinimumWidth(max(320, holder.minimumSizeHint().width() + bar + 2))
+            scroll.setMaximumWidth(max(420, scroll.minimumWidth()))
+            self._lent_side = scroll
+            view.set_side(scroll)
+        elif not on and self._lent_side is not None:
+            view.set_side(None)
+            for key in TWO_SCREENS_SIDE:                 # back before their holder goes
+                self.sections.give_back(key)
+            self._lent_side.deleteLater()
+            self._lent_side = None
+        self._fit_side()
+
     def toggle_popped(self, role: str) -> None:
         """A view out into a window of its own (resized, maximized, laid over another), or back into Live."""
         view = self.views[role]
@@ -758,6 +792,8 @@ class LiveScreen(Screen):
             if s is not None:
                 s.setValue("live/two_screens", False)
         view._drop()
+        if role == "acquisition" and view.popped:        # back into Live: the amplifier's sections back beside it
+            self.lend_amplifier(False)
         if not view.popped:
             size, at = view.size() * 1.6, view.mapToGlobal(QtCore.QPoint(40, 40))
             self._undock(role)
