@@ -1209,26 +1209,60 @@ def test_the_acquisition_s_scale_arrows_fix_the_trace_about_0_in_steps_or_let_it
     panel.scales = {}
 
 
-def test_with_the_acquisition_on_the_other_screen_the_amplifier_s_sections_go_with_it(qapp, window):
-    # the cell's amplifier read and worked beside its trace, on the acquisition's screen; back in Live after
+def test_with_the_acquisition_on_the_other_screen_the_amplifier_is_one_compact_panel_beside_it(qapp, window):
+    # as Commander's own window: the meters, the mode and every control in one panel beside the trace, each Auto in
+    # reach even in a small window; Live's side panel keeps its own sections
     window.go("live")
     live = window.screens["live"]
-    view, sections = live.views["acquisition"], live.sections
-    order = sections.order()
-    amp, controls = sections.sections["amplifier"], sections.sections["controls"]
+    view, amp = live.views["acquisition"], live.amp_compact
+    assert _wait(qapp, lambda: live.last is not None)
+    assert amp.channel.text() == "Channel 1" and amp.meter_v.text() == live.meter_v.text() == "-65.0"
+    assert "voltage clamp" in amp.mode_words.text() and amp.mode_buttons[0].isChecked()
+    assert [amp.tabs.tabText(k) for k in range(amp.tabs.count())] == ["Clamp", "Outputs"]
     live.toggle_popped("acquisition")                 # its own window (two screens: maximized on the other screen)
-    live.lend_amplifier(True)
+    view.set_side(amp)                                # as set_two_screens does
+    view.showNormal()
+    assert amp.window() is view and live.amp_controls.window() is window     # Live's own stays in its side panel
+    for size in ((1920, 1040), (1024, 640), (800, 600)):
+        view.resize(*size)
+        _settle(qapp, 0.3)
+        side = view.side
+        assert side.geometry().right() < view.width()                         # the side wholly in the window
+        assert side.horizontalScrollBar().isVisible() == (amp.width() > side.viewport().width())   # else it scrolls
+        if size[0] == 1920:
+            assert not side.horizontalScrollBar().isVisible()                 # a large window: all of it in view
+        port = amp.pages[0].viewport()
+        for name in ("auto_pipette_offset", "auto_fast", "auto_whole_cell", "auto_leak"):
+            b = amp.buttons[name]
+            x = b.mapTo(port, QtCore.QPoint(0, 0)).x()
+            assert b.isVisible() and 0 <= x and x + b.width() <= port.width()    # in the panel, never cut off
+    assert amp.widgets["fast_tau"].isVisible() and amp.widgets["rs"].isVisible()      # paired on one line
+    sent = []
+    amp.send = sent.append
+    amp.buttons["auto_pipette_offset"].click()
+    assert sent == [("act", "auto_pipette_offset")]
+    live.toggle_popped("acquisition")                 # back into Live: no amplifier panel beside it there
     _settle(qapp, 0.1)
-    assert view.side is not None and amp.window() is view and controls.window() is view
-    assert live.readouts["mode"].value.window() is view and live.amp_controls.window() is view
-    assert sections.order() == order and sections.lent("amplifier")      # their places kept in Live's panel
-    sections.move("health", -1)                       # Live's own sections still move, past the places kept
-    assert sections.order().index("health") == order.index("health") - 1
-    sections.move("health", 1)
-    live.toggle_popped("acquisition")                 # back into Live: the sections back in their places
-    _settle(qapp, 0.1)
-    assert view.side is None and amp.window() is window and controls.window() is window
-    assert sections.order() == order and not sections.lent("amplifier") and not amp.isHidden()
+    assert view.side is None and not amp.isVisible()
+
+
+def test_a_wrapped_line_s_parts_go_one_under_the_other_when_the_window_is_too_narrow(qapp):
+    from clampwise.app import widgets
+
+    a, b = QtWidgets.QPushButton("A button with a good many words"), QtWidgets.QPushButton("Another")
+    line = widgets.Wrap(a, b)
+    line.resize(1000, 40)
+    line.show()
+    _settle(qapp, 0.05)
+    assert not line.stacked and a.y() == b.y()
+    assert line.minimumSizeHint().width() < line.side_by_side_width()          # it can be narrower than its line
+    line.resize(a.sizeHint().width() + 10, 80)
+    _settle(qapp, 0.05)
+    assert line.stacked and b.y() > a.y() and b.geometry().right() <= line.width()
+    line.resize(1000, 80)
+    _settle(qapp, 0.05)
+    assert not line.stacked
+    line.close()
 
 
 def test_the_amplifier_s_controls_are_laid_out_as_commander_s(qapp):

@@ -106,10 +106,16 @@ class AcquisitionPanel(QtWidgets.QWidget):
             "and the holding, live; nothing is saved")
         self.test_button.setCheckable(True)
         self._seconds_caption = label("Gap-free", "muted")
+        # each line's parts side by side while the window is wide enough, one under the other when it is not
+        self.protocol.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.protocol.setMinimumContentsLength(14)                # a long protocol name never widens the window
         bar = box("h", "xs")                                      # the protocol
         bar.addWidget(self.protocol, 1)
         bar.addWidget(self._seconds_caption)
         bar.addWidget(self.seconds)
+        chosen = QtWidgets.QWidget()
+        chosen.setLayout(bar)
+        bar = box("h", "xs")                                      # what can be done with it
         self.commands = QtWidgets.QToolButton()
         self.commands.setText("Commands")
         self.commands.setToolTip("What the protocol sends (the amplifier's command, a light, digital outputs): each "
@@ -122,13 +128,22 @@ class AcquisitionPanel(QtWidgets.QWidget):
                                      "holding, sweeps), saved under a new name", quiet=True))
         bar.addWidget(widgets.button("Protocols...", self.choose_protocols, "The folder your protocols are in",
                                      quiet=True))
-        lay.addLayout(bar)
+        tools = QtWidgets.QWidget()
+        tools.setLayout(bar)
+        self.protocol_line = widgets.Wrap(chosen, tools, stretch=(1, 0), spacing="xs")
+        lay.addWidget(self.protocol_line)
         bar = box("h", "xs")                                      # the transport, and the membrane test
         for b in (self.play_button, self.pause_button, self.record_button, self.stop_button):
             bar.addWidget(b)
+        transport = QtWidgets.QWidget()
+        transport.setLayout(bar)
+        bar = box("h", "xs")
         bar.addStretch(1)
         bar.addWidget(self.test_button)
-        lay.addLayout(bar)
+        test = QtWidgets.QWidget()
+        test.setLayout(bar)
+        self.transport_line = widgets.Wrap(transport, test, stretch=(0, 1), spacing="xs")
+        lay.addWidget(self.transport_line)
         # buttons that each run a protocol given them, as the acquisition program's sequencing keys (Ctrl+1 to 8)
         self.quick: list[dict] = []                               # {"name", "protocol" (its name), "action"}
         self.quick_buttons: list = []
@@ -158,10 +173,17 @@ class AcquisitionPanel(QtWidgets.QWidget):
         line.addWidget(self.folder, 1)
         line.addWidget(widgets.button("Folder...", self.choose_folder, "The folder the recordings are written into",
                                       quiet=True))
+        into = QtWidgets.QWidget()
+        into.setLayout(line)
+        line = box("h", "xs")
+        line.addStretch(1)
         for caption, w in (("Test pulse", self.test_amp), ("at", self.test_hz), ("avg", self.test_avg)):
             line.addWidget(label(caption, "muted"))
             line.addWidget(w)
-        lay.addLayout(line)
+        pulse = QtWidgets.QWidget()
+        pulse.setLayout(line)
+        self.folder_line = widgets.Wrap(into, pulse, stretch=(1, 0), spacing="xs")
+        lay.addWidget(self.folder_line)
         self._test_settings = {"VC": (10.0, 50.0, 5), "IC": (50.0, 5.0, 3)}     # each mode's own pulse (VC: Clampex's Cell stage)
         self._show_test_settings("VC")
         for w in (self.test_amp, self.test_hz, self.test_avg):
@@ -269,6 +291,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
         while self.quick_bar.count():
             item = self.quick_bar.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()                     # gone at once (deleted later)
                 item.widget().deleteLater()
         self.quick_buttons = []
         if not self.quick:
@@ -276,6 +299,7 @@ class AcquisitionPanel(QtWidgets.QWidget):
         for k, q in enumerate(self.quick):
             b = widgets.button(q["name"] or q["protocol"], lambda *_, k=k: self.press(k),
                                f"{QUICK_ACTIONS.get(q['action'], 'Record')}: {q['protocol']} (Ctrl+{k + 1})")
+            b.setMinimumWidth(48)                        # many buttons in a narrow window: narrower, never cut off
             self.quick_bar.addWidget(b)
             self.quick_buttons.append(b)
         self.quick_bar.addStretch(1)
@@ -784,11 +808,14 @@ class AcquisitionPanel(QtWidgets.QWidget):
         lay.addStretch(1)
         lay.addWidget(label("Scale", "muted"), 0, QtCore.Qt.AlignHCenter)
         self.scale_up, self.scale_down = QtWidgets.QToolButton(), QtWidgets.QToolButton()
-        for b, arrow, by, tip in ((self.scale_up, QtCore.Qt.UpArrow, 1, "A wider scale: one step more above and "
+        for b, arrow, by, tip in ((self.scale_up, "▲", 1, "A wider scale: one step more above and "
                                    "below 0 (from Auto: fixed at the scale last used)"),
-                                  (self.scale_down, QtCore.Qt.DownArrow, -1, "A narrower scale: one step less above "
+                                  (self.scale_down, "▼", -1, "A narrower scale: one step less above "
                                    "and below 0 (from Auto: fixed at the scale last used)")):
-            b.setArrowType(arrow)
+            b.setText(arrow)                             # large, to be hit at a glance (a style's own arrow is tiny)
+            font = b.font()
+            font.setPointSizeF(font.pointSizeF() * 1.6)
+            b.setFont(font)
             b.setFixedSize(44, 36)
             b.setToolTip(tip)
             b.clicked.connect(lambda *_, by=by: self.scale_by(by))

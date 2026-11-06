@@ -37,7 +37,6 @@ COLUMNS = (2, 1, 1)                    # the camera's column twice the others' (
 ROWS = (2, 1)                          # the acquisition's row twice the one under it
 SIDE = ("camera", "health", "amplifier", "controls", "light", "hardware", "recorded")   # the side panel, by use
 SIDE_FOLDED = ("light", "hardware", "recorded")
-TWO_SCREENS_SIDE = ("amplifier", "controls")     # with the acquisition on the other screen, in its window beside it
 
 
 class RigThread(QtCore.QThread):
@@ -345,6 +344,10 @@ class LiveScreen(Screen):
                                             "(which shows each change too)")
         self.amp_controls = AmplifierPanel(self._send_control)
         self.controls_frame.add(self.amp_controls)
+        # with the acquisition on the other screen: the amplifier's readings and controls in one compact panel beside
+        # its trace, as Commander's own window (the same amplifier, read and sent to as the side panel's)
+        self.amp_compact = AmplifierPanel(self._send_control, compact=True)
+        self.amp_compact.setObjectName("dense")              # close together, as in Live
         # the cell's health: each reading from its best source, against the quality limits (rig.health)
         well = sections.add(widgets.Section("health", "Cell health"))
         self.health_grid = QtWidgets.QGridLayout()
@@ -408,7 +411,6 @@ class LiveScreen(Screen):
         self._hidden: set[str] = set()
         self._enlarged: str | None = None
         self.two_screens = False                         # the acquisition's view on the other screen (Views)
-        self._lent_side: QtWidgets.QScrollArea | None = None   # the amplifier's sections in that window, then
         self._split_set = False
         self._details_folded = False
         self._load_layout()
@@ -741,7 +743,7 @@ class LiveScreen(Screen):
                 if view.windowHandle() is not None:
                     view.windowHandle().setScreen(other)
                 view.setGeometry(other.availableGeometry())
-                self.lend_amplifier(True)
+                view.set_side(self.amp_compact)
                 view.showMaximized()
                 view.raise_()
         elif view.popped:
@@ -752,37 +754,6 @@ class LiveScreen(Screen):
         if self.window.persist:
             self.window._settings().setValue("live/two_screens", on)
 
-    def lend_amplifier(self, on: bool) -> None:
-        """The amplifier's sections (its readings, its controls) in the acquisition's window beside the trace, while
-        it is on the other screen: the cell and its amplifier worked from one screen. Off: back in Live's side panel,
-        in their places."""
-        view = self.views["acquisition"]
-        if on and self._lent_side is None:
-            holder = QtWidgets.QWidget()
-            holder.setObjectName("dense")                # close together, as in Live's side panel
-            lay = box("v", "s")
-            for key in TWO_SCREENS_SIDE:
-                lay.addWidget(self.sections.lend(key))
-            lay.addStretch(1)
-            holder.setLayout(lay)
-            scroll = QtWidgets.QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-            scroll.setWidget(holder)
-            bar = scroll.verticalScrollBar().sizeHint().width()
-            scroll.setMinimumWidth(max(320, holder.minimumSizeHint().width() + bar + 2))
-            scroll.setMaximumWidth(max(420, scroll.minimumWidth()))
-            self._lent_side = scroll
-            view.set_side(scroll)
-        elif not on and self._lent_side is not None:
-            view.set_side(None)
-            for key in TWO_SCREENS_SIDE:                 # back before their holder goes
-                self.sections.give_back(key)
-            self._lent_side.deleteLater()
-            self._lent_side = None
-        self._fit_side()
-
     def toggle_popped(self, role: str) -> None:
         """A view out into a window of its own (resized, maximized, laid over another), or back into Live."""
         view = self.views[role]
@@ -792,8 +763,8 @@ class LiveScreen(Screen):
             if s is not None:
                 s.setValue("live/two_screens", False)
         view._drop()
-        if role == "acquisition" and view.popped:        # back into Live: the amplifier's sections back beside it
-            self.lend_amplifier(False)
+        if role == "acquisition" and view.popped:        # back into Live: the amplifier's panel there no longer
+            view.set_side(None)
         if not view.popped:
             size, at = view.size() * 1.6, view.mapToGlobal(QtCore.QPoint(40, 40))
             self._undock(role)
@@ -960,6 +931,7 @@ class LiveScreen(Screen):
         self._thread.folder = self._watched()
         self._thread.snapshot.connect(self.show_snapshot)
         self._thread.done.connect(self.amp_controls.said)
+        self._thread.done.connect(self.amp_compact.said)
         self._thread.start()
 
     def _stop(self) -> None:
@@ -980,9 +952,12 @@ class LiveScreen(Screen):
             self.recorder.test.stop()
             self.recorder.test.wait(15)
         digidata.let_go()
+        two = self.two_screens
         for role, view in self.views.items():           # the views' own windows close with Clampwise
             if view.popped:
                 self.toggle_popped(role)
+        if self.window.persist:                          # ... two screens still chosen for the next start
+            self.window._settings().setValue("live/two_screens", two)
         self._stop()
         for v in self.views.values():
             v.show_window(None)
@@ -1023,6 +998,7 @@ class LiveScreen(Screen):
         self._cards(snap)
         self._amplifier(snap)
         self.amp_controls.show_state(snap.amplifier)
+        self.amp_compact.show_state(snap.amplifier)
         self._trace(snap)
         self._health(snap)
         self._records(snap)
@@ -1073,6 +1049,7 @@ class LiveScreen(Screen):
             self.meter_i.setText("–")
             self.channel_name.setText("Amplifier")
             self.meters.setText(amplifier_words(amp.status).capitalize() + "." if amp is not None and amp.status else "")
+            self.amp_compact.show_meters("Amplifier", "not read", "–", "–")
             self.sections.sections["amplifier"].set_summary("muted", "not read",
                                                             amplifier_words(amp.status) if amp is not None else "")
             return
@@ -1107,6 +1084,9 @@ class LiveScreen(Screen):
         self.meter_v.setText(f"{v * 1e3:.1f}" if v is not None and math.isfinite(v) else "–")
         self.meter_i.setText((f"{i * 1e12:.0f}" if abs(i) >= 10e-12 else f"{i * 1e12:.1f}")
                              if i is not None and math.isfinite(i) else "–")
+        self.amp_compact.show_meters(f"Channel {number}", f"{amp.mode_name}, {amp.shown('holding')}",
+                                     self.meter_v.text(), self.meter_i.text(),
+                                     telegraph_words(tg) if tg is not None else "not received")
         rs = amp.values.get("rs") if vc and amp.values.get("whole_cell_on") else None
         if rs is not None and math.isfinite(rs) and rs > 0:
             self._history.append((snap.at, rs, amp.values.get("cm", math.nan), amp.values.get("holding", math.nan)))

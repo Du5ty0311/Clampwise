@@ -8,9 +8,14 @@
   applies to the protocol's traces and the membrane test's pulse; the step (500 pA, 50 mV at first) can be changed,
   and each unit's scale is kept between sessions.
 
-- **With two screens, the amplifier goes with the acquisition.** In Views > Two screens, the **Amplifier** and
-  **Amplifier controls** sections move into the acquisition's window, beside the trace, so the cell is patched from
-  one screen; they go back to Live's side panel, in their places, when the acquisition comes back.
+- **With two screens, the amplifier goes with the acquisition, compact as Commander's own window.** In Views > Two
+  screens, the acquisition's window has the amplifier beside the trace in one panel: the channel's V and I meters,
+  VC / I=0 / IC, then every control on one **Clamp** page (holding, Zap and Buzz, seal test, pipette offset, Cp fast
+  and slow, whole cell, Rs compensation, leak subtraction; in current clamp the bridge) with the outputs on a second
+  tab. Values that belong together share a line (Cp fast and its tau, Cm and Rs), each Auto at its line's end. The
+  window fits any screen: the lines under the trace go one under the other when it is narrow, and the amplifier
+  panel scrolls rather than being cut off, so every Auto stays in reach. Two screens is now kept when Clampwise
+  closes (it was switched off each time).
 
 - **The membrane test follows the amplifier while it runs.** It read the amplifier's output scale once, when it
   started: a gain or feedback resistor changed on Commander during the test went on being read with the old one, and

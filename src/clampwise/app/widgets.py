@@ -129,6 +129,55 @@ def resizable(window: QtWidgets.QWidget, lay: QtWidgets.QLayout, key: str = "",
     return area
 
 
+class Wrap(QtWidgets.QWidget):
+    """Parts side by side while the room allows, else one under the other (a narrow window or a small screen):
+    nothing cut off at the edge. ``stretch`` gives each part's share of the width side by side; a part with a share
+    is measured at its least width (it can narrow), the others at their usual one."""
+
+    def __init__(self, *parts: QtWidgets.QWidget, stretch: tuple = (), spacing: str = "s") -> None:
+        super().__init__()
+        self.parts = parts
+        self._stretch = tuple(stretch) + (0,) * (len(parts) - len(stretch))
+        self._lay = box("h", spacing)                   # side by side; its direction changed with the room
+        self._lay.setSizeConstraint(QtWidgets.QLayout.SetNoConstraint)   # its least size is minimumSizeHint's
+        for p, k in zip(parts, self._stretch):
+            self._lay.addWidget(p, k)
+        self.setLayout(self._lay)
+
+    def _shown(self) -> list:
+        return [(p, k) for p, k in zip(self.parts, self._stretch) if not p.isHidden()]
+
+    def side_by_side_width(self) -> int:
+        shown = self._shown()
+        return sum((p.minimumSizeHint() if k else p.sizeHint()).width() for p, k in shown) + \
+            self._lay.spacing() * max(0, len(shown) - 1)
+
+    @property
+    def stacked(self) -> bool:
+        return self._lay.direction() == QtWidgets.QBoxLayout.TopToBottom
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        side = event.size().width() >= self.side_by_side_width()
+        way = QtWidgets.QBoxLayout.LeftToRight if side else QtWidgets.QBoxLayout.TopToBottom
+        if self._lay.direction() != way:
+            self._lay.setDirection(way)
+            self.updateGeometry()                       # its height changes: the layout round it asks again
+
+    def minimumSizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt's name)
+        """As narrow as its widest part (the parts then one under the other), as high as they are laid out now."""
+        shown = [p for p, _ in self._shown()]
+        if not shown:
+            return QtCore.QSize(0, 0)
+        mins = [p.minimumSizeHint().expandedTo(p.minimumSize()) for p in shown]
+        heights = [max(m.height(), p.sizeHint().height()) for m, p in zip(mins, shown)]
+        high = (sum(heights) + self._lay.spacing() * (len(shown) - 1)) if self.stacked else max(heights)
+        return QtCore.QSize(max(m.width() for m in mins), high)
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802 (Qt's name)
+        return super().sizeHint().expandedTo(self.minimumSizeHint())
+
+
 class Badge(QtWidgets.QLabel):
     """One badge style for every flag (B0 item 15): a symbol and a short word,
     never colour alone; the full reason, limit and source in the tooltip."""
@@ -350,7 +399,6 @@ class Sections(QtWidgets.QWidget):
         super().__init__()
         self.key, self._settings, self._folded = key, settings, set(folded)
         self.sections: dict[str, Section] = {}
-        self._lent: dict[str, QtWidgets.QWidget] = {}   # sections lent to another window: the hidden place kept
         self._lay = box("v", "s")
         self._lay.addStretch(1)
         self.setLayout(self._lay)
@@ -379,37 +427,9 @@ class Sections(QtWidgets.QWidget):
         k = keys.index(key)
         to = min(max(k + by, 0), len(keys) - 1)
         if to != k:
-            w = self._lay.itemAt(k).widget()             # the section, or the place kept for a lent one
-            self._lay.removeWidget(w)
-            self._lay.insertWidget(to, w)
+            self._lay.removeWidget(self.sections[key])
+            self._lay.insertWidget(to, self.sections[key])
             self.save()
-
-    def lend(self, key: str) -> Section:
-        """A section taken out to be shown in another window (the caller lays it out there); a hidden place keeps
-        its position here, so the order kept is unchanged and ``give_back`` returns it to it."""
-        section = self.sections[key]
-        if key not in self._lent:
-            place = QtWidgets.QWidget()
-            place.key = key
-            place.hide()
-            i = self._lay.indexOf(section)
-            self._lay.removeWidget(section)
-            self._lay.insertWidget(i, place)
-            self._lent[key] = place
-        return section
-
-    def give_back(self, key: str) -> None:
-        """A lent section back in its place here."""
-        place = self._lent.pop(key, None)
-        if place is None:
-            return
-        i = self._lay.indexOf(place)
-        self._lay.removeWidget(place)
-        place.deleteLater()
-        self._lay.insertWidget(i, self.sections[key])
-
-    def lent(self, key: str) -> bool:
-        return key in self._lent
 
     def only(self, key: str) -> None:
         """This section unfolded, every other one folded."""
@@ -431,11 +451,10 @@ class Sections(QtWidgets.QWidget):
         m.addAction("Only this one unfolded", lambda: self.only(key))
         m.addAction("Unfold all", lambda: self.every(True))
         m.addAction("Fold all", lambda: self.every(False))
-        if key not in self._lent:                       # a lent section is moved where it is shown
-            m.addSeparator()
-            keys = [k for k in self.order() if k not in self._lent and not self.sections[k].isHidden()]
-            m.addAction("Move up", lambda: self.move(key, -1)).setEnabled(keys[:1] != [key])
-            m.addAction("Move down", lambda: self.move(key, 1)).setEnabled(keys[-1:] != [key])
+        m.addSeparator()
+        keys = [k for k in self.order() if not self.sections[k].isHidden()]
+        m.addAction("Move up", lambda: self.move(key, -1)).setEnabled(keys[:1] != [key])
+        m.addAction("Move down", lambda: self.move(key, 1)).setEnabled(keys[-1:] != [key])
         m.exec_(at)
 
     def load(self) -> None:

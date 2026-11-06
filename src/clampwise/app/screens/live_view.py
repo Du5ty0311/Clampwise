@@ -140,17 +140,38 @@ class WindowView(QtWidgets.QFrame):
 
     def set_side(self, widget: QtWidgets.QWidget | None) -> QtWidgets.QWidget | None:
         """``widget`` beside what the view shows, on its right (None: the side taken away); the side there before
-        is returned, out of the view."""
-        before = self.side
-        if before is not None:
-            self.layout().removeWidget(before)
-            before.setParent(None)
-        self.side = widget
+        is returned, out of the view. It scrolls: in a window too narrow for it whole, its far edge is still reached."""
+        before = None
+        if self.side is not None:
+            self.layout().removeWidget(self.side)
+            before = self.side.takeWidget()
+            if before is not None:
+                before.setParent(None)
+            self.side.setParent(None)
+            self.side.deleteLater()
+            self.side = None
         if widget is not None:
-            widget.setCursor(QtCore.Qt.ArrowCursor)
-            self.layout().addWidget(widget)
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            scroll.setCursor(QtCore.Qt.ArrowCursor)
+            scroll.setWidget(widget)
+            self.side = scroll
+            self.layout().addWidget(scroll)
+            self._fit_side()
         QtCore.QTimer.singleShot(0, self._place)         # the program's window fitted to the room left
         return before
+
+    def _fit_side(self) -> None:
+        """The side as wide as its content needs; in a window too narrow for that and the least the view's own part
+        needs, the room left (at least 200 px), the side then scrolling sideways."""
+        side = self.side
+        if side is None or side.widget() is None:
+            return
+        want = side.widget().minimumSizeHint().width() + side.verticalScrollBar().sizeHint().width() + 2
+        m = self.layout().contentsMargins()
+        room = self.width() - m.left() - m.right() - self.layout().spacing() - self._main.minimumSize().width()
+        side.setFixedWidth(max(min(want, room), min(want, 200)))
 
     def _side_width(self) -> int:
         """The room the side takes, with the gap before it (0 without one)."""
@@ -200,6 +221,7 @@ class WindowView(QtWidgets.QFrame):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._fit_side()
         self._fit_head()
         self._place()
 

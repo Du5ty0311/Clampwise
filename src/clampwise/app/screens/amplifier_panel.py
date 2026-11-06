@@ -7,7 +7,7 @@ on the line of the value it sets, only the current mode's shown. Each control sh
 
 from __future__ import annotations
 
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from ...rig import amplifier_control as ac
 from .. import theme, widgets
@@ -21,6 +21,16 @@ ON_FOR = {"holding": "holding_on", "test_signal_amplitude": "test_signal_on", "c
 AUTO_FOR = {"pipette_offset": "auto_pipette_offset", "fast_cap": "auto_fast", "slow_cap": "auto_slow",
             "cm": "auto_whole_cell", "bridge": "auto_bridge", "leak_sub": "auto_leak"}   # its Auto, on its line
 MODES = ((0, "VC"), (2, "I=0"), (1, "IC"))                       # as Commander's buttons, left to right
+# compact (the acquisition's window on its own screen, as Commander's own small window): the meters on top, the groups
+# in three tabs, two values on a line where they belong together, shorter captions
+TABS = (("Clamp", ("Clamp", "Seal test", "Pipette", "Whole cell", "Rs compensation", "Bridge and neutralization",
+                   "Leak subtraction")),
+        ("Outputs", ("Outputs",)))
+PAIRS = {"fast_cap": "fast_tau", "slow_cap": "slow_tau", "cm": "rs", "test_signal_amplitude": "test_signal_hz",
+         "rs_correction": "rs_prediction", "primary_gain": "primary_lpf", "secondary_gain": "secondary_lpf"}
+SHORT = {"rs_correction": "Rs comp", "rs_bandwidth": "Bandwidth", "primary_signal": "Primary",
+         "primary_gain": "Gain, filter", "secondary_signal": "Secondary", "secondary_gain": "Gain, filter",
+         "leak_sub": "Leak sub", "bridge": "Bridge", "neutralization": "Neutralization"}
 
 
 def _choices(c: ac.Control, mode: int) -> tuple:
@@ -32,76 +42,165 @@ def _choices(c: ac.Control, mode: int) -> tuple:
 class AmplifierPanel(QtWidgets.QWidget):
     """The controls; ``send`` takes ("set", key, value, mode) or ("act", name)."""
 
-    def __init__(self, send) -> None:
+    def __init__(self, send, compact: bool = False) -> None:
         super().__init__()
-        self.send = send
+        self.send, self.compact = send, compact
         self.mode = 0
         self.widgets: dict[str, QtWidgets.QWidget] = {}
         self.rows: dict[str, list[QtWidgets.QWidget]] = {}      # a line's key -> everything on it
         self.buttons: dict[str, QtWidgets.QPushButton] = {}
+        self.groups: dict[str, QtWidgets.QLabel] = {}
         lay = box("v", "xs")
+        if compact:
+            lay.addLayout(self._meters())
         modes = box("h", "xs")                                   # the mode, as three buttons
         self.mode_buttons: dict[int, QtWidgets.QPushButton] = {}
         for value, words in MODES:
             b = widgets.button(words, lambda _=False, v=value: self.change("mode", v), f"{words}: the amplifier's "
                                "mode (sent through its own program)", quiet=True)
             b.setCheckable(True)
-            modes.addWidget(b)
+            modes.addWidget(b, 1 if compact else 0)
             self.mode_buttons[value] = b
-        modes.addStretch(1)
+        if not compact:
+            modes.addStretch(1)
         lay.addLayout(modes)
-        grid = QtWidgets.QGridLayout()                           # caption | on | value | Auto, one line each
-        grid.setHorizontalSpacing(theme.SPACE["xs"])
-        grid.setVerticalSpacing(theme.SPACE["xs"] // 2)
-        grid.setColumnStretch(2, 1)
-        self.groups: dict[str, QtWidgets.QLabel] = {}
-        paired = set(ON_FOR.values())
-        for g in ORDER:
-            caption = label(g, "section")
-            self.groups[g] = caption
-            grid.addWidget(caption, grid.rowCount(), 0, 1, 4)
-            for c in ac.CONTROLS:
-                if c.group != g or c.key == "mode" or c.key in paired:
-                    continue
-                row = grid.rowCount()
-                on_key = ON_FOR.get(c.key)
-                words = ac.BY_KEY[on_key].label.removesuffix(" on") if on_key else c.label
-                cap = label(words, "muted")
-                cap.setToolTip(c.label)
-                parts = [cap]
-                grid.addWidget(cap, row, 0)
-                if on_key:
-                    on = self._make(ac.BY_KEY[on_key])
-                    on.setToolTip(ac.BY_KEY[on_key].label)
-                    self.widgets[on_key] = on
-                    grid.addWidget(on, row, 1)
-                    parts.append(on)
-                w = self._make(c)
-                self.widgets[c.key] = w
-                grid.addWidget(w, row, 2)
-                parts.append(w)
-                if c.key in AUTO_FOR:
-                    b = self._action(AUTO_FOR[c.key], "Auto")
-                    grid.addWidget(b, row, 3)
-                    parts.append(b)
-                self.rows[c.key] = parts
-            if g == "Clamp":                                     # the membrane's own buttons, after the holding
-                pair = box("h", "xs")
-                for name in ("zap", "buzz"):
-                    pair.addWidget(self._action(name, ac.ACTIONS[name][1]))
-                pair.addStretch(1)
-                grid.addLayout(pair, grid.rowCount(), 1, 1, 3)
-            if g == "Outputs":
-                row = grid.rowCount()
-                cap = label("Output zero", "muted")
-                grid.addWidget(cap, row, 0)
-                grid.addWidget(self._action("auto_output_zero", "Auto"), row, 3)
-                self.rows["auto_output_zero"] = [cap, self.buttons["auto_output_zero"]]
-        lay.addLayout(grid)
+        if compact:
+            self.tabs = QtWidgets.QTabWidget()
+            self.tabs.setDocumentMode(True)
+            self.pages: list[QtWidgets.QScrollArea] = []
+            for name, groups in TABS:
+                grid = self._grid()
+                for g in groups:
+                    self._group(grid, g)
+                grid.setRowStretch(grid.rowCount(), 1)
+                page = QtWidgets.QWidget()
+                page.setLayout(grid)
+                scroll = QtWidgets.QScrollArea()            # a short screen: the tab scrolls, nothing is cut off
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+                scroll.setWidget(page)
+                self.pages.append(scroll)
+                self.tabs.addTab(scroll, name)
+            lay.addWidget(self.tabs, 1)
+        else:
+            grid = self._grid()
+            for g in ORDER:
+                self._group(grid, g)
+            lay.addLayout(grid)
         self.status = label("", "muted", wrap=True)
         lay.addWidget(self.status)
         self.setLayout(lay)
         self.show_mode(0)
+        if compact:
+            self._fit_width()
+
+    def _grid(self) -> QtWidgets.QGridLayout:
+        grid = QtWidgets.QGridLayout()        # caption | on | value (| second value, compact) | Auto, a line each
+        grid.setHorizontalSpacing(theme.SPACE["xs"])
+        grid.setVerticalSpacing(theme.SPACE["xs"] // 2)
+        grid.setColumnStretch(2, 1)
+        if self.compact:
+            grid.setColumnStretch(3, 1)
+        return grid
+
+    def _group(self, grid: QtWidgets.QGridLayout, g: str) -> None:
+        """Group ``g``'s lines: each value with its switch before it and its Auto after it (compact: a second value
+        that belongs with it on the same line, and no group heading: the tab and the captions say it)."""
+        compact = self.compact
+        auto_col = 4 if compact else 3
+        paired = set(ON_FOR.values()) | (set(PAIRS.values()) if compact else set())
+        if not compact:
+            caption = label(g, "section")
+            self.groups[g] = caption
+            grid.addWidget(caption, grid.rowCount(), 0, 1, 4)
+        for c in ac.CONTROLS:
+            if c.group != g or c.key == "mode" or c.key in paired:
+                continue
+            row = grid.rowCount()
+            on_key = ON_FOR.get(c.key)
+            words = ac.BY_KEY[on_key].label.removesuffix(" on") if on_key else c.label
+            cap = label(SHORT.get(c.key, words) if compact else words, "muted")
+            cap.setToolTip(c.label)
+            parts = [cap]
+            grid.addWidget(cap, row, 0)
+            if on_key:
+                on = self._make(ac.BY_KEY[on_key])
+                on.setToolTip(ac.BY_KEY[on_key].label)
+                self.widgets[on_key] = on
+                grid.addWidget(on, row, 1)
+                parts.append(on)
+            w = self._make(c)
+            self.widgets[c.key] = w
+            second = PAIRS.get(c.key) if compact else None
+            if second:
+                w.setToolTip(c.label)
+                w2 = self._make(ac.BY_KEY[second])
+                w2.setToolTip(ac.BY_KEY[second].label)
+                self.widgets[second] = w2
+                self.rows[second] = [w2]
+                grid.addWidget(w, row, 2)
+                grid.addWidget(w2, row, 3)
+            elif compact:
+                grid.addWidget(w, row, 2, 1, 2)
+            else:
+                grid.addWidget(w, row, 2)
+            parts.append(w)
+            if c.key in AUTO_FOR:
+                b = self._action(AUTO_FOR[c.key], "Auto")
+                grid.addWidget(b, row, auto_col)
+                parts.append(b)
+            self.rows[c.key] = parts
+        if g == "Clamp":                                         # the membrane's own buttons, after the holding
+            pair = box("h", "xs")
+            for name in ("zap", "buzz"):
+                pair.addWidget(self._action(name, ac.ACTIONS[name][1]))
+            pair.addStretch(1)
+            grid.addLayout(pair, grid.rowCount(), 1, 1, auto_col)
+        if g == "Outputs":
+            row = grid.rowCount()
+            cap = label("Output zero", "muted")
+            grid.addWidget(cap, row, 0)
+            grid.addWidget(self._action("auto_output_zero", "Auto"), row, auto_col)
+            self.rows["auto_output_zero"] = [cap, self.buttons["auto_output_zero"]]
+
+    def _meters(self) -> QtWidgets.QLayout:
+        """Compact: the channel and its mode, then its two meters, as on top of Commander's window."""
+        lay = box("v", "xs")
+        top = box("h", "s")
+        self.channel = label("Amplifier", "heading")
+        self.mode_words = label("", "muted")
+        top.addWidget(self.channel, 1)
+        top.addWidget(self.mode_words)
+        lay.addLayout(top)
+        meters = QtWidgets.QGridLayout()
+        meters.setHorizontalSpacing(theme.SPACE["s"])
+        meters.setVerticalSpacing(0)
+        self.meter_v, self.meter_i = label("–", "meter"), label("–", "meter")
+        for k, (cap, w) in enumerate((("V (mV)", self.meter_v), ("I (pA)", self.meter_i))):
+            w.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            meters.addWidget(label(cap, "muted"), 0, k)
+            meters.addWidget(w, 1, k)
+        lay.addLayout(meters)
+        self.telegraph = widgets.OneLine("")
+        lay.addWidget(self.telegraph)
+        return lay
+
+    def show_meters(self, channel: str, mode: str, v: str, i: str, telegraph: str = "") -> None:
+        """Compact: the channel, its mode and its meters as Live reads them (the same as its side panel's)."""
+        if not self.compact:
+            return
+        self.channel.setText(channel)
+        self.mode_words.setText(mode)
+        self.meter_v.setText(v)
+        self.meter_i.setText(i)
+        self.telegraph.setText(f"Telegraph: {telegraph}" if telegraph else "")
+
+    def _fit_width(self) -> None:
+        """Compact: as wide as its widest tab needs (plus a scroll bar), so no Auto is ever cut off at the edge."""
+        bar = self.pages[0].verticalScrollBar().sizeHint().width()
+        need = max(p.widget().minimumSizeHint().width() for p in self.pages) + bar + 4
+        for p in self.pages:
+            p.setMinimumWidth(need)
 
     def _action(self, name: str, words: str) -> QtWidgets.QPushButton:
         b = widgets.button(words, lambda _=False, n=name: self.act(n), f"{ac.ACTIONS[name][1]}, as the amplifier's "
