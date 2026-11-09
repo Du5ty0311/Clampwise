@@ -179,6 +179,12 @@ def run_membrane_test(recording: Recording, context, s) -> Result | None:
     if not recording.is_voltage_clamp or recording.command is None:
         return None
     out = Result("membrane_test", 1)
+    from .routing import command_mismatch
+
+    mismatch = command_mismatch(recording)
+    if mismatch:                      # its steps are not in mV: a "test step" read from them is not one
+        out.notes.append(f"no membrane test: {mismatch}")
+        return out
     fs, t = recording.sample_rate_hz, recording.time_s
     rows = []
     for k in range(recording.n_sweeps):

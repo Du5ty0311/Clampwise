@@ -45,6 +45,18 @@ The method, and where each choice comes from:
   probability; never mixed silently with subthreshold PSPs.
 - **The headline** (the recording's number in the summaries and the cell
   table) is pulse 1 unless chosen otherwise, and says what it is.
+- **Sweeps that differ under the stimulus are never averaged together**
+  (2026-11-09, the lab's photostim protocols). When the command under pulse 1
+  changes from sweep to sweep (a current or voltage step family with the
+  stimulus inside the step), or the stimulus's size does (an intensity
+  series), each level is measured on its own (tables by_command,
+  by_intensity). The recording's numbers are the level at the holding (no
+  current injected), or the strongest stimulus. Each level's response is also read at one fixed latency
+  (the peak time of the largest level's response) and a straight line through
+  it against the potential before the stimulus gives the reversal potential:
+  the fixed-latency method of Martina, Royer & Paré 2001 (J Neurosci
+  21:2878) and the linear fit of Ahmed, Headley & Paré 2021 (J Neurophysiol
+  126:1234).
 """
 
 from __future__ import annotations
@@ -445,6 +457,26 @@ OUTPUTS = (
     Output("n_sweeps", "Sweeps used (after sweeps with a spike in a response window are left out).", "count"),
     Output("time_locked_p", "p of pulse 1's response against sham times in the same sweeps; above 0.05: nothing "
            "time-locked to the stimulus.", "p", "shuffled-trigger surrogate"),
+    Output("condition", "What differs between the sweeps under the stimulus, when something does: the command "
+           "(a step family played under the stimulus) or the stimulus's size. Each level is then measured on its own "
+           "(table by_command or by_intensity) and the recording's numbers are one level's (see 'sweeps measured').", "",
+           label="Sweeps differ by"),
+    Output("n_levels", "How many levels of that condition the sweeps hold.", "count", label="Levels"),
+    Output("reversal", "The response's reversal potential: a straight line through the response at a fixed latency "
+           "(the peak time of the largest level's response) against the membrane potential before the stimulus "
+           "(current clamp) or the command (voltage clamp), read where it crosses zero. Liquid junction potential "
+           "not corrected.", "mV", "the fixed-latency method (Martina, Royer & Pare 2001); a linear fit of the "
+           "response against Vm (Ahmed, Headley & Pare 2021)", label="Reversal potential"),
+    Output("reversal_r2", "r squared of that line.", "ratio", label="Reversal fit r squared"),
+    Output("reversal_extrapolated", "yes when the reversal lies outside the potentials recorded (read off the line "
+           "beyond the data).", "", label="Reversal extrapolated"),
+    Output("reversal_slope", "The line's slope: the response's change per mV of membrane potential (current "
+           "clamp, mV/mV; voltage clamp, pA/mV = nS, the synaptic conductance at that latency).", "per mV",
+           label="Response per mV"),
+    Output("intensity_threshold", "The weakest stimulus (its channel's size during pulse 1: the light command, "
+           "or an isolator's monitor) from which every stronger level carries a response time-locked to it "
+           "(p < 0.05 against sham times) and above the detection level on its average.", "stimulus channel units",
+           label="Stimulus threshold"),
     Output("pulse", "One pulse on the average (pulse table).", "", level="pulse"),
     Output("amplitude_local", "A later pulse's peak against the level just before it on the plain average (no tail "
            "model): the rise the trace shows. The corrected amplitude should not be smaller while earlier "
@@ -546,9 +578,215 @@ def _by_pattern(recording: Recording, context, s, sweeps: list[int], out: Result
         out.notes.append("patterned light: " + note)
 
 
-@register("evoked", "Evoked responses, every pulse", version=2, types=EVOKED, settings=SETTINGS, outputs=OUTPUTS,
+@dataclass
+class Conditions:
+    """What differs between the sweeps under pulse 1, and the sweeps at each level."""
+
+    kind: str                                   # "command" or "intensity"
+    words: str                                  # "the command under the stimulus", "the stimulus's size"
+    units: str
+    levels: list[tuple[float, list[int]]]       # (level, sweeps), in order of level
+    headline: tuple[float, list[int]]
+    why: str
+
+
+def _command_under(recording: Recording, sweep: int, t_s: float) -> float:
+    """The epoch table's level at ``t_s`` in a sweep (NaN without a table)."""
+    if sweep >= len(recording.epochs):
+        return NAN
+    e = next((e for e in recording.epochs[sweep] if e.start_s <= t_s < e.end_s), None)
+    return float(e.level) if e is not None else NAN
+
+
+def _stimulus_size(recording: Recording, st, sweeps: list[int]) -> dict[int, float]:
+    """The stimulus channel's size during pulse 1 of each sweep (its peak against the 5 ms before), when the
+    stimulus is a recorded channel (a light command, an isolator's monitor); empty for an output or a typed
+    stimulus, which say when, not how much."""
+    ch = next((c for c in recording.channels if c.name == st.channel and c.recorded), None)
+    if ch is None:
+        return {}
+    fs = recording.sample_rate_hz
+    rows = recording.read(ch, sweeps)
+    out = {}
+    for k, i in enumerate(sweeps):
+        t0 = float(st.times_s[i][0])
+        w = float(st.widths_s[i][0]) if i < len(st.widths_s) and len(st.widths_s[i]) else 0.001
+        a = int(round(t0 * fs))
+        b = a + max(1, int(round(w * fs)))
+        pre = rows[k, max(0, a - int(0.005 * fs)):a]
+        out[i] = float(np.max(rows[k, a:b]) - (np.median(pre) if pre.size else 0.0))
+    return out
+
+
+def _levels(values: dict[int, float], tolerance: float) -> list[tuple[float, list[int]]]:
+    """Sweeps grouped by level: a new level where the sorted values jump by more than ``tolerance``."""
+    items = sorted((v, i) for i, v in values.items() if np.isfinite(v))
+    groups: list[list[tuple[float, int]]] = []
+    for v, i in items:
+        if groups and v - groups[-1][-1][0] <= tolerance:
+            groups[-1].append((v, i))
+        else:
+            groups.append([(v, i)])
+    return [(float(np.mean([v for v, _ in g])), sorted(i for _, i in g)) for g in groups]
+
+
+def conditions(recording: Recording, st, sweeps: list[int]) -> Conditions | None:
+    """The command under pulse 1, else the stimulus's size, when it differs between the sweeps."""
+    holding = recording.holding if np.isfinite(recording.holding) else 0.0
+    cmd = next((c for c in recording.channels if c.role.name == "COMMAND"), None)
+    under = {i: _command_under(recording, i, float(st.times_s[i][0])) for i in sweeps}
+    levels = _levels(under, 1e-6)
+    if len(levels) >= 2:
+        head = min(levels, key=lambda lv: (abs(lv[0] - holding), -len(lv[1])))
+        units = cmd.units if cmd is not None else ""
+        return Conditions("command", "the command under the stimulus", units, levels, head,
+                          f"the command under pulse 1 differs between sweeps ({len(levels)} levels, "
+                          f"{levels[0][0]:g} to {levels[-1][0]:g} {units}): the recording's numbers are the "
+                          f"{len(head[1])} sweep(s) at {head[0]:g} {units}, the level nearest the holding "
+                          f"({holding:g} {units}); every level is measured on its own in the table by_command")
+    sizes = _stimulus_size(recording, st, sweeps)
+    if sizes:
+        top = max(sizes.values())
+        levels = _levels(sizes, 0.05 * abs(top)) if top > 0 else []
+        if len(levels) >= 2:
+            head = levels[-1]
+            units = next((c.units for c in recording.channels if c.name == st.channel), "")
+            what = "light" if st.kind == "light" else "stimulus"
+            return Conditions("intensity", f"the {what}'s size", units, levels, head,
+                              f"the {what}'s size differs between sweeps ({len(levels)} levels, {levels[0][0]:.3g} "
+                              f"to {levels[-1][0]:.3g} {units} on {st.channel}): the recording's numbers are the "
+                              f"{len(head[1])} sweep(s) at the strongest {what}; every level is measured on its "
+                              "own in the table by_intensity")
+    return None
+
+
+def _by_condition(recording: Recording, context, s, cond: Conditions, out: Result) -> None:
+    """Each level measured on its own; each level's response also read at one fixed latency; with the command
+    as the condition, the reversal potential from a line through those against the potential."""
+    import copy
+
+    fs = recording.sample_rate_hz
+    t = recording.time_s
+    vc = recording.is_voltage_clamp
+    st = context.stimulus
+    runs = []
+    for level, idx in cond.levels:
+        sub = copy.copy(context)
+        sub.shared = {**context.shared, "sweep_indices": idx, "by_condition": True}
+        try:
+            runs.append((level, idx, run(recording, sub, s)))
+        except Exception as exc:                          # one level never fails the rest
+            out.notes.append(f"{cond.words} at {level:g} {cond.units}: not measured ({exc})")
+    if not runs:
+        return
+
+    def responds(r: Result) -> bool:
+        p = r.values.get("time_locked_p", NAN)
+        return bool(np.isfinite(p) and p < 0.05)
+
+    def peak_s(r: Result) -> float:
+        rows = r.tables.get("pulses") or [{}]
+        return rows[0].get("time_to_peak_ms", NAN) / 1e3
+
+    # the fixed latency: the peak time of the largest response among the levels that respond
+    pool = [x for x in runs if responds(x[2]) and np.isfinite(peak_s(x[2]))] or \
+        [x for x in runs if np.isfinite(peak_s(x[2]))]
+    ref = max(pool, key=lambda x: abs(x[2].values.get("p1_amplitude", 0.0) or 0.0), default=None)
+    t_fix = peak_s(ref[2]) if ref is not None else NAN
+    half = max(1, int(round(s["mean_window_ms"] / 2e3 * fs)))
+    rows = []
+    for level, idx, r in runs:
+        fired = {row["sweep"] for row in r.tables.get("sweeps", []) if row.get("pulse") == 1 and row.get("spiked")}
+        keep = [i for i in idx if i not in fired]
+        data = recording.read(recording.signal_channel, keep) if keep else np.empty((0, t.size))
+        bases, fixed = [], []
+        for k, i in enumerate(keep):
+            t0 = float(st.times_s[i][0])
+            b0, b1 = np.searchsorted(t, [t0 + s["baseline_start_ms"] / 1e3, t0 + s["baseline_end_ms"] / 1e3])
+            base = float(np.median(data[k, b0:b1])) if b1 > b0 else NAN
+            bases.append(base)
+            if np.isfinite(t_fix):
+                c = int(np.searchsorted(t, t0 + t_fix))
+                fixed.append(float(np.mean(data[k, max(0, c - half):c + half + 1])) - base)
+        pulses = r.tables.get("pulses") or [{}]
+        rows.append({"level": level, "sweeps": len(idx), "sweep_numbers": ", ".join(str(i + 1) for i in idx),
+                     "baseline": float(np.mean(bases)) if bases else NAN,
+                     "fixed_latency_amplitude": float(np.mean(fixed)) if fixed else NAN,
+                     "p1_amplitude": r.values.get("p1_amplitude", NAN),
+                     "p1_latency_median": r.values.get("p1_latency_median", NAN),
+                     "p1_success_rate": r.values.get("p1_success_rate", NAN),
+                     "spike_probability": pulses[0].get("spike_probability", NAN),
+                     "time_locked_p": r.values.get("time_locked_p", NAN),
+                     "detected": bool(pulses[0].get("detected", False)),
+                     "ppr": r.values.get("ppr", NAN)})
+    table = "by_command" if cond.kind == "command" else "by_intensity"
+    out.tables[table] = rows
+    out.values["n_levels"] = len(rows)
+    if np.isfinite(t_fix):
+        out.choose("fixed latency", f"{t_fix * 1e3:.2f} ms after pulse 1",
+                   f"the peak time of the largest response, at {ref[0]:g} {cond.units} (sweeps that fired on pulse 1 "
+                   "left out of each level's average)")
+    if cond.kind == "intensity":
+        # the weakest level from which every stronger level responds too (time-locked, p < 0.05 against sham
+        # times, and above the detection level on its average): a weak level passing the sham test by chance
+        # (1 in 20) does not set it
+        lit = [bool(np.isfinite(row["time_locked_p"]) and row["time_locked_p"] < 0.05 and row["detected"])
+               for row in rows]
+        k = len(lit)
+        while k > 0 and lit[k - 1]:
+            k -= 1
+        out.values["intensity_threshold"] = rows[k]["level"] if k < len(rows) else NAN
+        if k < len(rows):
+            out.choose("stimulus threshold", f"{rows[k]['level']:.3g} {cond.units}",
+                       "the weakest level from which every stronger level carries a time-locked response "
+                       "(p < 0.05 against sham times) above the detection level")
+        return
+    # the reversal: the response at the fixed latency against the potential before the stimulus
+    if vc:
+        cmd = next((c for c in recording.channels if c.role.name == "COMMAND"), None)
+        if cmd is None or cmd.units != "mV":
+            out.notes.append("no reversal potential: the command is not in mV (" +
+                             (f"it is in {cmd.units}: a current-clamp protocol played in voltage clamp, so the "
+                              "potential at each level is not known)" if cmd is not None else "no command)"))
+            return
+        x = np.array([row["level"] for row in rows])
+    else:
+        x = np.array([row["baseline"] for row in rows])
+    y = np.array([row["fixed_latency_amplitude"] for row in rows])
+    good = np.isfinite(x) & np.isfinite(y)
+    if good.sum() < 3:
+        out.notes.append(f"no reversal potential: {int(good.sum())} level(s) measured at the fixed latency (3 needed)")
+        return
+    fit = fits.linear(x[good], y[good], purpose="reversal: the response at a fixed latency against the potential")
+    if fit is None or not fit.ok or fit["slope"] == 0:
+        return
+    slope, icpt = fit["slope"], fit["intercept"]
+    lo, hi = fit.ci.get("slope", (NAN, NAN))
+    out.values["reversal_slope"] = slope
+    out.values["reversal_r2"] = fit.r2
+    if np.isfinite(lo) and lo <= 0 <= hi:
+        out.notes.append(f"no reversal potential: the response does not change with the potential (slope {slope:.3g} "
+                         f"per mV, 95% interval {lo:.3g} to {hi:.3g})")
+        return
+    rev = -icpt / slope
+    out.values["reversal"] = rev
+    outside = not (x[good].min() <= rev <= x[good].max())
+    out.values["reversal_extrapolated"] = "yes" if outside else "no"
+    out.choose("reversal", f"{rev:.1f} mV" + (" (extrapolated)" if outside else ""),
+               f"a straight line through the response {t_fix * 1e3:.2f} ms after pulse 1 at {int(good.sum())} levels "
+               f"({x[good].min():.1f} to {x[good].max():.1f} mV), r squared {fit.r2:.2f}; liquid junction potential "
+               "not corrected")
+    if outside:
+        out.flags.append(Flag("reversal extrapolated", f"the reversal ({rev:.1f} mV) lies outside the potentials "
+                              f"recorded ({x[good].min():.1f} to {x[good].max():.1f} mV): read off the line beyond the "
+                              "data", severity="note"))
+
+
+@register("evoked", "Evoked responses, every pulse", version=3, types=EVOKED, settings=SETTINGS, outputs=OUTPUTS,
           description="Single pulses, paired pulses and trains: each pulse's amplitude, latency, kinetics, charge "
-                      "and reliability, measured on the average and sweep by sweep.",
+                      "and reliability, measured on the average and sweep by sweep. Sweeps that differ under the "
+                      "stimulus (a step family played under it, a rising light) are measured level by level, with "
+                      "the response's reversal potential or the stimulus threshold.",
           source="Kim & Alger 2001 (PPR); Faber & Korn 1991 (CV)", requires=("baseline",))
 def run(recording: Recording, context, s) -> Result:
     out = Result("evoked", 1)
@@ -568,6 +806,14 @@ def run(recording: Recording, context, s) -> Result:
         out.notes.append(f"{recording.n_sweeps - len(sweeps)} sweep(s) with a different number of pulses left out "
                          f"(the recording's {n_pulses}-pulse sweeps are measured)")
     selection = context.shared.get("sweep_indices")
+    all_sweeps = list(sweeps)
+    cond = None
+    if selection is None and not context.shared.get("by_pattern"):
+        cond = conditions(recording, st, sweeps)
+        if cond is not None:
+            selection = cond.headline[1]
+            out.values["condition"] = cond.words
+            out.choose("sweeps measured", f"{len(selection)} sweep(s) at {cond.headline[0]:.4g} {cond.units}", cond.why)
     if selection:
         sweeps = [i for i in sweeps if i in set(selection)]
     if not sweeps:
@@ -906,8 +1152,10 @@ def run(recording: Recording, context, s) -> Result:
                                   severity="flag" if qc else "note"))
     if moving:
         out.notes.append("the pulses move between sweeps: each pulse is measured on its own pulse-aligned average")
-    if light and not context.shared.get("by_pattern"):
-        _by_pattern(recording, context, s, sweeps, out)
+    if cond is not None:
+        _by_condition(recording, context, s, cond, out)
+    if light and not context.shared.get("by_pattern") and not context.shared.get("by_condition"):
+        _by_pattern(recording, context, s, all_sweeps if cond is None else sweeps, out)
     # what to draw: each pulse's peak and the fitted decay of pulse 1
     for p in pulses:
         if np.isfinite(p.peak_time_s):

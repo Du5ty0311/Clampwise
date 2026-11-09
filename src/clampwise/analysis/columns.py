@@ -123,7 +123,8 @@ TABLES = {
         _o("integral", "The response's area: pC in voltage clamp, mV*ms in current clamp.", "pC or mV*ms",
            label="Integral"),
         _o("snr", "The amplitude over the baseline noise SD.", "ratio", label="Signal / noise"),
-        _o("detected", "Whether the response clears the detection level (3 noise SD) on the average.",
+        _o("detected", "Whether the response clears the detection level on the average (Analyze: response above, "
+           "4 noise SD by default); in by_command and by_intensity, the level's pulse 1.",
            label="Detected"),
         _o("success_rate", "Fraction of sweeps whose response is above the failure threshold.", "fraction",
            "failures below 3 SD of the noise", label="Success rate"),
@@ -144,6 +145,30 @@ TABLES = {
         _o("spiked", "Whether this sweep fired at this pulse.", label="Spiked"),
         _o("failure", "Whether this sweep's response is below the failure threshold.", label="Failure"),
         _o("latency_ms", "This sweep's onset after the stimulus.", "ms", label="Latency"),
+        # by_command, by_intensity and by_pattern: one row per level (or pattern), its sweeps measured on their own
+        _o("level", "The level of what differs between sweeps under pulse 1: the command (pA in current clamp, mV "
+           "in voltage clamp) or the stimulus channel's size (the light command, an isolator's monitor).", "command or "
+           "stimulus units", label="Level"),
+        _o("sweeps", "How many sweeps were at this level.", "count", label="Sweeps"),
+        _o("sweep_numbers", "Which sweeps, counted from 1 as Clampex counts them.", label="Sweep numbers"),
+        _o("baseline", "The signal before pulse 1 at this level (the membrane potential in current clamp, the "
+           "holding current in voltage clamp), on the sweeps measured.", "signal units", label="Before the stimulus"),
+        _o("fixed_latency_amplitude", "The level's response at the fixed latency (the peak time of the largest "
+           "level's response; see the recording's 'fixed latency' choice): the mean over the sweep-amplitude window "
+           "against each sweep's own baseline, sweeps that fired on pulse 1 left out.", "signal units",
+           "the fixed-latency method (Martina, Royer & Pare 2001)", label="Response at the fixed latency"),
+        _o("p1_amplitude", "Pulse 1 at this level, measured at its own peak on the level's average.", "signal units",
+           label="Pulse 1 amplitude"),
+        _o("p1_latency_median", "Median of this level's per-sweep onsets of pulse 1.", "ms", label="Pulse 1 latency"),
+        _o("p1_success_rate", "Fraction of this level's sweeps above the failure threshold at pulse 1.", "fraction",
+           label="Pulse 1 success rate"),
+        _o("time_locked_p", "p of this level's pulse-1 response against sham times; above 0.05: nothing "
+           "time-locked.", "p", "shuffled-trigger surrogate", label="Time-locked (p)"),
+        _o("ppr", "Pulse 2 / pulse 1 at this level (tail taken off).", "ratio", "Kim & Alger 2001", label="PPR"),
+        _o("pattern", "Which pattern the patterned light showed on these sweeps (from its log).", label="Pattern"),
+        _o("area_um2", "The area the pattern lit on the slice.", "um2", label="Area lit"),
+        _o("field_fraction", "The fraction of the illuminator's field the pattern lit.", "fraction",
+           label="Field lit"),
     ),
     "intrinsic": (
         _o("v_baseline", "The voltage in the baseline window before the step.", "mV", "Gouwens et al. 2019", label="V baseline"),

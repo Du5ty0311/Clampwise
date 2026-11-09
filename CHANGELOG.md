@@ -2,6 +2,27 @@
 
 ## 1.8.1 — not released yet
 
+- **Light (or a stimulus) inside a step family is measured step by step, with the response's reversal potential.**
+  The lab's photostim protocols play the light inside each step of a -200 to +160 pA family. Clampwise used to
+  average the responses of every step together, so a PSP that is 4 mV at -56 mV and 0.6 mV at -13 mV came out as
+  one meaningless number, and often as "no response". Now each step level is measured on its own (the table
+  **by_command**: the potential before the light, the response at its own peak and at one fixed latency, latency,
+  success, spike probability, PPR). The recording's numbers are those of the step at the holding (0 pA). A straight
+  line through the response at the fixed latency against the potential gives the **reversal potential** (the lab's
+  fixed-latency method; liquid junction potential not corrected), said as extrapolated when it lies beyond the
+  potentials recorded. In voltage clamp the command's own level is the potential.
+- **An intensity series is measured level by level, with its threshold.** When the light command (AM_Stim) or
+  another recorded stimulus grows from sweep to sweep (ChroME_threshold_intensity_CC), each size is measured on its
+  own (the table **by_intensity**). The recording's numbers are the strongest stimulus's, and the **stimulus
+  threshold** is the weakest level from which every stronger one gives a time-locked response above the detection
+  level.
+- **"Full field" in a file's name no longer makes it a field recording.** Full_Field_PPulse_Good_Response.abf (a
+  whole-cell recording lit by the Polygon's full field) was analysed as an fEPSP.
+- **A current-clamp protocol played in voltage clamp is said, not misread.** The protocol's steps in pA were read as
+  mV steps: a membrane test of 1638 MOhm and an I-V against "-100 mV" that was in fact a few mV. Clampwise now says
+  the voltage the cell was stepped to is not known, reads no steps from it, and keeps only what does not need them
+  (an evoked response, with no reversal potential). The same for a voltage-clamp protocol played in current clamp.
+
 - **The acquisition's trace can keep a fixed scale.** Beside the trace, the up and down arrows set its vertical
   scale about 0 a step at a time (+-500 pA, +-1000, +-1500...); **Auto** follows the trace again, as before. Fixed,
   a seal's flat trace stays flat instead of being blown up to fill the plot, so breaking in shows plainly. It

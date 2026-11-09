@@ -126,6 +126,51 @@ def cc_evoked_spikes(*, n_sweeps: int = 20, spiking_sweeps=(3, 7, 11), fs: float
     return sim
 
 
+def photostim_steps(*, levels_pa=tuple(range(-200, 200, 40)), fs: float = 20_000.0, sweep_s: float = 1.0,
+                    step_start_s: float = 0.1406, step_s: float = 0.5, onsets_s=(0.3356, 0.4406), rm_mohm: float = 100.0,
+                    v_rest: float = -60.0, e_rev: float = -10.0, g_mv_per_mv: float = 0.08, ppr: float = 0.9,
+                    rise_s: float = 0.0015, decay_s: float = 0.012, latency_s: float = 0.003, noise: float = 0.15,
+                    light_v=None, threshold_v: float = 0.0, seed: int = 0) -> Simulated:
+    """The lab's photostim-on-steps protocol (CC_-200mV_40pA_5ms Photostim2x_100ms between): a current step
+    family with two 5 ms light pulses inside every step, recorded in current clamp. Each PSP's peak is
+    ``g * (e_rev - Vm)``, Vm the steady potential the step brings the cell to (a small-conductance PSP, so its
+    size follows the driving force and reverses at ``e_rev``). With ``light_v`` (one value per sweep), the light
+    channel's size changes instead and the response scales with it above ``threshold_v``."""
+    rng = np.random.default_rng(seed)
+    n = int(sweep_s * fs)
+    t = np.arange(n) / fs
+    levels = list(levels_pa)
+    a, b = int(step_start_s * fs), int((step_start_s + step_s) * fs)
+    signal = np.full((len(levels), n), v_rest, dtype=float)
+    command = np.zeros((len(levels), n))
+    light = np.zeros((len(levels), n))
+    vm, amps = [], []
+    sizes = list(light_v) if light_v is not None else [5.0] * len(levels)
+    for s, i_pa in enumerate(levels):
+        command[s, a:b] = i_pa
+        dv = i_pa * rm_mohm * 1e-3
+        signal[s, a:b] += dv * (1 - np.exp(-(t[a:b] - t[a]) / 0.01))
+        signal[s, b:] += dv * np.exp(-(t[b:] - t[b]) / 0.01)
+        v_here = v_rest + dv
+        vm.append(v_here)
+        scale = 1.0 if light_v is None else max(0.0, sizes[s] - threshold_v) / max(1e-9, max(sizes) - threshold_v)
+        amp1 = g_mv_per_mv * (e_rev - v_here) * scale
+        amps.append(amp1)
+        for k, onset in enumerate(onsets_s):
+            lo = int(onset * fs)
+            light[s, lo:lo + int(0.005 * fs)] = sizes[s]
+            signal[s] += psc(t, onset + latency_s, amp1 * (ppr if k else 1.0), rise_s, decay_s)
+        signal[s] += rng.normal(0, noise, n)
+    channels = _channels("mV", "pA", [Channel(2, "AM_Stim", "V", Role.TRIGGER, True, role_reason="simulated light")])
+    rec = Recording(Path(f"sim_photostim_steps_{seed}.abf"), fs, channels, ArraySource([signal, command, light]),
+                    sweep_start_times_s=np.arange(len(levels)) * 5.0, protocol="sim_photostim_steps",
+                    start_time=dt.datetime(2026, 1, 1, 12, 30, 0), holding=0.0,
+                    epochs=[[Epoch("step", 0.0, step_start_s, 0.0), Epoch("step", step_start_s, step_start_s + step_s, lv),
+                             Epoch("step", step_start_s + step_s, sweep_s, 0.0)] for lv in levels])
+    return Simulated(rec, {"levels_pa": levels, "vm": vm, "amplitudes": amps, "e_rev": e_rev, "v_rest": v_rest,
+                           "ppr": ppr, "latency_s": latency_s, "light_v": sizes, "threshold_v": threshold_v})
+
+
 def steps(*, n_sweeps: int = 11, fs: float = 20_000.0, sweep_s: float = 1.0, step_start_s: float = 0.2,
           step_s: float = 0.5, first_pa: float = -100.0, delta_pa: float = 20.0, rm_mohm: float = 150.0,
           tau_s: float = 0.025, v_rest: float = -65.0, sag_fraction: float = 0.0, sag_tau_s: float = 0.1,

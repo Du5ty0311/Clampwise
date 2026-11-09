@@ -218,3 +218,33 @@ def test_the_naming_rules_dialog_previews_and_refuses_a_bad_pattern(tmp_path):
     app.processEvents()
     rules, problem = dlg.rules()
     assert "not valid" in problem and "not valid" in dlg.preview.text()
+
+
+def test_a_full_field_of_light_in_the_name_is_not_a_field_recording():
+    """Full_Field_PPulse_Good_Response.abf (2026-11-09) is a whole-cell file lit by the full field."""
+    import copy
+    from pathlib import Path
+
+    from clampwise.analysis import routing
+
+    rec = simulate.photostim_steps().recording
+    for name, field in (("Full_Field_PPulse_Good_Response.abf", False), ("whole-field light.abf", False),
+                        ("fEPSP_baseline.abf", True), ("field_LTP.abf", True), ("CA1 LFP.abf", True)):
+        r = copy.copy(rec)
+        r.source = Path(name)
+        assert routing._is_field(r, "") is field, name
+
+
+def test_a_current_clamp_protocol_played_in_voltage_clamp_is_said_and_not_read_as_mv():
+    """A Simple_IV recorded with its command in pA while the amplifier was in voltage clamp."""
+    from clampwise.analysis import pipeline, routing
+    from clampwise.core.recording import ClampMode
+
+    import dataclasses
+
+    rec = simulate.vc_family().recording
+    rec.channels = [dataclasses.replace(c, units="pA") if c.role.name == "COMMAND" else c for c in rec.channels]
+    assert rec.clamp_mode is ClampMode.VOLTAGE_CLAMP
+    assert "voltage clamp" in routing.command_mismatch(rec)
+    r = pipeline.analyze(rec)
+    assert r.recording_type == "unknown" and "not known" in r.type_reason

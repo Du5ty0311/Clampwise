@@ -142,3 +142,56 @@ def test_an_interval_series_matches_the_raw_sweeps():
     # measured by hand on each raw sweep: P2 -1133 to -1328 pA, P2/P1 1.42 to 1.67
     assert -1330 <= e.tables["pulses"][1]["amplitude"] <= -1130
     assert 1.42 <= e.values["ppr"] <= 1.67
+
+
+# ---- sweeps that differ under the stimulus (the lab's photostim protocols, 2026-11-09)
+
+def test_a_step_family_under_the_light_is_measured_level_by_level_with_its_reversal():
+    """CC_-200mV_40pA_5ms Photostim2x_100ms between: the light inside every step of a -200 to +160 pA family.
+    The levels are never averaged together; the headline is the 0 pA sweep; the reversal comes from a line
+    through the response at a fixed latency against the potential before the stimulus."""
+    sim = simulate.photostim_steps(e_rev=-10.0, seed=2)
+    r, e = _evoked(sim)
+    assert r.recording_type == "cc_evoked"
+    assert e.values["condition"] == "the command under the stimulus" and e.values["n_levels"] == 10
+    rows = e.tables["by_command"]
+    assert [row["level"] for row in rows] == sim.truth["levels_pa"]
+    for row, vm, amp in zip(rows, sim.truth["vm"], sim.truth["amplitudes"]):
+        assert row["baseline"] == pytest.approx(vm, abs=0.2)
+        assert row["p1_amplitude"] == pytest.approx(amp, abs=0.3)
+    zero = sim.truth["levels_pa"].index(0)                          # the headline: the sweep at 0 pA
+    assert e.values["n_sweeps"] == 1
+    assert e.values["p1_amplitude"] == pytest.approx(sim.truth["amplitudes"][zero], abs=0.3)
+    assert e.values["reversal"] == pytest.approx(-10.0, abs=1.5)
+    assert e.values["reversal_extrapolated"] == "yes"               # -80 to -44 mV recorded
+    assert "fixed latency" in e.choices and "reversal" in e.choices
+
+
+def test_a_reversal_inside_the_recorded_range_is_not_extrapolated():
+    sim = simulate.photostim_steps(e_rev=-62.0, v_rest=-65.0, rm_mohm=60.0, seed=4)
+    e = _evoked(sim)[1]
+    assert e.values["reversal"] == pytest.approx(-62.0, abs=1.0)
+    assert e.values["reversal_extrapolated"] == "no"
+
+
+def test_a_light_intensity_series_is_measured_level_by_level_with_its_threshold():
+    """ChroME_threshold_intensity_CC: the light command rises sweep by sweep (0.025 to 0.25 V)."""
+    sizes = [0.025 * k for k in range(1, 11)]
+    sim = simulate.photostim_steps(levels_pa=[0] * 10, light_v=sizes, threshold_v=0.1, g_mv_per_mv=0.1, seed=5)
+    r = pipeline.analyze(sim.recording, pipeline.Settings(shared={"light_inputs": {"AM_Stim": "simulated"}}))
+    e = r.results["evoked"]
+    assert e.values["condition"] == "the light's size" and e.values["n_levels"] == 10
+    rows = e.tables["by_intensity"]
+    assert [round(row["level"], 3) for row in rows] == pytest.approx(sizes, abs=0.002)
+    assert e.values["n_sweeps"] == 1                                 # the headline: the strongest light
+    assert e.values["p1_amplitude"] == pytest.approx(max(sim.truth["amplitudes"]), abs=0.3)
+    assert 0.1 < e.values["intensity_threshold"] <= 0.15             # above the simulated 0.1 V threshold
+    for row in rows:
+        if row["level"] <= 0.1:
+            assert abs(row["fixed_latency_amplitude"]) < 0.3
+
+
+def test_sweeps_alike_under_the_stimulus_are_averaged_as_before():
+    sim = simulate.evoked(n_sweeps=10, seed=1)
+    e = _evoked(sim)[1]
+    assert "condition" not in e.values and "by_command" not in e.tables and e.values["n_sweeps"] == 10

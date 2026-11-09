@@ -90,6 +90,20 @@ def evoked() -> list[Row]:
     sim = simulate.evoked(failures=0.3, n_sweeps=60, seed=8)
     e = pipeline.analyze(sim.recording).results["evoked"]
     rows.append(Row("evoked", "30% failures", "success rate", 0.7, e.values["p1_success_rate"], 0.1))
+    # the lab's photostim-on-steps protocol: each step level on its own, the reversal from the fixed latency
+    for e_rev, v_rest, rm in ((-10.0, -60.0, 100.0), (-62.0, -65.0, 60.0), (-75.0, -55.0, 120.0)):
+        sim = simulate.photostim_steps(e_rev=e_rev, v_rest=v_rest, rm_mohm=rm, seed=2)
+        e = pipeline.analyze(sim.recording).results["evoked"]
+        case = f"light under a -200 to +160 pA family, reversal {e_rev:g} mV"
+        rows.append(Row("evoked", case, "reversal (mV)", e_rev, e.values.get("reversal", np.nan), 1.5,
+                        "a line through the response at a fixed latency against Vm"))
+        zero = sim.truth["levels_pa"].index(0)
+        rows.append(Row("evoked", case, "PSP at 0 pA (mV)", sim.truth["amplitudes"][zero], e.values["p1_amplitude"], 0.3))
+    sizes = [0.025 * k for k in range(1, 11)]
+    sim = simulate.photostim_steps(levels_pa=[0] * 10, light_v=sizes, threshold_v=0.1, g_mv_per_mv=0.1, seed=5)
+    e = pipeline.analyze(sim.recording, pipeline.Settings(shared={"light_inputs": {"AM_Stim": "simulated"}})).results["evoked"]
+    rows.append(Row("evoked", "light intensity series 0.025-0.25 V, threshold 0.1 V", "threshold (V)", 0.125,
+                    e.values.get("intensity_threshold", np.nan), 0.0251, "the first level above the threshold"))
     return rows
 
 

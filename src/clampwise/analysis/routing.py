@@ -11,6 +11,7 @@ a typed override on the recording beats both.
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -143,10 +144,31 @@ def _injection(recording: Recording, stimulus: Stimulus) -> tuple[str, str] | No
 
 
 def _is_field(recording: Recording, hint: str) -> bool:
-    text = f"{recording.protocol} {recording.source.name} {hint}".lower()
-    if any(w in text for w in ("lfp", "field", "fepsp")):
+    """Named as a field recording (LFP, fEPSP, "field"). A patterned illuminator's "full field" or "whole field"
+    is the light, not the recording: "Full_Field_PPulse_Good_Response.abf" is a whole-cell file (2026-11-09)."""
+    text = re.sub(r"[_\-.]+", " ", f"{recording.protocol} {recording.source.name} {hint}".lower())
+    text = re.sub(r"\b(full|whole)\s*field\b", " ", text)
+    if "lfp" in text or "fepsp" in text or re.search(r"\bfield\b", text):
         return True
     return recording.header.get("recording_kind") == "field"
+
+
+def command_mismatch(recording: Recording) -> str:
+    """Why the command's units do not fit the clamp mode, or "" when they do. A current-clamp protocol (its
+    command in pA) played while the amplifier was in voltage clamp steps the cell by a voltage nobody set: the
+    digitizer's output is scaled for current and the amplifier reads it as voltage (2026-11-09, on the lab's recordings)."""
+    cmd = recording.channel(Role.COMMAND)
+    units = (cmd.units if cmd is not None else "").strip()
+    if not units:
+        return ""
+    mode = recording.clamp_mode
+    if mode is ClampMode.VOLTAGE_CLAMP and units.lower().endswith("a"):
+        return (f"the protocol commands current ({units}) but the amplifier was in voltage clamp: a current-clamp "
+                "protocol played in voltage clamp, so the voltage the cell was stepped to is not known")
+    if mode is ClampMode.CURRENT_CLAMP and units.lower().endswith("v"):
+        return (f"the protocol commands voltage ({units}) but the amplifier was in current clamp: a voltage-clamp "
+                "protocol played in current clamp, so the current injected is not known")
+    return ""
 
 
 def detect(recording: Recording, stimulus: Stimulus, *, mode_hint: str = "") -> Decision:
@@ -171,6 +193,15 @@ def detect(recording: Recording, stimulus: Stimulus, *, mode_hint: str = "") -> 
     away = [lv for lv in levels if np.isfinite(recording.holding) and abs(lv - recording.holding) > 0.5] \
         if np.isfinite(recording.holding) else [lv for lv in levels if abs(lv) > 0.5]
     evidence["steps"] = f"{len(away)} step size(s)" if away else "no steps"
+    mismatch = command_mismatch(recording)
+    if mismatch:
+        evidence["command"] = mismatch
+        if not has_stim:
+            return Decision("unknown", mismatch + "; no analysis reads command steps of unknown size", "detected",
+                            evidence)
+        kind = "vc_evoked" if mode is ClampMode.VOLTAGE_CLAMP else "cc_evoked"
+        return Decision(kind, f"a stimulus was found ({'voltage' if kind == 'vc_evoked' else 'current'} clamp); "
+                        f"note: {mismatch}", "detected", evidence)
     vc = mode is ClampMode.VOLTAGE_CLAMP
     # DSI: voltage clamp, a long depolarizing step to -20 mV or above, from a holding at or below -40 mV
     if vc and away and recording.epochs:
