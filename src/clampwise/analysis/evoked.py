@@ -113,6 +113,59 @@ def artifact_end(t: np.ndarray, y: np.ndarray, t0: float, fs: float, baseline: f
     return max(end_s, floor_s), True, ""
 
 
+def light_artifact(t: np.ndarray, rows: np.ndarray, ons: np.ndarray, widths: np.ndarray, fs: float,
+                   s: dict) -> tuple[float, str]:
+    """(how long after each light pulse's onset to blank, why) when the light itself marks the trace: a square
+    deflection held while the light is on and gone when it goes off (a photoelectric potential at the electrode,
+    or pickup from the LED driver), or a sharp jump at its onset and another at its end; either one the same in
+    every sweep whatever the cell is doing. (0, "") when there is none. Judged on pulse 1 of every sweep
+    (2026-11-10, the lab's connectivity experiments). A photocurrent or a synaptic response is not one: it goes on
+    after the light ends."""
+    width = float(np.nanmedian(widths)) if np.isfinite(widths).any() else NAN
+    if not np.isfinite(width) or width <= 0 or rows.shape[0] == 0:
+        return 0.0, ""
+    base_pre, base_end = s["baseline_start_ms"] / 1e3, s["baseline_end_ms"] / 1e3
+    inside, after, edges, noises = [], [], [], []
+    two = max(2, int(round(0.1e-3 * fs)))
+    for k in range(rows.shape[0]):
+        on = float(ons[k, 0])
+        off = on + width
+        y = rows[k]
+        b0, b1 = np.searchsorted(t, [on + base_pre, on + base_end])
+        i0, i1 = np.searchsorted(t, [on + 0.3e-3, off - 0.1e-3])
+        a0, a1 = np.searchsorted(t, [off + 0.5e-3, off + 1.5e-3])
+        if b1 - b0 < 3 or i1 - i0 < 2 or a1 - a0 < 2 or a1 > y.size:
+            continue
+        base = float(np.median(y[b0:b1]))
+        noises.append(kinetics.robust_noise(y[b0:b1] - base) or float(np.std(y[b0:b1])) or 1e-9)
+        inside.append(float(np.mean(y[i0:i1]) - base))
+        after.append(float(np.mean(y[a0:a1]) - base))
+        j_on, j_off = int(np.searchsorted(t, on)), int(np.searchsorted(t, off))
+        edges.append((float(np.max(np.abs(np.diff(y[max(j_on - two, 0):j_on + two + 1])))),
+                      float(np.max(np.abs(np.diff(y[max(j_off - two, 0):j_off + two + 1]))))))
+    if not inside:
+        return 0.0, ""
+    inside, after, noises, edges = (np.asarray(x, float) for x in (inside, after, noises, edges))
+    noise = float(np.median(noises))
+    level = float(np.median(inside))
+    spread = 1.4826 * float(np.median(np.abs(inside - level))) if inside.size >= 3 else 0.0
+    same = spread <= 0.35 * abs(level) + noise
+    square = abs(level) >= 4 * noise and float(np.median(np.abs(after))) <= 0.35 * abs(level)
+    blank = width + 0.5e-3
+    if square and same:
+        return blank, (f"a {level:+.2f} deflection held while the light is on ({width * 1e3:.1f} ms) and gone within "
+                       f"0.5 ms of its end, the same in all {inside.size} sweep(s): the light's own mark on the "
+                       "electrode (photoelectric) or pickup from the LED driver, not the cell. The light's pulse is "
+                       "blanked and the response measured after it")
+    # white noise's sample-to-sample change has about 1.4 x the noise SD; a jump of 8 x is not noise
+    if edges.size and float(np.median(edges[:, 0])) >= 8 * noise and float(np.median(edges[:, 1])) >= 8 * noise:
+        return blank, (f"a sharp jump at the light's onset ({float(np.median(edges[:, 0])) / noise:.0f} x the noise) "
+                       f"and another at its end ({float(np.median(edges[:, 1])) / noise:.0f} x), in every sweep: the "
+                       "light's own mark on the electrode, not the cell. The light's pulse is blanked and the "
+                       "response measured after it")
+    return 0.0, ""
+
+
 # ------------------------------------------------------------------ one response
 
 @dataclass
@@ -143,12 +196,20 @@ class Pulse:
     spike_probability: float = NAN
     n_sweeps: int = 0
     tail: tuple | None = None               # (amp, tau, t_start) of the fitted decay, for the next pulse
+    onset_raw_s: float = NAN                # the onset on the average whatever the light rule says
+    at_light_end: float = NAN               # the deflection (signed as the response) when the light goes off
+    time_to_half_peak_s: float = NAN        # from the stimulus to half the peak (Turesson 2013's rise)
+    decay_80_20_s: float = NAN              # the decay from 80% to 20% of the peak (Ahmed & Pare 2023)
+    initial_slope: float = NAN              # units per ms over the first half of the rise (Popescu 2007)
     flags: list[str] = field(default_factory=list)
 
 
 def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, baseline: float | None,
-             polarity: int, next_t: float, light: bool) -> Pulse:
-    """One response on a trace ``y`` (an average with earlier tails removed)."""
+             polarity: int, next_t: float, light: bool, light_width_s: float = NAN,
+             light_blank_s: float = 0.0) -> Pulse:
+    """One response on a trace ``y`` (an average with earlier tails removed). ``light_blank_s``: a light
+    artifact recognised on the sweeps, blanked from the pulse's onset; ``light_width_s``: how long the light
+    stays on, to read the deflection when it goes off (a direct photocurrent is still at its height there)."""
     p = Pulse(0, t0)
     b0, b1 = np.searchsorted(t, [t0 + s["baseline_start_ms"] / 1e3, t0 + s["baseline_end_ms"] / 1e3])
     seg = y[b0:b1]
@@ -160,6 +221,8 @@ def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, bas
     if not np.isfinite(p.noise_sd) or p.noise_sd <= 0:
         p.noise_sd = float(np.std(seg)) or NAN
     blank, seen, note = artifact_end(t, y, t0, fs, p.baseline, s["blank_ms"] / 1e3, s["response_end_ms"] / 1e3)
+    if light_blank_s > blank:
+        blank, seen, note = light_blank_s, False, ""
     if note:
         p.flags.append(note)
     elif seen and blank > s["blank_ms"] / 1e3 + 1e-9:
@@ -185,9 +248,23 @@ def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, bas
     p.peak_time_s = float(t[peak] - t0)
     p.snr = float(dev[peak] / p.noise_sd) if p.noise_sd > 0 else NAN
     p.detected = bool(np.isfinite(p.snr) and p.snr >= s["detect_sd"])
-    onset = kinetics.find_onset(dev, r0, peak + 1, 3.0 * p.noise_sd, max(1, int(round(0.5e-3 * fs))))
+    if np.isfinite(light_width_s) and light_width_s > 0:
+        e0, e1 = np.searchsorted(t, [t0 + light_width_s - 0.3e-3, t0 + light_width_s])
+        if e1 > e0 and e1 <= dev.size:
+            p.at_light_end = float(np.mean(dev[e0:e1]))
+    onset = kinetics.find_onset(dev, r0, peak + 1, s["onset_noise_sd"] * p.noise_sd, max(1, int(round(0.5e-3 * fs))))
     if onset is not None and onset < peak:
         lat = float(t[onset] - t0)
+        p.onset_raw_s = lat
+        # the initial slope (the LTP readout: Popescu et al. 2007): a line over the first half of the rise,
+        # from the onset to half the peak, in units per ms
+        half_i = onset + int(np.argmax(dev[onset:peak + 1] >= 0.5 * dev[peak])) if peak > onset else onset
+        if half_i - onset >= 2:
+            fit = fits.linear(t[onset:half_i + 1] * 1e3, y[onset:half_i + 1], purpose="initial slope of the rise")
+            p.initial_slope = float(fit["slope"])
+        if light_blank_s > 0 and onset <= r0 + max(1, int(round(0.1e-3 * fs))):
+            p.flags.append(f"the response is already under way where the light's blank ends ({blank * 1e3:.1f} ms): "
+                           "its onset lies inside the blank and is not known")
         if light and lat < s["light_min_latency_ms"] / 1e3:
             p.flags.append(f"onset {lat * 1e3:.2f} ms after the light, sooner than a synapse can answer "
                            f"({s['light_min_latency_ms']:g} ms): the light itself or noise; latency not measured")
@@ -207,6 +284,21 @@ def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, bas
         p.rise_10_90_s = kinetics.rise_time(t, dev, r0, peak, 0.1, 0.9)
         p.rise_20_80_s = kinetics.rise_time(t, dev, r0, peak, 0.2, 0.8)
         p.half_width_s = kinetics.half_width(t, dev, r0, peak, max(end, r1))
+        # the lab's rise and decay times: time to half the peak (Turesson 2013), from the stimulus; and the
+        # time the decay takes from 80% to 20% of the peak (Ahmed & Pare 2023)
+        seg = dev[r0:peak + 1]
+        below = np.flatnonzero(seg < 0.5 * peak_dev)
+        if below.size and r0 + int(below[-1]) + 1 <= peak:
+            i = r0 + int(below[-1])
+            p.time_to_half_peak_s = kinetics.interp_crossing(t, dev, i, i + 1, 0.5 * peak_dev) - t0
+        stop = max(end, r1)
+        after = dev[peak:stop]
+        i80 = np.flatnonzero(after <= 0.8 * peak_dev)
+        i20 = np.flatnonzero(after <= 0.2 * peak_dev)
+        if i80.size and i20.size and i20[0] > i80[0]:
+            a, b = peak + int(i80[0]), peak + int(i20[0])
+            p.decay_80_20_s = (kinetics.interp_crossing(t, dev, b - 1, b, 0.2 * peak_dev)
+                               - kinetics.interp_crossing(t, dev, a - 1, a, 0.8 * peak_dev))
     decay_stop = max(int(np.searchsorted(t, t0 + min(s["decay_window_ms"] / 1e3, limit))), end)
     decay_stop = min(decay_stop, r_lim if s["follow_slow"] else decay_stop, t.size)
     if p.detected and decay_stop > peak + 8:
@@ -302,7 +394,14 @@ def spike_onset(t: np.ndarray, y: np.ndarray, fs: float, t0: float, t1: float, b
     dvdt = np.diff(src) * fs / 1e3
     if not (dvdt.max() >= SPIKE_DVDT and (y[a:b].max() - baseline) >= SPIKE_HEIGHT):
         return NAN
-    cross = np.flatnonzero(dvdt[lead:] >= SPIKE_DVDT)
+    # the upstroke holds 20 mV/ms for 0.1 ms at least; a single sample over it is noise (0.2 mV of noise at
+    # 20 kHz gives dV/dt a 6 mV/ms spread, and one sample in a few hundred crosses 20)
+    above = dvdt[lead:] >= SPIKE_DVDT
+    hold = max(2, int(round(0.1e-3 * fs)))
+    if above.size < hold:
+        return NAN
+    runs = np.convolve(above.astype(int), np.ones(hold, int), mode="valid") == hold
+    cross = np.flatnonzero(runs)
     return float(t[a + int(cross[0])]) if cross.size else NAN
 
 
@@ -351,6 +450,7 @@ FLAG_WORDS = (
     ("artifact", "long artifact"), ("still rising", "slow peak"), ("exceed what the trace", "tail too large"),
     ("too short", "window too short"), ("every sweep had fired", "all sweeps fired"),
     ("no decay to take off", "no tail"), ("tail fit failed", "tail fit failed"), ("comes before", "pulses too close"),
+    ("inside the blank", "onset in the blank"),
 )
 
 
@@ -374,6 +474,8 @@ def _pulse_row(p: Pulse, p1_amplitude: float, vc: bool, spike_at: np.ndarray) ->
         "rise_10_90_ms": p.rise_10_90_s * 1e3, "rise_20_80_ms": p.rise_20_80_s * 1e3,
         "decay_tau_ms": p.decay_tau_s * 1e3, "decay_r2": p.decay_r2,
         "decay_tau_from_peak_ms": p.decay_tau_from_peak_s * 1e3, "half_width_ms": p.half_width_s * 1e3,
+        "time_to_half_peak_ms": p.time_to_half_peak_s * 1e3, "decay_80_20_ms": p.decay_80_20_s * 1e3,
+        "initial_slope": p.initial_slope,
         "integral": p.integral / (1e3 if vc else 1.0), "snr": p.snr, "detected": p.detected,
         "success_rate": p.success_rate, "potency": p.potency, "cv": p.cv, "inv_cv2": p.inv_cv2,
         "spike_probability": p.spike_probability,
@@ -417,6 +519,10 @@ SETTINGS = (
             "this window at the average's peak time.", "ms", advanced=True),
     Setting("light_min_latency_ms", 1.5, "After light, onsets sooner than (ms)", "are the light itself or noise, "
             "not a synapse; 0 for direct photocurrents.", "ms", advanced=True),
+    Setting("onset_noise_sd", 2.0, "Onset: departure past (noise SD)", "The response's onset is the first departure "
+            "from the baseline past this many times its noise that stays there for 0.5 ms (the lab's criterion: "
+            "twice the noise, then growing without returning to baseline; 3 was Clampwise's).", "",
+            "Ahmed, Headley & Pare 2021", minimum=1.0),
     Setting("polarity", "auto", "Response direction", "From pulse 1 of the average, or set.",
             choices=("auto", "up", "down"), advanced=True),
 )
@@ -428,8 +534,9 @@ OUTPUTS = (
            "averaged.", ""),
     Output("p1_amplitude", "Pulse 1: the response to the first stimulus of each sweep, on the average of the sweeps "
            "used.", "pA or mV"),
-    Output("p1_latency_median", "Median of the per-sweep onsets of pulse 1 (onset: the first sustained crossing of "
-           "3 noise SD).", "ms"),
+    Output("p1_latency_median", "Median of the per-sweep onsets of pulse 1 (onset: the first sustained departure "
+           "past the set number of noise SDs, twice the noise by default, the lab's criterion).", "ms",
+           "Ahmed, Headley & Pare 2021"),
     Output("p1_jitter", "SD of the per-sweep onsets of pulse 1.", "ms"),
     Output("p1_latency_average", "Onset of pulse 1 on the average trace (biased early when jitter is high).", "ms"),
     Output("p1_rise_10_90", kinetics.DEFINITIONS["rise_10_90"], "ms", ""),
@@ -437,6 +544,13 @@ OUTPUTS = (
     Output("p1_decay_tau", kinetics.DEFINITIONS["decay_tau"], "ms"),
     Output("p1_decay_tau_from_peak", "Decay tau fitted from the peak.", "ms", ""),
     Output("p1_half_width", kinetics.DEFINITIONS["half_width"], "ms"),
+    Output("p1_time_to_half_peak", "Pulse 1: from the stimulus to half the peak on the rise (the lab's rise "
+           "time).", "ms", "Turesson, Rodriguez-Sierra & Pare 2013", label="Pulse 1 time to half peak"),
+    Output("p1_decay_80_20", "Pulse 1: the time the decay takes from 80% to 20% of the peak.", "ms",
+           "Ahmed & Pare 2023", label="Pulse 1 decay, 80-20%"),
+    Output("p1_initial_slope", "Pulse 1: the initial slope of the rise, a line from the onset to half the peak "
+           "(the first half of the rising phase: the LTP readout).", "signal units per ms",
+           "Popescu, Saghyan & Pare 2007", label="Pulse 1 initial slope"),
     Output("p1_integral", "Charge (voltage clamp, pC) or area (current clamp, mV*ms) of pulse 1, from the end of the "
            "artifact to the end of the charge window or of a slow response.", "pC or mV*ms"),
     Output("p1_success_rate", "Fraction of sweeps whose pulse-1 response is above the failure threshold.", "fraction",
@@ -477,6 +591,20 @@ OUTPUTS = (
            "or an isolator's monitor) from which every stronger level carries a response time-locked to it "
            "(p < 0.05 against sham times) and above the detection level on its average.", "stimulus channel units",
            label="Stimulus threshold"),
+    Output("direct_photocurrent", "yes when the recorded cell itself answers the light: the response begins "
+           "sooner than a synapse can (under the light minimum latency), is still at half its peak or more when "
+           "the light goes off, and peaks there or within 3 ms after. Such a cell expresses the opsin or has its "
+           "membrane lit; the response says nothing about a connection.", "",
+           "Turesson, Rodriguez-Sierra & Pare 2013", label="Direct photocurrent"),
+    Output("light_artifact_blank_ms", "When the light itself marks the trace (a square deflection held while it "
+           "is on and gone when it goes off, or sharp jumps at its onset and end, the same in every sweep), how "
+           "long after each light pulse's onset the trace is blanked before anything is measured.", "ms",
+           "Clampwise", label="Light artifact blanked"),
+    Output("region_known", "Whether the region the patterned light lit on each sweep is known (the Polygon's "
+           "log kept with the recording). A mapping protocol whose regions are unknown gets no averaged number.",
+           "", "Clampwise", label="Region lit known"),
+    Output("pattern", "The pattern the patterned light showed on every sweep, when its log says one lit them all.",
+           "", "Clampwise", label="Pattern lit"),
     Output("pulse", "One pulse on the average (pulse table).", "", level="pulse"),
     Output("amplitude_local", "A later pulse's peak against the level just before it on the plain average (no tail "
            "model): the rise the trace shows. The corrected amplitude should not be smaller while earlier "
@@ -510,10 +638,22 @@ OUTPUTS = tuple(replace(o, label=LABELS[o.key][0], headline=LABELS[o.key][1]) if
                 for o in OUTPUTS)
 
 
-def _by_pattern(recording: Recording, context, s, sweeps: list[int], out: Result) -> None:
+MAPPING_WORDS = ("grid", "map", "connectivity")      # protocols that light a different region on each sweep
+
+
+def is_mapping(recording: Recording) -> bool:
+    """A protocol that lights one region a sweep (a grid map, a cell-by-cell connectivity run): its sweeps mean
+    nothing averaged together unless the pattern lit on each is known."""
+    text = f"{recording.protocol} {recording.source.name}".lower()
+    return any(w in text for w in MAPPING_WORDS)
+
+
+def _by_pattern(recording: Recording, context, s, sweeps: list[int], out: Result) -> str:
     """Patterned light (the Polygon's log kept with the recording): the sweeps measured again for each pattern lit
     (each region of interest, the full field, a control region), into the table ``by_pattern``; sweeps whose
-    pattern is not sure are left out of it and counted. Nothing when one pattern lit them all."""
+    pattern is not sure are left out of it and counted. Nothing when one pattern lit them all. Returns what is
+    known of the patterns: "no log" (nothing records them), "one pattern", "by pattern" (grouped), "not sure"
+    (a log, but no sweep's pattern is sure)."""
     import copy
 
     from ..rig import light_record
@@ -521,9 +661,9 @@ def _by_pattern(recording: Recording, context, s, sweeps: list[int], out: Result
     try:
         matched = light_record.for_recording(recording, write_it=False, stimulus=context.stimulus)
     except Exception:                                 # a log that cannot be read: the recording as a whole
-        return
+        return "no log"
     if not matched:
-        return
+        return "no log"
     per = light_record.for_sweeps(recording, matched)
     # stepped by the trigger: each pulse its own pattern, the same in every sweep (pulse j, step j)
     by_pulse: dict[int, set] = {}
@@ -551,7 +691,12 @@ def _by_pattern(recording: Recording, context, s, sweeps: list[int], out: Result
     if len(groups) < 2 and not unsure:
         if groups:
             out.notes.append(f"patterned light: every sweep lit by {next(iter(groups))}")
-        return
+            out.values["pattern"] = next(iter(groups))
+            return "one pattern"
+        return "no log"
+    if not groups:
+        out.notes.append(f"patterned light: no sweep's pattern is sure ({unsure} sweep(s) not sure)")
+        return "not sure"
     rows = []
     for name, idx in groups.items():
         sub = copy.copy(context)
@@ -576,6 +721,7 @@ def _by_pattern(recording: Recording, context, s, sweeps: list[int], out: Result
                          "them, or the patterned light not held by Clampwise) are left out of by_pattern")
     for note in light_record.dose_notes([m for m in per if m]):
         out.notes.append("patterned light: " + note)
+    return "by pattern"
 
 
 @dataclass
@@ -716,9 +862,30 @@ def _by_condition(recording: Recording, context, s, cond: Conditions, out: Resul
                      "p1_latency_median": r.values.get("p1_latency_median", NAN),
                      "p1_success_rate": r.values.get("p1_success_rate", NAN),
                      "spike_probability": pulses[0].get("spike_probability", NAN),
+                     "spike_latency_ms": pulses[0].get("spike_latency_ms", NAN),
                      "time_locked_p": r.values.get("time_locked_p", NAN),
                      "detected": bool(pulses[0].get("detected", False)),
+                     "direct": r.values.get("direct_photocurrent", "no"),
                      "ppr": r.values.get("ppr", NAN)})
+    n_direct = sum(row["direct"] == "yes" for row in rows)
+    answering = sum(row["direct"] == "yes" or row["detected"] or (np.isfinite(row["spike_probability"])
+                                                                   and row["spike_probability"] >= 0.5)
+                    for row in rows)
+    if n_direct:
+        out.notes.append(f"a direct photocurrent (the recorded cell answering the light itself) at {n_direct} of "
+                         f"{len(rows)} levels")
+        if out.values.get("direct_photocurrent") != "yes" and n_direct >= max(1, answering / 2):
+            # the headline level did not show it (too small there, or the cell fired), but most levels that
+            # answer the light answer it directly: the cell is light-sensitive
+            out.values["direct_photocurrent"] = "yes"
+            where = [f"{row['level']:g} {cond.units}" for row in rows if row["direct"] == "yes"]
+            out.flags.append(Flag("direct photocurrent", "the recorded cell itself answers the light at "
+                                  f"{n_direct} of the {answering} level(s) that answer it ({', '.join(where[:6])}"
+                                  f"{', ...' if len(where) > 6 else ''}): the response begins sooner than a synapse "
+                                  "can answer and is at its height when the light goes off, or the cell fires "
+                                  "within the light's first milliseconds. This cell expresses the opsin; its "
+                                  "responses say nothing about a connection", "",
+                                  "Turesson, Rodriguez-Sierra & Pare 2013"))
     table = "by_command" if cond.kind == "command" else "by_intensity"
     out.tables[table] = rows
     out.values["n_levels"] = len(rows)
@@ -772,6 +939,10 @@ def _by_condition(recording: Recording, context, s, cond: Conditions, out: Resul
     out.values["reversal"] = rev
     outside = not (x[good].min() <= rev <= x[good].max())
     out.values["reversal_extrapolated"] = "yes" if outside else "no"
+    for f in out.flags:
+        if f.code == "direct photocurrent":
+            f.text += (f". Its size follows the membrane potential (reversal {rev:.0f} mV, r squared {fit.r2:.2f}): "
+                       "a conductance in the recorded cell, not an artifact of the light on the electrode")
     out.choose("reversal", f"{rev:.1f} mV" + (" (extrapolated)" if outside else ""),
                f"a straight line through the response {t_fix * 1e3:.2f} ms after pulse 1 at {int(good.sum())} levels "
                f"({x[good].min():.1f} to {x[good].max():.1f} mV), r squared {fit.r2:.2f}; liquid junction potential "
@@ -782,11 +953,14 @@ def _by_condition(recording: Recording, context, s, cond: Conditions, out: Resul
                               "data", severity="note"))
 
 
-@register("evoked", "Evoked responses, every pulse", version=3, types=EVOKED, settings=SETTINGS, outputs=OUTPUTS,
+@register("evoked", "Evoked responses, every pulse", version=4, types=EVOKED, settings=SETTINGS, outputs=OUTPUTS,
           description="Single pulses, paired pulses and trains: each pulse's amplitude, latency, kinetics, charge "
                       "and reliability, measured on the average and sweep by sweep. Sweeps that differ under the "
                       "stimulus (a step family played under it, a rising light) are measured level by level, with "
-                      "the response's reversal potential or the stimulus threshold.",
+                      "the response's reversal potential or the stimulus threshold. The light's own mark on the "
+                      "trace is recognised and blanked; a direct photocurrent (the recorded cell answering the "
+                      "light itself) is told from a synaptic response; a mapping protocol whose regions are "
+                      "unknown is not averaged.",
           source="Kim & Alger 2001 (PPR); Faber & Korn 1991 (CV)", requires=("baseline",))
 def run(recording: Recording, context, s) -> Result:
     out = Result("evoked", 1)
@@ -843,6 +1017,14 @@ def run(recording: Recording, context, s) -> Result:
                 at = spike_onset(t, row, fs, start, min(nxt, onsets[k, j] + reach / 1e3), base)
                 spike_table[k, j] = bool(np.isfinite(at))
                 spike_at[k, j] = at - onsets[k, j] if np.isfinite(at) else NAN
+    # a spike before pulse 1 (in the 30 ms its window reaches back) takes the sweep out of the PSP measures
+    # (its afterhyperpolarization pulls the baseline) but is not the pulse's doing: the spike probability
+    # counts spikes after the pulse only (a cell that fires on its depolarizing steps before every light pulse)
+    fired_after = spike_table & (np.nan_to_num(spike_at, nan=-1.0) >= 0)
+    n_before = int((spike_table & ~fired_after).sum())
+    if n_before:
+        out.notes.append(f"{n_before} sweep(s) fired before pulse 1 (within the 30 ms before it): left out of the "
+                         "PSP measures, not counted as firing on the pulse")
     # a sweep leaves the PSP measures from the first pulse it fires on
     if not vc and s["exclude_spiking"]:
         fired_by = np.cumsum(spike_table, axis=1) > 0
@@ -861,8 +1043,8 @@ def run(recording: Recording, context, s) -> Result:
         out.notes.append("every sweep fired on pulse 1: no PSP is measured; the spike probability of each pulse is "
                          "in the pulse table")
         out.tables["pulses"] = [_pulse_row(Pulse(j + 1, float(np.median(onsets[:, j])),
-                                                 spike_probability=float(spike_table[:, j].mean())), NAN, vc,
-                                           spike_at[:, j]) for j in range(n_pulses)]
+                                                 spike_probability=float(fired_after[:, j].mean())), NAN, vc,
+                                           np.where(fired_after[:, j], spike_at[:, j], NAN)) for j in range(n_pulses)]
         for key in ("amplitude", "p1_amplitude", "ppr"):
             out.values[key] = NAN
         return out
@@ -879,6 +1061,16 @@ def run(recording: Recording, context, s) -> Result:
     polarity = 0 if pol_setting == "auto" else (1 if pol_setting == "up" else -1)
     work = rows.astype(float).copy()   # each sweep with its earlier tails taken off (scaled to it, D1)
     avg_tails = np.zeros(t.size)       # the earlier tails on the average, as fitted there
+    # the light's own mark on the trace, if any: blanked before anything is measured
+    widths = np.array([float(st.widths_s[i][0]) if i < len(st.widths_s) and len(st.widths_s[i]) else NAN
+                       for i in used])
+    light_width = float(np.nanmedian(widths)) if light and np.isfinite(widths).any() else NAN
+    light_blank, why_blank = light_artifact(t, rows, ons, widths, fs, s) if light else (0.0, "")
+    out.values["light_artifact_blank_ms"] = light_blank * 1e3 if light_blank else NAN
+    if light_blank:
+        out.flags.append(Flag("light artifact", why_blank, source="Clampwise", severity="note"))
+        out.choose("light blank", f"{light_blank * 1e3:.1f} ms after each light pulse", why_blank.split(":")[0])
+    extra = {"light_width_s": light_width, "light_blank_s": light_blank}
 
     def sweep_base(k: int) -> float:
         b0, b1 = np.searchsorted(t, [ons[k, 0] + base_pre, ons[k, 0] + s["baseline_end_ms"] / 1e3])
@@ -935,13 +1127,13 @@ def run(recording: Recording, context, s) -> Result:
             yy = work[members].mean(axis=0) if j == 0 else rows[members].mean(axis=0) - avg_tails
             nxt = float(fixed[j + 1]) if j + 1 < n_pulses else np.inf
         if j == 0 and polarity == 0:
-            up = _measure(tt, yy, t0, fs, s, baseline=None, polarity=1, next_t=nxt, light=light)
-            down = _measure(tt, yy, t0, fs, s, baseline=None, polarity=-1, next_t=nxt, light=light)
+            up = _measure(tt, yy, t0, fs, s, baseline=None, polarity=1, next_t=nxt, light=light, **extra)
+            down = _measure(tt, yy, t0, fs, s, baseline=None, polarity=-1, next_t=nxt, light=light, **extra)
             polarity = 1 if abs(up.amplitude) >= abs(down.amplitude) else -1
             out.choose("response direction", "up" if polarity > 0 else "down",
                        "the larger deflection of pulse 1 on the average")
         p = _measure(tt, yy, t0, fs, s, baseline=None if (j == 0 or moving) else p1_base, polarity=polarity,
-                     next_t=nxt, light=light)
+                     next_t=nxt, light=light, **extra)
         p.number, p.time_s = j + 1, float(np.median(ons[:, j]))
         if j == 0:
             p1_base = p.baseline
@@ -1024,14 +1216,14 @@ def run(recording: Recording, context, s) -> Result:
         for j, p in enumerate(pulses):
             if not member[k, j] or not np.isfinite(p.peak_time_s):
                 continue
-            blank = max(s["blank_ms"] / 1e3, 0.0)
+            blank = max(s["blank_ms"] / 1e3, light_blank, 0.0)
             r0 = int(np.searchsorted(t, ons[k, j] + blank))
             pk = int(np.searchsorted(t, ons[k, j] + p.peak_time_s)) + 1
             # the onset is a departure from the level just before this pulse (a
             # later pulse can start on a residue its tail model did not take off)
             pre0 = int(np.searchsorted(t, ons[k, j] - 0.002))
             local = float(np.median(dev[pre0:max(r0 - 1, pre0 + 1)])) if j > 0 else 0.0
-            on = kinetics.find_onset(dev - local, r0, pk, 3.0 * noise, max(1, int(round(0.5e-3 * fs))))
+            on = kinetics.find_onset(dev - local, r0, pk, s["onset_noise_sd"] * noise, max(1, int(round(0.5e-3 * fs))))
             if on is not None:
                 lat = float(t[on] - ons[k, j])
                 if not (light and lat < s["light_min_latency_ms"] / 1e3):
@@ -1064,7 +1256,7 @@ def run(recording: Recording, context, s) -> Result:
                 p.latency_median_s = float(np.median(lats))
                 p.jitter_s = float(np.std(lats, ddof=1)) if lats.size > 1 else NAN
         p.n_sweeps = int(finite.size)
-        p.spike_probability = float(spike_table[:, j].mean()) if not vc else NAN
+        p.spike_probability = float(fired_after[:, j].mean()) if not vc else NAN
 
     # ---- the time-locked test on pulse 1
     arts = getattr(context, "artifacts", [])
@@ -1095,6 +1287,8 @@ def run(recording: Recording, context, s) -> Result:
         "p1_rise_10_90": p1.rise_10_90_s * 1e3, "p1_rise_20_80": p1.rise_20_80_s * 1e3,
         "p1_decay_tau": p1.decay_tau_s * 1e3, "p1_decay_tau_from_peak": p1.decay_tau_from_peak_s * 1e3,
         "p1_half_width": p1.half_width_s * 1e3, "p1_integral": p1.integral / (1e3 if vc else 1.0),
+        "p1_time_to_half_peak": p1.time_to_half_peak_s * 1e3, "p1_decay_80_20": p1.decay_80_20_s * 1e3,
+        "p1_initial_slope": p1.initial_slope,
         "p1_success_rate": p1.success_rate, "p1_potency": p1.potency, "p1_cv": p1.cv, "p1_inv_cv2": p1.inv_cv2,
         "ppr": ratio(p2.amplitude, p1.amplitude) if p2 else NAN,
         "units": units, "integral_units": "pC" if vc else "mV*ms",
@@ -1102,10 +1296,40 @@ def run(recording: Recording, context, s) -> Result:
     if p2 is not None and not moving:
         # pulse 2 against its own pre-pulse baseline on the plain average: the raw ratio, for comparison
         raw = _measure(t, rows[member[:, 1]].mean(axis=0), float(fixed[1]), fs, s, baseline=None, polarity=polarity,
-                       next_t=float(fixed[2]) if n_pulses > 2 else np.inf, light=light)
+                       next_t=float(fixed[2]) if n_pulses > 2 else np.inf, light=light, **extra)
         out.values["ppr_raw"] = ratio(raw.amplitude, p1.amplitude)
     else:
         out.values["ppr_raw"] = NAN
+    # a direct photocurrent: the recorded cell itself answers the light (it expresses the opsin, or its membrane
+    # is lit): the response begins sooner than any synapse can answer, is still at its height when the light goes
+    # off, and peaks there or just after (Turesson et al. 2013: direct responses have a short latency, rise
+    # during the light and decay from its offset). Not a synaptic response, and not a light artifact (one of
+    # those is gone when the light goes off; see light_artifact)
+    direct = bool(light and p1.detected and np.isfinite(light_width) and np.isfinite(p1.onset_raw_s)
+                  and p1.onset_raw_s < s["light_min_latency_ms"] / 1e3
+                  and np.isfinite(p1.at_light_end) and np.isfinite(p1.peak_time_s)
+                  and p1.peak_time_s <= light_width + 3e-3
+                  and p1.at_light_end >= 0.5 * abs(p1.amplitude))
+    # or the light makes the cell fire sooner than a synapse could: the opsin's own depolarization reaching
+    # threshold (a cell that fires 1 ms after every pulse at its depolarized steps)
+    fired_at = spike_at[fired_after[:, 0], 0] if not vc else np.array([])
+    direct_spikes = bool(light and fired_at.size >= max(1, len(sweeps) // 2)
+                         and float(np.median(fired_at)) < s["light_min_latency_ms"] / 1e3)
+    out.values["direct_photocurrent"] = "yes" if (direct or direct_spikes) else "no"
+    if direct:
+        out.flags.append(Flag("direct photocurrent", f"the recorded cell itself answers the light: the response "
+                              f"begins {p1.onset_raw_s * 1e3:.2f} ms after the light comes on (sooner than a synapse "
+                              f"can answer), is still at {p1.at_light_end / abs(p1.amplitude):.0%} of its peak when the "
+                              f"light goes off ({light_width * 1e3:.0f} ms) and peaks {p1.peak_time_s * 1e3:.1f} ms "
+                              "after the light's onset. This cell expresses the opsin, or its own membrane is lit; "
+                              "the response is not synaptic, so it says nothing about a connection", "",
+                              "Turesson, Rodriguez-Sierra & Pare 2013"))
+    elif direct_spikes:
+        out.flags.append(Flag("direct photocurrent", f"the light makes the recorded cell fire "
+                              f"{float(np.median(fired_at)) * 1e3:.2f} ms after it comes on (median of {fired_at.size} "
+                              f"sweep(s)), sooner than a synapse can answer ({s['light_min_latency_ms']:g} ms): the "
+                              "cell's own photocurrent reaches threshold. This cell expresses the opsin; its firing "
+                              "says nothing about a connection", "", "Turesson, Rodriguez-Sierra & Pare 2013"))
     k_ss = min(s["steady_state_pulses"], n_pulses)
     ss = float(np.nanmean([p.amplitude for p in pulses[-k_ss:]])) if n_pulses > 2 else NAN
     out.values["steady_state_ratio"] = ratio(ss, p1.amplitude) if n_pulses > 2 else NAN
@@ -1131,7 +1355,8 @@ def run(recording: Recording, context, s) -> Result:
     out.choose("headline", what, "set in Analyze (the recording's number)")
 
     # ---- the tables
-    out.tables["pulses"] = [_pulse_row(p, p1.amplitude, vc, spike_at[:, j]) for j, p in enumerate(pulses)]
+    out.tables["pulses"] = [_pulse_row(p, p1.amplitude, vc, np.where(fired_after[:, j], spike_at[:, j], NAN))
+                            for j, p in enumerate(pulses)]
     out.tables["sweeps"] = [{"sweep": used[k], "pulse": j + 1, "amplitude": per_sweep[k, j],
                              "in_psp_measures": bool(member[k, j]), "spiked": bool(spike_table[k, j]),
                              "failure": bool(np.isfinite(per_sweep[k, j]) and np.isfinite(thresholds[j])
@@ -1155,7 +1380,26 @@ def run(recording: Recording, context, s) -> Result:
     if cond is not None:
         _by_condition(recording, context, s, cond, out)
     if light and not context.shared.get("by_pattern") and not context.shared.get("by_condition"):
-        _by_pattern(recording, context, s, all_sweeps if cond is None else sweeps, out)
+        known = _by_pattern(recording, context, s, all_sweeps if cond is None else sweeps, out)
+        out.values["region_known"] = {"no log": "no", "not sure": "no", "one pattern": "yes",
+                                      "by pattern": "yes"}.get(known, "no")
+        if known in ("no log", "not sure") and is_mapping(recording) and recording.n_sweeps > 1:
+            # a grid map or a connectivity run lights a different region on each sweep: averaged together the
+            # sweeps mean nothing, and no log says which region each one saw (2026-11-10, a grid map run)
+            why = ("no Polygon log covers this recording" if known == "no log"
+                   else "the Polygon's log does not say for sure")
+            out.flags.append(Flag("region unknown", f"which region lit each sweep is unknown ({why}): a "
+                                  f"{recording.protocol or 'mapping'} protocol lights a different region on each "
+                                  f"sweep, so its {recording.n_sweeps} sweeps are not averaged into one number. "
+                                  "Each sweep's own response is in the sweeps table; record the light's log with "
+                                  "the recording (Clampwise's patterned light writes polygon_log.csv beside it) "
+                                  "or type each sweep's region", source="Clampwise"))
+            for key in ("amplitude", "p1_amplitude", "p1_latency_median", "p1_jitter", "p1_latency_average",
+                        "p1_success_rate", "p1_potency", "ppr", "ppr_raw", "p1_integral", "p1_cv", "p1_inv_cv2"):
+                out.values[key] = NAN
+            out.values["headline_is"] = ("not given: which region lit each sweep is unknown, so the sweeps are not "
+                                         "averaged (see the flag)")
+            out.choose("headline", out.values["headline_is"], "a mapping protocol with no record of the regions lit")
     # what to draw: each pulse's peak and the fitted decay of pulse 1
     for p in pulses:
         if np.isfinite(p.peak_time_s):

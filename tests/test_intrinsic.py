@@ -147,8 +147,16 @@ def test_intrinsic_reports_its_choices_and_names_no_pattern():
 def test_the_input_resistance_choice_says_its_numbers():
     r = pipeline.analyze(simulate.steps().recording).results["intrinsic"]
     text = r.choices["input resistance"]
-    assert "read at 0 pA" in text                                      # the resistance at rest was taken
-    assert "{" not in text and f"{r.values['r_input_slope']:.1f} MOhm" in text
+    assert "linear portion" in text                                    # the lab's definition is the default
+    assert "{" not in text and f"{r.values['r_input_lab']:.1f} MOhm" in text
+    assert r.values["r_input"] == r.values["r_input_lab"]
+    # the other definitions are a setting away, and the choice says which was taken
+    from clampwise.analysis.intrinsic import RIN_IPFX, RIN_NEX
+
+    for choice, key, words in ((RIN_NEX, "r_input_nex", "read at 0 pA"), (RIN_IPFX, "r_input_slope", "small steps")):
+        r2 = pipeline.analyze(simulate.steps().recording,
+                              pipeline.Settings(by_analysis={"intrinsic": {"rin_definition": choice}})).results["intrinsic"]
+        assert r2.values["r_input"] == r2.values[key] and words in r2.choices["input resistance"]
 
 
 def test_rheobase_needs_a_full_sized_spike():
@@ -193,10 +201,11 @@ def test_resistance_at_rest_and_its_slope_on_a_rectifying_membrane():
     sim = simulate.steps(rm_mohm=150.0, r_slope_mohm_per_na=300.0, noise=0.2, n_sweeps=21, first_pa=-200.0,
                          rheobase_pa=1e9)
     r = pipeline.analyze(sim.recording).results["intrinsic"]
-    assert abs(r.values["r_input"] - 150.0) < 3.0                    # the headline is the resistance at rest
+    assert abs(r.values["r_input_nex"] - 150.0) < 3.0                # NeuroExpress's is the resistance at rest
+    assert r.values["r_input"] == r.values["r_input_lab"] < 150.0     # the lab's chord over -200 to 0 pA, lower too
     assert abs(r.values["r_steady_slope0"] - 300.0) < 30.0
     assert r.values["r_input_slope"] < 150.0                          # the slope over -100 to 0 pA reads lower here
-    assert "input resistance" in r.choices and "Input resistance at rest" in r.choices["input resistance"]
+    assert "input resistance" in r.choices and "linear portion" in r.choices["input resistance"]
     said = [e["statement"] for e in r.tables["evaluation"]]
     assert any(x.startswith("Inward rectification") for x in said)
     row = r.tables["steps"][0]

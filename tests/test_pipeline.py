@@ -134,7 +134,7 @@ def test_pipeline_runs_baseline_with_provenance_methods_and_choices():
     assert "drift measure" in base.choices
     p = r.provenance
     assert p.app_version and p.analyses["baseline"] == 1 and "max_baseline_s" in p.settings["baseline"]
-    assert set(p.analyses) == {"artifacts", "baseline", "bridge", "quality", "intrinsic"}     # a current-step family
+    assert set(p.analyses) == {"artifacts", "baseline", "bridge", "quality", "intrinsic", "sweep_health"}   # a current-step family
     assert p.libraries["numpy"] and p.analyzed_at
     assert r.quality() == "passed"
 

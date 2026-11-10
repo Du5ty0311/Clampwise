@@ -56,10 +56,11 @@ from ..core.recording import Recording
 from .registry import Output, Setting, register
 from .result import Drawable, Flag, Result
 from . import iv_curves
-from .tools import fits, ledger, spikes
+from .tools import fits, kinetics, ledger, spikes
 
 NAN = float("nan")
 PEAK_AVERAGE_S = 0.005
+STIMULUS_WINDOW_S = 0.1      # after a stimulus pulse inside the step: the response and its decay, not the step's
 STEP_FLAT_FRACTION = 0.2    # a step's command varies by less than this share of its size (a recorded one is noisy)
 
 
@@ -229,9 +230,48 @@ def fast_medium_ahp(v: np.ndarray, fs: float, x: spikes.Spike, next_threshold: i
 
 # ------------------------------------------------------------------ the declaration
 
+RIN_LAB = "Pare lab: a line over the hyperpolarizing steps (the linear portion of the V-I)"
+RIN_NEX = "NeuroExpress: each step's resistance, a line read at 0 pA"
+RIN_IPFX = "IPFX: the slope over -100 to 0 pA"
+SAG_LAB = "Ahmed 2021: the most negative Vm in the last 100 ms over that in the first 100 ms"
+SAG_IPFX = "IPFX: (peak - steady) / (peak - baseline), the step whose peak is nearest the target"
+AHP_LAB = "Ahmed 2021: Vm 1 ms before the peak minus the trough within 10 ms after it"
+AHP_IPFX = "IPFX: the trough within 50 ms minus the threshold"
+RATE_LAB = "Ahmed 2021: 1 / the mean interspike interval at 200 pA"
+RATE_IPFX = "IPFX: the most spikes on a step, over its duration"
+THR_IPFX = "IPFX: where dV/dt falls to 5% of the steepest rise"
+THR_20 = "where dV/dt crosses 20 mV/ms"
+THR_KINK = "the kink: the largest d2V/dt2 before the steepest rise"
+HW_LAB = "Ahmed 2021: at half the amplitude from the threshold"
+HW_IPFX = "IPFX: at half the height from the fast trough"
+
 SETTINGS = (
     Setting("moved", "", "Points moved by hand", "Set on Check: a step's baseline, peak, steady state or rebound "
             "measured at the position placed by hand.", hidden=True),
+    Setting("rin_definition", RIN_LAB, "Input resistance", "Which definition the input resistance follows; the "
+            "others are reported beside it.", choices=(RIN_LAB, RIN_NEX, RIN_IPFX),
+            source="Ahmed, Headley & Pare 2021: 'the linear portion of current-voltage plots'"),
+    Setting("sag_definition", SAG_LAB, "Sag", "Which definition the sag ratio follows; the other is reported "
+            "beside it.", choices=(SAG_LAB, SAG_IPFX), source="Ahmed, Headley & Pare 2021"),
+    Setting("ahp_definition", AHP_LAB, "AHP", "Which definition the spike's AHP follows; the other is reported "
+            "beside it.", choices=(AHP_LAB, AHP_IPFX), source="Ahmed, Headley & Pare 2021"),
+    Setting("max_rate_definition", RATE_LAB, "Maximal firing rate", "Which definition the maximal rate follows; "
+            "the other is reported beside it.", choices=(RATE_LAB, RATE_IPFX), source="Ahmed, Headley & Pare 2021"),
+    Setting("ap_threshold_rule", THR_IPFX, "Spike threshold", "Where the first spike's threshold is read: the "
+            "amplitude (peak minus threshold) and the lab's half-width follow it. Ahmed 2021 does not say which "
+            "rule it used.", choices=(THR_IPFX, THR_20, THR_KINK), source="Gouwens et al. 2019; Gungor 2018 (the "
+            "derivatives)"),
+    Setting("half_width_definition", HW_LAB, "Spike half-width", "Which definition the half-width follows; the "
+            "other is reported beside it.", choices=(HW_LAB, HW_IPFX), source="Ahmed, Headley & Pare 2021"),
+    Setting("rin_linear_from_pa", -200.0, "The linear portion: hyperpolarizing steps from (pA)", "The lab's input "
+            "resistance is a line through the steady-state voltage against the current over the subthreshold "
+            "hyperpolarizing steps from here to 0 pA (the corpus check: the paper's 'linear portion' spans every "
+            "hyperpolarizing step to -200 pA).", "pA", "Clampwise Corpus, 2026-10-09"),
+    Setting("sag_step_pa", -200.0, "Ahmed 2021's sag: negative steps at least (pA)", "The sag ratio is read on the "
+            "most negative step this deep or deeper (the paper: 200 pA or more, 500 ms); on the most negative "
+            "step there is when none is.", "pA", "Ahmed, Headley & Pare 2021", advanced=True),
+    Setting("max_rate_step_pa", 200.0, "Ahmed 2021's maximal rate: the step at (pA)", "The step nearest this "
+            "current, within 25 pA.", "pA", "Ahmed, Headley & Pare 2021", advanced=True),
     Setting("small_step_min_pa", -100.0, "Small steps from (pA)", "Input resistance and tau are measured on the "
             "subthreshold steps from this current to 0 pA, where the membrane response is approximately linear.", "pA",
             "Gouwens et al. 2019"),
@@ -294,10 +334,11 @@ SETTINGS = (
 OUTPUTS = (
     Output("v_rest", "The median over the sweeps of the mean voltage in the baseline before the step.", "mV", "Gouwens et al. 2019",
            label="Resting potential", headline=True),
-    Output("r_input", "Input resistance at rest: the steady-state resistance of each step, (V - Vbaseline) / I, a "
-           "linear fit over the steps from the midpoint (-70 pA) to -10 pA, evaluated at 0 pA; the slope over the small "
-           "steps when too few steps are available.", "MOhm", "", label="Input resistance",
-           headline=True),
+    Output("r_input", "Input resistance, by the definition set in Analyze (the Pare lab's by default: a line "
+           "through the steady-state voltage against the current over the subthreshold hyperpolarizing steps, "
+           "the linear portion of the V-I plot). NeuroExpress's (each step's resistance, a line read at 0 pA) and "
+           "IPFX's (the slope over -100 to 0 pA) are reported beside it.", "MOhm", "Ahmed, Headley & Pare 2021",
+           label="Input resistance", headline=True),
     Output("r_input_slope", "The slope of the steady-state voltage against the current over the small subthreshold "
            "steps (-100 to 0 pA).", "MOhm", "Gouwens et al. 2019", label="Input resistance, slope over "
            "-100 to 0 pA"),
@@ -380,8 +421,11 @@ OUTPUTS = (
            label="Membrane tau", headline=True),
     Output("capacitance", "Membrane capacitance: tau / the resistance over the same small steps (-100 to 0 pA).",
            "pF", "Johnston & Wu 1995", label="Capacitance"),
-    Output("sag_ratio", "(V_peak - V_steady) / (V_peak - V_baseline) on the step whose peak is closest to the sag "
-           "target, the peak averaged over 5 ms.", "ratio", "Gouwens et al. 2019", label="Sag ratio", headline=True),
+    Output("sag_ratio", "Sag ratio, by the definition set in Analyze (Ahmed 2021's by default: the most negative "
+           "potential in the last 100 ms of the step over that in its first 100 ms, on the most negative step of "
+           "200 pA or more). IPFX's ((peak - steady) / (peak - baseline) on the step whose peak is nearest the "
+           "target) is reported beside it.", "ratio", "Ahmed, Headley & Pare 2021", label="Sag ratio",
+           headline=True),
     Output("sag_step_pa", "The step the sag was read on.", "pA", label="Sag: step"),
     Output("sag_amplitude", "V_steady - V_peak on the sag step: how far the voltage comes back from its peak.", "mV",
            label="Sag: amplitude"),
@@ -395,18 +439,22 @@ OUTPUTS = (
            "protocol's step size).", "pA", "Gouwens et al. 2019", label="Rheobase", headline=True),
     Output("fi_gain", "f-I gain: the slope of the firing rate against the current from rheobase over the next steps.",
            "Hz/pA", "Dayan & Abbott 2001", label="f-I gain", headline=True),
-    Output("max_rate", "The highest firing rate of a depolarizing step (spikes / step duration); none when no "
-           "depolarizing step fires.", "Hz", label="Highest rate"),
+    Output("max_rate", "Maximal firing rate, by the definition set in Analyze (Ahmed 2021's by default: the "
+           "interspike intervals of the 200 pA step averaged and turned into a frequency; IPFX's when the family "
+           "has no step near 200 pA: the most spikes on a step over its duration).", "Hz",
+           "Ahmed, Headley & Pare 2021", label="Maximal rate"),
     Output("ap_threshold", "Threshold of the first full spike at rheobase: searching back from its steepest rise "
            "to where dV/dt falls below 5% of that maximum.", "mV", "Gouwens et al. 2019", label="AP threshold (first spike at rheobase)",
            headline=True),
     Output("ap_threshold_20", "The same spike's voltage where dV/dt crosses 20 mV/ms (a fixed-rate threshold).",
            "mV", "", label="AP threshold at 20 mV/ms"),
     Output("ap_peak", "Peak of the first full spike at rheobase.", "mV", label="AP peak"),
-    Output("ap_amplitude", "Peak minus threshold (20 mV/ms) of the first full spike at rheobase.", "mV",
-           label="AP amplitude"),
-    Output("ap_half_width", "Width of the first full spike at rheobase at half its height from the fast trough "
-           "(from the threshold when that level lies below it).", "ms", "Gouwens et al. 2019", label="AP half-width"),
+    Output("ap_amplitude", "Peak minus threshold of the first full spike at rheobase, the threshold read by the "
+           "rule set in Analyze (IPFX's by default; the 20 mV/ms crossing and the kink are the other rules).",
+           "mV", "Ahmed, Headley & Pare 2021", label="AP amplitude"),
+    Output("ap_half_width", "Half-width of the first full spike at rheobase, by the definition set in Analyze "
+           "(Ahmed 2021's by default: at half the amplitude from the threshold; IPFX's, from the fast trough, is "
+           "reported beside it).", "ms", "Ahmed, Headley & Pare 2021", label="AP half-width"),
     Output("ap_half_width_threshold", "Its width at half the amplitude from the 20 mV/ms threshold to the peak.", "ms", label="AP half-width from threshold"),
     Output("ap_fast_trough", "The end of the spike: after its steepest fall, where the fall has slowed to 1% of it "
            "(the fast trough).", "mV", "Gouwens et al. 2019", label="Fast trough"),
@@ -414,8 +462,10 @@ OUTPUTS = (
            label="AP max rise"),
     Output("ap_downstroke", "The steepest fall between its peak and the following trough (the downstroke).", "mV/ms", "Gouwens et al. 2019",
            label="AP max fall"),
-    Output("ap_ahp", "The lowest voltage in the 50 ms after the peak (before the next spike), minus threshold.", "mV",
-           label="AHP"),
+    Output("ap_ahp", "AHP of the first full spike at rheobase, by the definition set in Analyze (Ahmed 2021's by "
+           "default: the potential 1 ms before the peak minus the most negative within 10 ms after it, positive; "
+           "IPFX's, the trough within 50 ms minus the threshold, is reported beside it).", "mV",
+           "Ahmed, Headley & Pare 2021", label="AHP"),
     Output("ap_fast_ahp", "The lowest voltage 1-5 ms after repolarizing through threshold, minus threshold.", "mV",
            label="Fast AHP"),
     Output("ap_medium_ahp", "The lowest voltage 10-100 ms after the peak, minus threshold.", "mV", label="Medium AHP"),
@@ -433,10 +483,66 @@ OUTPUTS = (
     Output("attenuated_spikes", "Spikes that never reached full size (counted in rates, never in rheobase).", "count",
            label="Attenuated spikes"),
     Output("rebound_spikes", "Spikes in the window after the hyperpolarizing steps.", "count", label="Rebound spikes"),
+    Output("stimulus_evoked_spikes", "Spikes within 100 ms of a stimulus pulse played inside the step (light "
+           "inside a step family): the stimulus's, left out of every step measure.", "count",
+           label="Stimulus-evoked spikes (left out)"),
+    # the lab's definitions, each a setting; every definition's number is reported
+    Output("r_input_definition", "Which definition the input resistance follows (the setting).", "",
+           label="Input resistance: definition"),
+    Output("r_input_lab", "The lab's input resistance: a line through the steady-state voltage against the "
+           "current over the subthreshold hyperpolarizing steps (the linear portion of the V-I plot) and the 0 pA "
+           "step.", "MOhm", "Ahmed, Headley & Pare 2021", label="Input resistance, the linear portion"),
+    Output("r_input_lab_r2", "r squared of that line.", "ratio", label="Linear portion: r squared"),
+    Output("r_input_nex", "NeuroExpress's input resistance: each step's steady-state resistance, a line read at "
+           "0 pA.", "MOhm", "NeuroExpress", label="Input resistance, NeuroExpress"),
+    Output("sag_definition", "Which definition the sag ratio follows (the setting).", "", label="Sag: definition"),
+    Output("sag_ratio_lab", "Ahmed 2021's sag ratio: the most negative potential during the last 100 ms of the "
+           "step over the most negative during its first 100 ms, on the most negative step of 200 pA or more "
+           "(as the paper writes it: the two potentials themselves).", "ratio", "Ahmed, Headley & Pare 2021",
+           label="Sag ratio, Ahmed 2021"),
+    Output("sag_lab_step_pa", "The step Ahmed 2021's sag was read on.", "pA", label="Sag, Ahmed 2021: step"),
+    Output("sag_ratio_ipfx", "IPFX's sag ratio: (peak - steady) / (peak - baseline) on the step whose peak is "
+           "nearest the target.", "ratio", "Gouwens et al. 2019", label="Sag ratio, IPFX"),
+    Output("max_rate_definition", "Which definition the maximal rate follows (the setting, or IPFX's when the "
+           "family has no step near 200 pA).", "", label="Maximal rate: definition"),
+    Output("max_rate_lab", "Ahmed 2021's maximal firing rate: the interspike intervals of the 200 pA step "
+           "averaged and turned into a frequency.", "Hz", "Ahmed, Headley & Pare 2021",
+           label="Maximal rate, Ahmed 2021"),
+    Output("max_rate_step_pa", "The step Ahmed 2021's maximal rate was read on.", "pA",
+           label="Maximal rate, Ahmed 2021: step"),
+    Output("max_rate_ipfx", "The highest rate of a depolarizing step: spikes over the step's duration.", "Hz",
+           "Gouwens et al. 2019", label="Maximal rate, IPFX"),
+    Output("ap_threshold_rule", "Where the first spike's threshold was read (the setting).", "",
+           label="Spike threshold: rule"),
+    Output("ap_threshold_used", "The threshold the amplitude and the lab's half-width are read from.", "mV",
+           label="Spike threshold used"),
+    Output("ap_amplitude_20", "Peak minus the 20 mV/ms threshold.", "mV", label="AP amplitude (20 mV/ms)"),
+    Output("ap_half_width_definition", "Which definition the half-width follows (the setting).", "",
+           label="Half-width: definition"),
+    Output("ap_half_width_lab", "Ahmed 2021's half-width: the spike's width at half its amplitude from the "
+           "threshold, between the last crossing before the peak and the first after it.", "ms",
+           "Ahmed, Headley & Pare 2021", label="AP half-width, Ahmed 2021"),
+    Output("ap_half_width_ipfx", "IPFX's half-width: at half the height from the fast trough.", "ms",
+           "Gouwens et al. 2019", label="AP half-width, IPFX"),
+    Output("ap_ahp_definition", "Which definition the AHP follows (the setting).", "", label="AHP: definition"),
+    Output("ap_ahp_lab", "Ahmed 2021's AHP: the potential 1 ms before the spike's peak minus the most negative "
+           "potential within 10 ms after it (positive: the depth of the AHP).", "mV",
+           "Ahmed, Headley & Pare 2021", label="AHP, Ahmed 2021"),
+    Output("ap_ahp_ipfx", "IPFX's AHP: the trough within 50 ms after the peak minus the threshold (negative).",
+           "mV", "Gouwens et al. 2019", label="AHP, IPFX"),
+    Output("adaptation_pct", "Spike-frequency adaptation: the last interspike interval over the first, minus 1, "
+           "as a percentage, on the first step giving 6 to 10 spikes (the interval step when none does).", "%",
+           "Amir et al. 2011", label="Adaptation (%)"),
+    Output("adaptation_pct_step_pa", "The step the adaptation % was read on.", "pA", label="Adaptation: step"),
+    Output("ljp_mv", "The liquid junction potential typed for the recording (the lab's K-gluconate internal: "
+           "10 mV), shown beside the voltages and never subtracted (the lab has not corrected it since 2014).",
+           "mV", "Ahmed, Headley & Pare 2021", label="Liquid junction potential (typed)"),
+    Output("v_rest_ljp_corrected", "The resting potential with the typed liquid junction potential subtracted, "
+           "for comparison with papers that corrected it.", "mV", label="Resting potential, LJP corrected"),
 )
 
 
-@register("intrinsic", "Intrinsic properties and firing", version=2, types={"cc_steps"}, settings=SETTINGS,
+@register("intrinsic", "Intrinsic properties and firing", version=3, types={"cc_steps"}, settings=SETTINGS,
           outputs=OUTPUTS, requires=("baseline",),
           description="Resting potential, input resistance, membrane tau, sag, capacitance, rheobase, the f-I curve, "
                       "action-potential shape and interspike-interval measures from a current-step family. Firing is "
@@ -461,15 +567,42 @@ def run(recording: Recording, context, s) -> Result | None:
     ledger.note(f"step {step.start_s * 1e3:.0f}-{step.end_s * 1e3:.0f} ms; baseline the {1e3 * (b1 - b0) / fs:.0f} ms "
                 f"before, steady state the last {1e3 * (i1 - s0) / fs:.0f} ms", "intrinsic properties")
     rows, all_spikes, trains = [], [], []
+    # a stimulus inside the step (the lab's photostim protocols light the cell during every step): what it
+    # evokes is not the step's doing, so its windows are kept out of the spike counts, the peak and the steady
+    # state (2026-11-10)
+    stim = getattr(context, "stimulus", None)
+    stim_windows: list[list[tuple[int, int]]] = []
+    for k in range(recording.n_sweeps):
+        wins = []
+        if stim is not None and k < len(stim.times_s):
+            times = np.asarray(stim.times_s[k], float)
+            for j, on in enumerate(times):
+                if step.start_s - 0.001 <= on < step.end_s:
+                    nxt = times[j + 1] if j + 1 < times.size else np.inf
+                    end = min(on + STIMULUS_WINDOW_S, nxt, step.end_s)
+                    wins.append((int(round(on * fs)), int(round(end * fs))))
+        stim_windows.append(wins)
+    n_evoked = 0
+    if any(stim_windows):
+        out.notes.append(f"a stimulus inside the step ({stim.kind}, {sum(len(w) for w in stim_windows)} pulse(s)): "
+                         f"the {STIMULUS_WINDOW_S * 1e3:.0f} ms after each pulse is kept out of the step's spike "
+                         "counts, its peak and its steady state (what it evokes is measured by the evoked analysis)")
     for k in range(recording.n_sweeps):
         v = np.asarray(recording.sweep(k), float)
         c = cmd[k]
         current = float(np.median(c[i0:i1]) - np.median(c[max(0, b0):b1])) if b1 > b0 else float(np.median(c[i0:i1]))
         sp = spikes.find(v, fs, purpose="action potentials in the step family", window=(i0, i1))
+        if stim_windows[k]:
+            evoked = [x for x in sp if any(a <= x.peak_index < b for a, b in stim_windows[k])]
+            n_evoked += len(evoked)
+            sp = [x for x in sp if x not in evoked]
         tr = train(sp, fs, step.start_s, step.end_s, s)
         full = sum(1 for x in sp if step.start_s <= x.peak_index / fs < step.end_s and x.full)
         vb = float(np.mean(v[b0:b1])) if b1 > b0 else NAN
-        vss = float(np.mean(v[s0:i1]))
+        ss_keep = np.ones(i1 - s0, bool)
+        for a, b in stim_windows[k]:                 # the stimulus's windows out of the steady state
+            ss_keep[max(a - s0, 0):max(b - s0, 0)] = False
+        vss = float(np.mean(v[s0:i1][ss_keep])) if ss_keep.sum() >= max(10, (i1 - s0) // 5) else float(np.mean(v[s0:i1]))
         rows.append({"sweep": k, "current_pa": current, "v_baseline": vb, "v_steady": vss, "spikes": tr.count,
                      "full_spikes": full, "attenuated": tr.attenuated, "rate_hz": tr.rate_hz,
                      "latency_ms": tr.latency_ms, "isi_mean_ms": tr.isi_mean_ms, "isi_cv": tr.isi_cv,
@@ -487,6 +620,17 @@ def run(recording: Recording, context, s) -> Result | None:
     vb = np.array([r["v_baseline"] for r in rows])
     vss = np.array([r["v_steady"] for r in rows])
     out.values["v_rest"] = float(np.nanmedian(vb)) if np.isfinite(vb).any() else NAN
+    # the liquid junction potential, kept beside the voltages and never subtracted (the lab has not corrected it
+    # since 2014: Ahmed, Headley & Pare 2021 state 10 mV, not corrected)
+    ljp = float(getattr(recording.metadata, "junction_potential_mv", NAN))
+    out.values["ljp_mv"] = ljp
+    out.values["v_rest_ljp_corrected"] = out.values["v_rest"] - ljp if np.isfinite(ljp) else NAN
+    if np.isfinite(ljp):
+        out.notes.append(f"voltages as recorded; the liquid junction potential typed for this recording is {ljp:g} mV "
+                         f"(not subtracted: resting potential corrected would be {out.values['v_rest_ljp_corrected']:.1f} mV)")
+    else:
+        out.notes.append("voltages as recorded; no liquid junction potential typed for this recording (Files: "
+                         "experiment details), so none is shown beside them")
     tol = 3.0                                   # a recorded command reads a pA or two off its nominal step
     sub = (counts == 0) & (cur <= tol)
     small = sub & (cur >= s["small_step_min_pa"] - tol)
@@ -511,7 +655,7 @@ def run(recording: Recording, context, s) -> Result | None:
         out.notes.append("not enough subthreshold steps for input resistance")
     # NeuroExpress's measures, step by step and at 0 pA: its
     # resistance at rest leads; the slope over the small steps stays beside it
-    curves = iv_curves.analyze(recording, step, rows, all_spikes, s)
+    curves = iv_curves.analyze(recording, step, rows, all_spikes, s, exclude=stim_windows)
     if curves.moved:
         out.flags.append(Flag("moved by hand", f"{len(curves.moved)} point(s) read where they were put on Check: "
                               + "; ".join(curves.moved), source="",
@@ -531,14 +675,44 @@ def run(recording: Recording, context, s) -> Result | None:
     elif np.isfinite(rin):
         out.notes.append("too few hyperpolarizing steps near 0 pA for the resistance at rest: the input "
                          "resistance is the slope over the small steps")
+    # the lab's: a line through the steady state against the current over the hyperpolarizing subthreshold
+    # steps (the linear portion of the V-I plot; Ahmed, Headley & Pare 2021), with the 0 pA step when there is one
+    lab_use = sub & (cur >= s["rin_linear_from_pa"] - tol) & (cur <= tol)
+    r_lab = NAN
+    if np.unique(np.round(cur[lab_use], 3)).size >= 2:
+        fit_lab = fits.linear(cur[lab_use], vss[lab_use], purpose="input resistance, the lab's linear portion")
+        r_lab = fit_lab["slope"] * 1e3
+        out.values["r_input_lab_r2"] = fit_lab.r2
+    out.values["r_input_lab"] = r_lab
+    out.values["r_input_nex"] = r0 if (np.isfinite(r0) and r0 > 0) else NAN
+    chosen = s["rin_definition"]
+    by_def = {RIN_LAB: r_lab, RIN_NEX: out.values["r_input_nex"], RIN_IPFX: out.values["r_input_slope"]}
+    if np.isfinite(by_def.get(chosen, NAN)):
+        rin = by_def[chosen]
+        what = {RIN_LAB: f"{r_lab:.1f} MOhm: a line through the steady state against the current over the "
+                         f"{int(lab_use.sum())} subthreshold step(s) from {cur[lab_use].min():g} to "
+                         f"{cur[lab_use].max():g} pA" if np.isfinite(r_lab) else "",
+                RIN_NEX: f"{r0:.1f} MOhm: each step's steady-state resistance, a line read at 0 pA",
+                RIN_IPFX: f"{out.values['r_input_slope']:.1f} MOhm: the slope over the small steps"}[chosen]
+        out.choose("input resistance", what, f"the setting '{chosen}'; the others are beside it (r_input_lab, "
+                   "r_input_nex, r_input_slope)")
+    elif np.isfinite(rin):
+        out.notes.append(f"the input resistance cannot follow '{chosen}' on this family (too few steps for it): "
+                         "the next definition with enough steps is used")
     out.values["r_input"] = rin
+    out.values["r_input_definition"] = chosen if np.isfinite(by_def.get(chosen, NAN)) else "fallback"
     # sag and tau, on the hyperpolarizing subthreshold steps
     hyper = np.flatnonzero(sub & (cur < -tol))
     peaks = {}
     pend = max(s0, i0 + 1)
     for k in hyper:
         v = recording.sweep(int(k))
-        i = i0 + int(np.argmin(v[i0:pend]))
+        seg = np.array(v[i0:pend], float)
+        for a, b in stim_windows[int(k)]:             # the stimulus's windows cannot be the step's peak
+            seg[max(a - i0, 0):max(b - i0, 0)] = np.inf
+        if not np.isfinite(seg).any():
+            seg = np.array(v[i0:pend], float)
+        i = i0 + int(np.argmin(seg))
         h = max(int(round(PEAK_AVERAGE_S / 2 * fs)), 0)
         peaks[int(k)] = (float(np.mean(v[max(i - h, i0):min(i + h + 1, pend)])), i)
     if peaks:
@@ -554,6 +728,29 @@ def run(recording: Recording, context, s) -> Result | None:
         if abs(den) < 2.0:
             out.flags.append(Flag("sag is noise", "The largest hyperpolarization is under 2 mV: the sag ratio is noise, "
                                   "not a measurement.", "2 mV", "", severity="note"))
+        out.values["sag_ratio_ipfx"] = out.values["sag_ratio"]
+        # Ahmed 2021: the most negative Vm during the last 100 ms of the step over that during its first 100 ms,
+        # on negative pulses of 200 pA or more (as written: the two potentials themselves)
+        deep = [q for q in peaks if cur[q] <= s["sag_step_pa"] + tol]
+        q = min(deep or peaks, key=lambda q: cur[q])
+        v = np.asarray(recording.sweep(int(q)), float)
+        hundred = int(round(0.1 * fs))
+        first = np.array(v[i0:min(i0 + hundred, i1)], float)
+        last = np.array(v[max(i1 - hundred, i0):i1], float)
+        for a, b in stim_windows[int(q)]:
+            first[max(a - i0, 0):max(b - i0, 0)] = np.inf
+            last[max(a - (i1 - hundred), 0):max(b - (i1 - hundred), 0)] = np.inf
+        v_first = float(first.min()) if np.isfinite(first).any() else NAN
+        v_last = float(last.min()) if np.isfinite(last).any() else NAN
+        out.values["sag_ratio_lab"] = v_last / v_first if np.isfinite(v_first) and v_first != 0 else NAN
+        out.values["sag_lab_step_pa"] = float(cur[q])
+        if s["sag_definition"] == SAG_LAB and np.isfinite(out.values["sag_ratio_lab"]):
+            out.values["sag_ratio"] = out.values["sag_ratio_lab"]
+            out.values["sag_step_pa"] = float(cur[q])
+            out.choose("sag", f"{out.values['sag_ratio_lab']:.3f} on the {cur[q]:g} pA step ({v_last:.1f} / "
+                       f"{v_first:.1f} mV)", f"the setting '{SAG_LAB}'" + ("" if deep else
+                       f" (no step at {s['sag_step_pa']:g} pA or deeper: the most negative step there is)"))
+        out.values["sag_definition"] = s["sag_definition"]
         taus = []
         cand = [q for q in peaks if cur[q] >= s["small_step_min_pa"] - tol] or [max(peaks, key=lambda q: cur[q])]
         for q in cand:
@@ -587,13 +784,32 @@ def run(recording: Recording, context, s) -> Result | None:
     firing = np.flatnonzero((fulls > 0) & (cur > 0))
     attenuated = int(sum(r["attenuated"] for r in rows))
     out.values["attenuated_spikes"] = attenuated
+    out.values["stimulus_evoked_spikes"] = n_evoked
+    if n_evoked:
+        out.notes.append(f"{n_evoked} spike(s) within {STIMULUS_WINDOW_S * 1e3:.0f} ms of a stimulus pulse are the "
+                         "stimulus's, not the step's: left out of the counts, the rates and the rheobase")
     if attenuated:
         out.notes.append(f"{attenuated} spike(s) did not reach full size (amplitude accommodation or depolarization "
                          "block): counted in the rates, never in the rheobase")
     # the highest rate on a depolarizing step; none when none fires (spikes on a
     # hyperpolarizing step are rebound or spontaneous, not driven by the step)
     driven = [r["rate_hz"] for r in rows if r["current_pa"] > tol and r["spikes"] > 0]
-    out.values["max_rate"] = float(np.nanmax(driven)) if driven else NAN
+    out.values["max_rate_ipfx"] = float(np.nanmax(driven)) if driven else NAN
+    # Ahmed 2021: the interspike intervals at the 200 pA step averaged and turned into a frequency
+    near = [k for k in range(len(rows)) if abs(cur[k] - s["max_rate_step_pa"]) <= 25.0 + tol]
+    out.values["max_rate_lab"] = NAN
+    out.values["max_rate_step_pa"] = NAN
+    if near:
+        k200 = min(near, key=lambda k: abs(cur[k] - s["max_rate_step_pa"]))
+        isi = rows[k200]["isi_mean_ms"]
+        out.values["max_rate_lab"] = 1e3 / isi if np.isfinite(isi) and isi > 0 else (0.0 if rows[k200]["spikes"] <= 1 else NAN)
+        out.values["max_rate_step_pa"] = float(cur[k200])
+    out.values["max_rate"] = out.values["max_rate_lab"] if (s["max_rate_definition"] == RATE_LAB and near) \
+        else out.values["max_rate_ipfx"]
+    if s["max_rate_definition"] == RATE_LAB and not near:
+        out.notes.append(f"no step within 25 pA of {s['max_rate_step_pa']:g} pA: the maximal rate is IPFX's (the most "
+                         "spikes on a step, over its duration), not Ahmed 2021's")
+    out.values["max_rate_definition"] = s["max_rate_definition"] if near else RATE_IPFX
     order = np.argsort(cur)
     out.tables["fi"] = [{"current_pa": float(cur[k]), "rate_hz": rows[k]["rate_hz"], "spikes": int(counts[k])}
                         for k in order if cur[k] > 0]
@@ -603,14 +819,53 @@ def run(recording: Recording, context, s) -> Result | None:
         ev = [x for x in all_spikes[rk] if step.start_s <= x.peak_index / fs < step.end_s and x.full]
         x = ev[0]
         nxt = ev[1].threshold_index if len(ev) > 1 else None
-        fast, medium = fast_medium_ahp(np.asarray(recording.sweep(rk), float), fs, x, nxt)
+        v_rk = np.asarray(recording.sweep(rk), float)
+        fast, medium = fast_medium_ahp(v_rk, fs, x, nxt)
         out.values.update({"ap_threshold": x.ipfx_threshold_mv, "ap_threshold_20": x.threshold_mv,
-                           "ap_peak": x.peak_mv, "ap_amplitude": x.amplitude_mv, "ap_half_width": x.half_width_ms,
+                           "ap_peak": x.peak_mv, "ap_amplitude_20": x.amplitude_mv, "ap_half_width_ipfx": x.half_width_ms,
                            "ap_half_width_threshold": x.half_width_threshold_ms, "ap_fast_trough": x.fast_trough_mv,
-                           "ap_upstroke": x.upstroke, "ap_downstroke": x.downstroke, "ap_ahp": x.ahp_mv,
+                           "ap_upstroke": x.upstroke, "ap_downstroke": x.downstroke, "ap_ahp_ipfx": x.ahp_mv,
                            "ap_fast_ahp": fast, "ap_medium_ahp": medium, "first_latency": trains[rk].latency_ms})
         out.choose("first spike", f"the first full spike of the rheobase step ({cur[rk]:g} pA, sweep {rk + 1}) at "
                    f"{x.peak_index / fs * 1e3:.1f} ms", "the first full spike at rheobase")
+        # the threshold rule, and the amplitude and the lab's half-width from it
+        shape = iv_curves.first_spike_shape(v_rk, spikes.dvdt(v_rk, fs), fs, x)
+        thr_by = {THR_IPFX: x.ipfx_threshold_mv, THR_20: x.threshold_mv, THR_KINK: shape.get("kink_mv", NAN)}
+        rule = s["ap_threshold_rule"]
+        thr = thr_by[rule] if np.isfinite(thr_by[rule]) else x.threshold_mv
+        if not np.isfinite(thr_by[rule]):
+            out.notes.append(f"the threshold rule '{rule}' gave nothing on this spike: the 20 mV/ms crossing is used")
+        amp = float(x.peak_mv - thr)
+        out.values.update({"ap_threshold_used": thr, "ap_amplitude": amp, "ap_threshold_rule": rule})
+        # Ahmed 2021's half-width: at half the amplitude from the threshold, between the last crossing before the
+        # peak and the first after it, interpolated between samples
+        half_level = thr + amp / 2.0
+        p = x.peak_index
+        up = np.flatnonzero(v_rk[max(p - int(0.01 * fs), 0):p + 1] < half_level)
+        stop = min(v_rk.size, p + int(0.05 * fs))
+        dn = np.flatnonzero(v_rk[p:stop] < half_level)
+        hw_lab = NAN
+        if up.size and dn.size:
+            i_up = max(p - int(0.01 * fs), 0) + int(up[-1])
+            i_dn = p + int(dn[0])
+            t_up = kinetics.interp_crossing(t, v_rk, i_up, i_up + 1, half_level)
+            t_dn = kinetics.interp_crossing(t, v_rk, i_dn - 1, i_dn, half_level)
+            hw_lab = (t_dn - t_up) * 1e3
+        out.values["ap_half_width_lab"] = hw_lab
+        out.values["ap_half_width"] = hw_lab if (s["half_width_definition"] == HW_LAB and np.isfinite(hw_lab)) \
+            else x.half_width_ms
+        out.values["ap_half_width_definition"] = s["half_width_definition"] if np.isfinite(hw_lab) else HW_IPFX
+        # Ahmed 2021's AHP: Vm 1 ms before the peak minus the most negative Vm within 10 ms after it
+        before = v_rk[max(p - int(round(0.001 * fs)), 0)]
+        after_stop = min(v_rk.size, p + int(round(0.01 * fs)), nxt if nxt is not None else v_rk.size)
+        ahp_lab = float(before - v_rk[p:after_stop].min()) if after_stop > p else NAN
+        out.values["ap_ahp_lab"] = ahp_lab
+        out.values["ap_ahp"] = ahp_lab if (s["ahp_definition"] == AHP_LAB and np.isfinite(ahp_lab)) else x.ahp_mv
+        out.values["ap_ahp_definition"] = s["ahp_definition"] if np.isfinite(ahp_lab) else AHP_IPFX
+        out.choose("spike measures", f"threshold {thr:.1f} mV ({rule}); amplitude {amp:.1f} mV; half-width "
+                   f"{out.values['ap_half_width']:.2f} ms ({out.values['ap_half_width_definition'].split(':')[0]}); "
+                   f"AHP {out.values['ap_ahp']:.1f} mV ({out.values['ap_ahp_definition'].split(':')[0]})",
+                   "the settings; the other definitions' numbers are beside them")
         # gain: rate against current from rheobase over the next steps
         above = [k for k in order if cur[k] >= cur[rk]][: s["gain_steps"] + 1]
         if len(above) >= 2:
@@ -629,6 +884,13 @@ def run(recording: Recording, context, s) -> Result | None:
         out.choose("interval measures", f"the {cur[hk]:g} pA step ({hero.count} spikes)",
                    "the first step at rheobase + 40 to 60 pA" if hero_c else "no step at rheobase + 40-60 pA; the step "
                    "with the most spikes")
+        # Amir 2011's adaptation: the % increase of the interspike interval from the first to the last, in
+        # pulses giving 6-10 spikes (the first such step; the interval step when none does)
+        six_ten = [k for k in order if 6 <= counts[k] <= 10 and cur[k] > 0]
+        ak = six_ten[0] if six_ten else hk
+        ratio_a = trains[ak].isi_ratio
+        out.values["adaptation_pct"] = (ratio_a - 1.0) * 100.0 if np.isfinite(ratio_a) else NAN
+        out.values["adaptation_pct_step_pa"] = float(cur[ak])
     else:
         out.values.update({"rheobase": NAN, "fi_gain": NAN})
         out.notes.append("no depolarizing step produced a full-sized action potential: no rheobase"

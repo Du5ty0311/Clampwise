@@ -36,7 +36,7 @@ TTL_MIN_V = 0.1              # a recorded line that never rises this far has not
 #                              a 10x attenuator is 0.45 V: an LED trigger recorded on IN 8)
 RAMP_MIN_RISE_S = 0.020      # a light pulse taking longer than this from 10% to 90% is a ramp, read from its foot
 COMMAND_PULSE_MAX_S = 0.005  # a command deviation this brief is a stimulus (a 10 ms+ test pulse or step is not)
-LIGHT_WORDS = ("led", "light", "laser", "polygon", "dmd", "opto")
+LIGHT_WORDS = ("led", "light", "laser", "polygon", "dmd", "opto", "photostim", "chrome", "chrimson", "chr2")
 ELECTRICAL_WORDS = ("stim", "isolator", "am_stim", "amstim", "shock")
 LAB_LIGHT_INPUTS = ("in 8", "in 14")   # the lab's rig records the LED driver's trigger on one of these
 
@@ -104,11 +104,16 @@ def _kind(channel: Channel, protocol: str = "", light_inputs: dict[str, str] | N
     why = next((w for n, w in (light_inputs or {}).items() if n.lower().strip() == name), None)
     if why is not None:
         return "light", f"light: on this rig {channel.name} carries light ({why})"
+    proto = (protocol or "").lower()
     if any(w in name for w in ELECTRICAL_WORDS):
+        if any(w in proto for w in LIGHT_WORDS):
+            # the lab's Polygon rig records the LED's command on the input Clampex names AM_Stim: what the
+            # protocol did outweighs a line's label (2026-11-10, the photostim protocols' "electrical" pulses)
+            return "light", (f"light: the protocol's name '{protocol}' says so; the channel's name ({channel.name}) "
+                             "says electrical, but the lab's Polygon rig records the LED's command on it")
         return "electrical", ""
     if channel.recorded and name in LAB_LIGHT_INPUTS:
         return "light", f"light: {channel.name} is the input the lab's rig records the LED trigger on"
-    proto = (protocol or "").lower()
     if any(w in proto for w in LIGHT_WORDS):
         return "light", f"light: the protocol's name '{protocol}' says so (the channel's does not)"
     if any(w in proto for w in ELECTRICAL_WORDS):

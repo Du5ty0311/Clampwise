@@ -184,7 +184,10 @@ def isi_stats(isi: np.ndarray) -> dict:
     return out
 
 
-def analyze(recording, step, rows: list[dict], all_spikes: list[list[spikes.Spike]], s: dict) -> Curves:
+def analyze(recording, step, rows: list[dict], all_spikes: list[list[spikes.Spike]], s: dict,
+            exclude: list[list[tuple[int, int]]] | None = None) -> Curves:
+    """``exclude``: per sweep, sample windows inside the step that are a stimulus's (light inside the step):
+    never the step's peak, steady state or charging curve."""
     out = Curves()
     fs = recording.sample_rate_hz
     i0, i1 = int(round(step.start_s * fs)), int(round(step.end_s * fs))
@@ -211,10 +214,20 @@ def analyze(recording, step, rows: list[dict], all_spikes: list[list[spikes.Spik
     for k in range(n):
         v = np.asarray(recording.sweep(k), float)
         vb[k] = float(v[i0 - nb:i0].mean())
-        ve[k] = float(v[i1 - ne:i1].mean())
+        wins = (exclude[k] if exclude is not None and k < len(exclude) else []) or []
+        keep_end = np.ones(ne, bool)
+        for a, b in wins:
+            keep_end[max(a - (i1 - ne), 0):max(b - (i1 - ne), 0)] = False
+        ve[k] = float(v[i1 - ne:i1][keep_end].mean()) if keep_end.sum() >= max(5, ne // 5) else float(v[i1 - ne:i1].mean())
         sign = 1.0 if cur[k] > 0 else -1.0
         seg = v[i0:i1]
         sm = _smooth(seg, peak_n)
+        if wins:
+            sm = sm.copy()
+            for a, b in wins:
+                sm[max(a - i0, 0):max(b - i0, 0)] = -np.inf if sign > 0 else np.inf
+            if not np.isfinite(sm).any():
+                sm = _smooth(seg, peak_n)
         vm[k] = float(sm.max() if sign > 0 else sm.min())
         clean = without_spikes(v, fs, i1, min(v.size - 1, i1 + post_n))
         after = _smooth(clean[i1:i1 + post_n], smooth_n)[smooth_n:-smooth_n or None]
@@ -248,7 +261,14 @@ def analyze(recording, step, rows: list[dict], all_spikes: list[list[spikes.Spik
             if "rebound" in marks[k] and len(marks[k]["rebound"]) == 2:
                 marks[k]["rebound"] = (marks[k]["rebound"][0], rebound_abs)
         if counts[k] == 0 and cur[k] < -reject:
-            pk = i0 + int(np.argmin(_smooth(seg, smooth_n)))
+            fine = _smooth(seg, smooth_n)
+            if wins:
+                fine = fine.copy()
+                for a, b in wins:
+                    fine[max(a - i0, 0):max(b - i0, 0)] = np.inf
+                if not np.isfinite(fine).any():
+                    fine = _smooth(seg, smooth_n)
+            pk = i0 + int(np.argmin(fine))
             tau_on[k] = _tau(t, v, i0, pk, vb[k], s)
             back = i1 + int(np.argmax(_smooth(clean[i1:i1 + post_n], smooth_n)[:-smooth_n or None]))
             tau_off[k] = _tau(t, clean, i1, back, ve[k], s)

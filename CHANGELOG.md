@@ -2,6 +2,65 @@
 
 ## 1.8.1 — not released yet
 
+- **Connected or not, with the false-positive rate stated.** A connectivity experiment (the light aimed at
+  labelled neighbours, one region at a time, with the patched cell opsin-negative) asks whether the recorded cell
+  answers more often than chance. The new **Connected or not** analysis takes every light pulse of every sweep as
+  a response window and the same window at 40 sham times in the same sweeps (clear of every stimulus, command
+  change and test pulse), each window's largest departure from its own baseline in units of the sweep's noise, so
+  a sweep at -70 mV and one at -30 mV count alike. The pooled windows are tested against the pooled shams
+  (p from 2000 draws); a window is a success when it beats the 95% quantile of the shams, so the false-positive
+  rate (5% of empty windows) and the successes chance alone would give are printed beside the success rate. It
+  gives the successes' latency and jitter (the lab's onset: past twice the noise, then growing to the peak),
+  the amplitude with failures (efficacy) and without (potency), a spike in a window as a success, and which
+  pattern lit the cell (the light's log, else the file's name: Cell_Only, ROI1, Full_Field). Over a cell's files,
+  **Connected or not, over a cell's files** puts the patterns side by side.
+- **A direct photocurrent is told from a synaptic response.** When the response begins sooner after the light than
+  a synapse can answer (under 1.5 ms), is still at half its peak or more when the light goes off and peaks there
+  or within 3 ms after, the recorded cell is answering the light itself: it expresses the opsin, or its membrane
+  is lit (Turesson et al. 2013's criteria). It is flagged as such, with its reversal potential when a step family
+  gives one, the 1.5 ms rule keeps its latency unmeasured, and Connected or
+  not says the file cannot test a connection. The rule that a "synaptic" onset under 1.5 ms is not measured
+  stays.
+- **The light's own mark on the trace is recognised and blanked.** A square deflection held while the light is on
+  and gone when it goes off, or a sharp jump at its onset and another at its end, the same in every sweep
+  whatever the cell is doing (a photoelectric potential at the electrode, pickup from the LED driver), is flagged
+  as a light artifact; the light's pulse plus 0.5 ms is blanked and the response measured after it. A response
+  already under way where the blank ends is said to have its onset hidden, not read at the blank's end.
+- **A mapping protocol with no record of its regions is not averaged.** A grid map or a connectivity run lights a
+  different region on each sweep. When no Polygon log covers the recording (or none is sure), Clampwise flags
+  "region unknown", gives no averaged number for the recording (each sweep's own response stays in the sweeps
+  table) and says what to do: record the light's log with the recording, or type each sweep's region.
+- **The lab's photostim pulses on AM_Stim are light.** AM_Stim is Clampex's name for a stimulator input; the lab's
+  Polygon rig records the LED's command on it, and the protocol's name (Photostim, ChroME, Chrimson) says what was
+  done. Such pulses were taken as electrical, so none of the light rules (the 1.5 ms minimum latency, the
+  pattern lit) applied to them. A rig profile naming AM_Stim as a light input still comes first.
+- **The lab's definitions are settings, the Pare lab's first.** In Analyze, Intrinsic properties now has
+  **Input resistance** (the lab's: a line over the hyperpolarizing steps, the linear portion of the V-I;
+  NeuroExpress's line read at 0 pA; IPFX's slope over -100 to 0 pA), **Sag** (Ahmed 2021: the most negative Vm in
+  the last 100 ms over that in the first 100 ms of the -200 pA step; or IPFX's), **AHP** (Ahmed 2021: 1 ms before
+  the peak minus the trough within 10 ms; or IPFX's), **Maximal firing rate** (Ahmed 2021: 1 / mean interspike
+  interval at 200 pA; or IPFX's), **Spike threshold** (IPFX's 5% of the steepest rise, the 20 mV/ms crossing, or
+  the kink) and **Spike half-width** (Ahmed 2021: at half the amplitude from the threshold; or IPFX's from the
+  fast trough). The headline number follows the setting, every other definition's number is reported beside it,
+  and the choice is written with the result. New beside them: Amir 2011's adaptation (% ISI increase on the
+  first step with 6-10 spikes), and the liquid junction potential typed for a recording shown beside the
+  voltages (never subtracted: the lab has not corrected it since 2014). On real step families the lab's
+  half-width reads about a quarter narrower than IPFX's: the likely reason for the difference with Ahmed 2021
+  in the corpus check. Evoked responses: the onset is now the
+  lab's (a departure past **twice** the noise, sustained; it was 3 times), and each pulse gets the **time to half
+  peak** (Turesson 2013), the **80-20% decay time** (Ahmed & Pare 2023) and the **initial slope** of the rise
+  (Popescu 2007, the LTP readout).
+- **Light inside a step family stays out of the step's own measures.** The lab's photostim protocols light the
+  cell during every step. The 100 ms after each pulse is now kept out of the step's spike counts (a light-evoked
+  spike gave a false rheobase), its peak (a light response was read as the sag) and its steady state; the
+  stimulus's spikes are counted apart.
+- **Health, sweep by sweep.** In current clamp, each sweep's membrane potential before the protocol, its own input
+  resistance from the test pulse (the lab's photostim protocols carry a -20 pA, 100 ms step at 766 ms; without
+  one, the sweep's own step gives it from its steady state) and whether the cell fired on its own, each judged
+  and said in words ("depolarized: -26 mV before the protocol, above -55 mV"; "input resistance moved +35% from
+  the first sweeps' 110 MOhm"). A file is flagged unhealthy when a quarter of its sweeps are: a cell resting
+  far above -55 mV is called unhealthy in every sweep, and its numbers are said not to be a healthy cell's.
+
 - **Light (or a stimulus) inside a step family is measured step by step, with the response's reversal potential.**
   The lab's photostim protocols play the light inside each step of a -200 to +160 pA family. Clampwise used to
   average the responses of every step together, so a PSP that is 4 mV at -56 mV and 0.6 mV at -13 mV came out as

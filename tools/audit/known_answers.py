@@ -107,6 +107,61 @@ def evoked() -> list[Row]:
     return rows
 
 
+def connectivity() -> list[Row]:
+    """Connected or not: response windows against matched sham windows (the lab's connectivity experiments)."""
+    from clampwise import simulate
+    from clampwise.analysis import pipeline
+
+    rows = []
+    for success in (1.0, 0.6, 0.0):
+        sim = simulate.photostim_steps(seed=2, success=success, jitter_s=0.0004, levels_pa=[0] * 20,
+                                       onsets_s=(0.3356,))
+        r = pipeline.analyze(sim.recording)
+        c = r.results["connectivity"].values
+        case = f"light on 20 sweeps at 0 pA, {success:.0%} of pulses answered"
+        true_rate = float(np.mean([h[0] for h in sim.truth["hits"]]))
+        rows.append(Row("connectivity", case, "connected (1 yes, 0 no)", float(true_rate > 0), float(c["connected"] == "yes"),
+                        0.0, f"p = {c['p']:.3f}, false-positive rate {c['false_positive_rate']:.0%}"))
+        rows.append(Row("connectivity", case, "success rate", true_rate, c["success_rate"], 0.06,
+                        f"chance alone gives {c['chance_successes']:.1f} of {c['n_windows']} windows"))
+        amp = sim.truth["amplitudes"][0]
+        if true_rate > 0:
+            rows.append(Row("connectivity", case, "potency (mV)", amp, c["potency"], 0.4))
+            rows.append(Row("connectivity", case, "efficacy (mV)", amp * true_rate, c["efficacy"], 0.5))
+            rows.append(Row("connectivity", case, "latency median (ms)", 3.0, c["latency_median"], 0.4,
+                            "a threshold crossing lags the true onset"))
+            rows.append(Row("connectivity", case, "jitter (ms)", 0.4, c["jitter"], 0.25))
+    # the recorded cell answering the light itself: no connection can be read, and the evoked analysis says so
+    sim = simulate.photostim_steps(seed=2, direct=True)
+    r = pipeline.analyze(sim.recording)
+    rows.append(Row("connectivity", "a direct photocurrent under a -200 to +160 pA family", "direct said (1 yes)",
+                    1.0, float(r.results["evoked"].values["direct_photocurrent"] == "yes"), 0.0))
+    rows.append(Row("connectivity", "a direct photocurrent under a -200 to +160 pA family", "verdict is 'direct photocurrent'",
+                    1.0, float(r.results["connectivity"].values["connected"] == "direct photocurrent"), 0.0))
+    sim = simulate.photostim_steps(seed=2)
+    r = pipeline.analyze(sim.recording)
+    rows.append(Row("connectivity", "a synapse under the same family", "direct said (0 no)", 0.0,
+                    float(r.results["evoked"].values["direct_photocurrent"] == "yes"), 0.0))
+    # the light's own mark on the trace: blanked, the response measured after it
+    sim = simulate.photostim_steps(seed=2, artifact=1.5, latency_s=0.008)
+    e = pipeline.analyze(sim.recording).results["evoked"]
+    zero = sim.truth["levels_pa"].index(0)
+    rows.append(Row("connectivity", "a 1.5 mV square light artifact, synapse 8 ms later", "blank (ms)", 5.5,
+                    e.values["light_artifact_blank_ms"], 0.01, "the 5 ms pulse plus 0.5 ms"))
+    rows.append(Row("connectivity", "a 1.5 mV square light artifact, synapse 8 ms later", "PSP at 0 pA (mV)",
+                    sim.truth["amplitudes"][zero], e.values["p1_amplitude"], 0.4))
+    rows.append(Row("connectivity", "a 1.5 mV square light artifact, synapse 8 ms later", "latency (ms)", 8.0,
+                    e.values["p1_latency_median"], 0.5))
+    # health sweep by sweep: a depolarized cell is unhealthy in every sweep; a healthy one in none
+    for v_rest, bad in ((-26.0, 10), (-62.0, 0)):
+        h = pipeline.analyze(simulate.photostim_steps(seed=2, v_rest=v_rest, e_rev=-5.0).recording).results["sweep_health"]
+        rows.append(Row("connectivity", f"a cell resting at {v_rest:g} mV", "unhealthy sweeps", float(bad),
+                        float(h.values["unhealthy_sweeps"]), 0.0))
+        rows.append(Row("connectivity", f"a cell resting at {v_rest:g} mV", "Rin per sweep, median (MOhm)", 100.0,
+                        h.values["rin_median"], 3.0, "from each sweep's own step"))
+    return rows
+
+
 def match_events(found_s, true_s, tol_s: float = 0.002) -> tuple[float, int]:
     """(share of true events found within ``tol_s``, found events matching none)."""
     found = np.sort(np.asarray(found_s, float))
@@ -378,9 +433,17 @@ def intrinsic() -> list[Row]:
         fs = sim.recording.sample_rate_hz
         a, b = int(0.2 * fs), int(0.7 * fs)
         vp, vss, vb = float(v[a:b - int(0.1 * fs)].min()), float(v[b - int(0.1 * fs):b].mean()), float(v[:a].mean())
-        rows.append(Row("intrinsic", f"steps, Ih sag {frac:g}", "sag_ratio", (vp - vss) / (vp - vb),
-                        r.values["sag_ratio"], 0.01, f"on the {r.values['sag_step_pa']:g} pA step, its peak nearest "
+        rows.append(Row("intrinsic", f"steps, Ih sag {frac:g}", "sag_ratio_ipfx", (vp - vss) / (vp - vb),
+                        r.values["sag_ratio_ipfx"], 0.01, f"on the {r.values['sag_step_pa']:g} pA step, its peak nearest "
                         "-100 mV; truth: the noiseless trace"))
+        # Ahmed 2021's sag, the headline: the most negative Vm in the last 100 ms over that in the first 100 ms of
+        # the most negative step (-200 pA), as the paper writes it
+        k = sim.truth["levels_pa"].index(min(sim.truth["levels_pa"]))
+        v = clean.recording.sweep(k)
+        first, last = float(v[a:a + int(0.1 * fs)].min()), float(v[b - int(0.1 * fs):b].min())
+        rows.append(Row("intrinsic", f"steps, Ih sag {frac:g}", "sag_ratio (Ahmed 2021)", last / first,
+                        r.values["sag_ratio"], 0.01, f"on the {r.values['sag_lab_step_pa']:g} pA step; truth: the "
+                        "noiseless trace"))
     # a rectifying membrane: R(I) = Rm + slope * I, known exactly
     for slope in (300.0, -200.0):
         sim = simulate.steps(rm_mohm=150.0, r_slope_mohm_per_na=slope, noise=0.2, n_sweeps=21, first_pa=-200.0,
@@ -473,7 +536,8 @@ def voltage_steps() -> list[Row]:
 
 
 SECTIONS = {"baseline": baseline, "evoked": evoked, "events": events, "events+": events_neuroexpress, "dsi": dsi,
-            "intrinsic": intrinsic, "spike train": spike_train, "thresholds": thresholds, "voltage steps": voltage_steps}
+            "intrinsic": intrinsic, "spike train": spike_train, "thresholds": thresholds, "voltage steps": voltage_steps,
+            "connectivity": connectivity}
 
 
 def run(names: list[str]) -> list[Row]:

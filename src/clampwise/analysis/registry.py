@@ -153,6 +153,8 @@ MODULES: tuple[str, ...] = (
     "clampwise.analysis.vclamp",
     "clampwise.analysis.field",
     "clampwise.analysis.spike_train",
+    "clampwise.analysis.connectivity",
+    "clampwise.analysis.sweep_health",
 )
 _loaded = False
 

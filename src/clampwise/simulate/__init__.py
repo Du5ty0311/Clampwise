@@ -130,12 +130,21 @@ def photostim_steps(*, levels_pa=tuple(range(-200, 200, 40)), fs: float = 20_000
                     step_start_s: float = 0.1406, step_s: float = 0.5, onsets_s=(0.3356, 0.4406), rm_mohm: float = 100.0,
                     v_rest: float = -60.0, e_rev: float = -10.0, g_mv_per_mv: float = 0.08, ppr: float = 0.9,
                     rise_s: float = 0.0015, decay_s: float = 0.012, latency_s: float = 0.003, noise: float = 0.15,
-                    light_v=None, threshold_v: float = 0.0, seed: int = 0) -> Simulated:
+                    light_v=None, threshold_v: float = 0.0, seed: int = 0, direct: bool = False,
+                    artifact: float = 0.0, success: float = 1.0, jitter_s: float = 0.0, pulse_s: float = 0.005,
+                    protocol: str = "sim_photostim_steps", name: str = "") -> Simulated:
     """The lab's photostim-on-steps protocol (CC_-200mV_40pA_5ms Photostim2x_100ms between): a current step
     family with two 5 ms light pulses inside every step, recorded in current clamp. Each PSP's peak is
     ``g * (e_rev - Vm)``, Vm the steady potential the step brings the cell to (a small-conductance PSP, so its
     size follows the driving force and reverses at ``e_rev``). With ``light_v`` (one value per sweep), the light
-    channel's size changes instead and the response scales with it above ``threshold_v``."""
+    channel's size changes instead and the response scales with it above ``threshold_v``.
+
+    ``direct``: the recorded cell answers the light itself (a photocurrent: a conductance opening with a 0.8 ms
+    time constant while the light is on and closing with a 3 ms one after it; its size still follows the driving
+    force) instead of a synapse answering ``latency_s`` later. ``artifact``: a square deflection (mV) held while
+    the light is on, the same in every sweep, as a photoelectric potential at the electrode or pickup from the
+    LED driver makes. ``success``: the fraction of light pulses the synapse answers (the rest are failures);
+    ``jitter_s``: the SD of the synaptic latency."""
     rng = np.random.default_rng(seed)
     n = int(sweep_s * fs)
     t = np.arange(n) / fs
@@ -144,8 +153,9 @@ def photostim_steps(*, levels_pa=tuple(range(-200, 200, 40)), fs: float = 20_000
     signal = np.full((len(levels), n), v_rest, dtype=float)
     command = np.zeros((len(levels), n))
     light = np.zeros((len(levels), n))
-    vm, amps = [], []
+    vm, amps, hits = [], [], []
     sizes = list(light_v) if light_v is not None else [5.0] * len(levels)
+    w = int(pulse_s * fs)
     for s, i_pa in enumerate(levels):
         command[s, a:b] = i_pa
         dv = i_pa * rm_mohm * 1e-3
@@ -156,19 +166,38 @@ def photostim_steps(*, levels_pa=tuple(range(-200, 200, 40)), fs: float = 20_000
         scale = 1.0 if light_v is None else max(0.0, sizes[s] - threshold_v) / max(1e-9, max(sizes) - threshold_v)
         amp1 = g_mv_per_mv * (e_rev - v_here) * scale
         amps.append(amp1)
+        hit_row = []
         for k, onset in enumerate(onsets_s):
             lo = int(onset * fs)
-            light[s, lo:lo + int(0.005 * fs)] = sizes[s]
-            signal[s] += psc(t, onset + latency_s, amp1 * (ppr if k else 1.0), rise_s, decay_s)
+            light[s, lo:lo + w] = sizes[s]
+            amp = amp1 * (ppr if k else 1.0)
+            if direct:
+                # the conductance opens while the light is on and closes after it; Vm follows with no delay
+                g = np.zeros(n)
+                g[lo:lo + w] = 1 - np.exp(-(t[lo:lo + w] - t[lo]) / 0.0008)
+                g[lo + w:] = g[lo + w - 1] * np.exp(-(t[lo + w:] - t[lo + w]) / 0.003)
+                signal[s] += amp * g / max(float(g.max()), 1e-12)
+                hit_row.append(True)
+            else:
+                hit = bool(rng.random() < success)
+                hit_row.append(hit)
+                if hit:
+                    signal[s] += psc(t, onset + latency_s + jitter_s * rng.normal(), amp, rise_s, decay_s)
+            if artifact:
+                signal[s, lo:lo + w] += artifact
+        hits.append(hit_row)
         signal[s] += rng.normal(0, noise, n)
     channels = _channels("mV", "pA", [Channel(2, "AM_Stim", "V", Role.TRIGGER, True, role_reason="simulated light")])
-    rec = Recording(Path(f"sim_photostim_steps_{seed}.abf"), fs, channels, ArraySource([signal, command, light]),
-                    sweep_start_times_s=np.arange(len(levels)) * 5.0, protocol="sim_photostim_steps",
+    rec = Recording(Path(name or f"sim_photostim_steps_{seed}.abf"), fs, channels,
+                    ArraySource([signal, command, light]),
+                    sweep_start_times_s=np.arange(len(levels)) * 5.0, protocol=protocol,
                     start_time=dt.datetime(2026, 1, 1, 12, 30, 0), holding=0.0,
                     epochs=[[Epoch("step", 0.0, step_start_s, 0.0), Epoch("step", step_start_s, step_start_s + step_s, lv),
                              Epoch("step", step_start_s + step_s, sweep_s, 0.0)] for lv in levels])
     return Simulated(rec, {"levels_pa": levels, "vm": vm, "amplitudes": amps, "e_rev": e_rev, "v_rest": v_rest,
-                           "ppr": ppr, "latency_s": latency_s, "light_v": sizes, "threshold_v": threshold_v})
+                           "ppr": ppr, "latency_s": latency_s, "light_v": sizes, "threshold_v": threshold_v,
+                           "direct": direct, "artifact": artifact, "success": success, "hits": hits,
+                           "jitter_s": jitter_s, "pulse_s": pulse_s})
 
 
 def steps(*, n_sweeps: int = 11, fs: float = 20_000.0, sweep_s: float = 1.0, step_start_s: float = 0.2,
