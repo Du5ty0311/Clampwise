@@ -36,6 +36,15 @@ review marks can be disabled under Settings, Features.</li>
 <li><b>Results</b> lists every measurement with its definition and method. <b>Figures</b> plots them four graphs at a
 time, or compares all recordings of a type. Any graph can be maximized (corner button or double-click on its title;
 Esc restores) or opened in a separate window.</li>
+<li><b>Workbench</b> (Ctrl+8): measure anything by hand, as in Clampfit. Type the sweeps (1-10, 15; every 2nd; odd;
+last 5), overlay or average them on any channel, drag named regions on the trace (a baseline, a measure, a fit;
+a region can repeat on every stimulus pulse), tick the statistics you want (peak, area, rise and decay times,
+slopes, onset latency, spikes...), fit a model on a region, stack transforms that never touch the raw data
+(baselines, filters, blanking, subtracting another sweep or file), plot any measure against sweep, time, command
+or another measure, click to set an onset, a peak or a threshold, or to leave a sweep out with a reason.
+<b>Keep this measurement</b> saves it with the recording: Results lists it under "Measured by hand" with how it
+was made, and makes it again from that description. <b>Save as template</b> keeps the regions and measures for
+every file of a protocol; <b>Run on every file of its protocol</b> measures them all.</li>
 <li><b>Export</b>: Send to Excel writes one workbook per project, with each column's definition attached to its
 header.</li>
 </ol>

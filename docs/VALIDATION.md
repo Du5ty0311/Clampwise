@@ -68,3 +68,23 @@ Cm 31.8 pF on the model cell (nominal 10 MΩ, 33 pF).
 - Recording from real cells with Clampwise (the analyses have been used on many real recordings; Clampwise's own
   recording has been used on the model cell).
 - Other digitizers and amplifiers: recording supports the Digidata 1440A and MultiClamp 700B only.
+
+## Added 2026-11-10: connectivity, the lab's definitions, the workbench
+
+- **Connected or not** (`connectivity`): 21 known answers (`python tools/audit/known_answers.py connectivity`): a
+  connected cell and an unconnected one (verdict, success rate within 0.06, potency within 0.4 mV, efficacy within
+  0.5 mV, latency within 0.4 ms, jitter within 0.25 ms), a direct photocurrent said and not called a connection, a
+  1.5 mV square light artifact blanked (5.5 ms) with the synapse measured after it, a cell resting at -26 mV
+  unhealthy in every sweep with its Rin per sweep within 3 MOhm.
+- **The lab's definitions**: Ahmed 2021's sag on a simulated Ih family against the noiseless trace (within 0.01);
+  the IPFX sag beside it. On Daniel's own step families the hand check (`tools/audit/daniel_protocols.py`) and
+  Clampwise agree: Rin to 0.01 MOhm, sag exact, rheobase exact, AP amplitude within 1 mV (the threshold rule),
+  half-width within 0.04 ms, AHP exact (see the vault's "Daniel's protocols audit").
+- **The workbench**: its statistics on a known waveform (peak, times, area, rise and decay, slopes, three onset
+  methods, spikes), fits recovering a 25 ms time constant to 1%, transforms leaving the raw data untouched,
+  per-pulse regions measuring each response against its own baseline, exclusions and clicked points, a kept
+  measurement made again from its description (`tests/test_workbench.py`).
+- Not yet verified: the workbench's numbers against Clampfit on the same real file (Daniel's acceptance test:
+  reproduce the audit's numbers by hand), and the direct-photocurrent rule on an opsin-positive cell recorded in
+  voltage clamp.
+
