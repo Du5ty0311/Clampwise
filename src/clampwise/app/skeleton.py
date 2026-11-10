@@ -33,6 +33,8 @@ DESTINATIONS = (
     Destination("check", "Check", "Ctrl+2", "Inspect traces, stimulus timing, recording type and quality"),
     Destination("analyze", "Analyze", "Ctrl+3", "Select analyses, adjust settings and run them"),
     Destination("results", "Results", "Ctrl+4", "All measurements, with their definitions and methods"),
+    Destination("workbench", "Workbench", "Ctrl+8", "Measure anything by hand: regions, statistics, fits and plots, "
+                                                     "kept with the recording"),
     Destination("figures", "Figures", "Ctrl+5", "Result plots and publication-ready figures"),
     Destination("export", "Export", "Ctrl+6", "Export to Excel, CSV and figure files, with definitions"),
     Destination("live", "Live", "Ctrl+7", "The cell you are recording and the rig's programs, live in one place"),

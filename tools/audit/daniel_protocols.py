@@ -65,7 +65,7 @@ def steps_by_hand(rec) -> dict:
     if np.unique(np.round(cur[sub])).size >= 2:
         out["rin_lab"] = float(np.polyfit(cur[sub], vss[sub], 1)[0]) * 1e3
     hyper = [k for k in range(rec.n_sweeps) if cur[k] < -3 and not fired[k]]
-    if hyper:
+    if hyper and b - a > int(0.15 * fs):                  # a step long enough for a peak before its last 100 ms
         k = min(hyper, key=lambda k: abs(cur[k]))                     # the smallest hyperpolarizing step
         v = sig[k]
         pk = a + int(np.argmin(v[a:b - int(0.1 * fs)]))

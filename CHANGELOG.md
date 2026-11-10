@@ -34,6 +34,27 @@
   Polygon rig records the LED's command on it, and the protocol's name (Photostim, ChroME, Chrimson) says what was
   done. Such pulses were taken as electrical, so none of the light rules (the 1.5 ms minimum latency, the
   pattern lit) applied to them. A rig profile naming AM_Stim as a light input still comes first.
+- **The Workbench: measure anything by hand, as in Clampfit, and keep how it was measured.** A new screen
+  (Ctrl+8). The chosen sweeps (typed: 1-10, 15; every 2nd; odd; last 5) overlaid, averaged, as their median or
+  the one nearest their mean, on any channel, with the stimulus and the command marked. Named regions dragged on
+  the trace (a baseline, a measure, a fit), each able to repeat relative to every stimulus pulse. Clampfit's
+  Statistics in a region: mean, SD, minimum, maximum, peak and antipeak (direction and smoothing points as
+  options), peak to peak, times of peak, area, half-width, rise and decay times with set percentages, the
+  steepest rise and fall and their times, the onset latency (by threshold with the lab's 2 x noise, by the
+  extrapolated foot, or by maximal curvature), a slope, the value at a time, threshold crossings, spike count and
+  instantaneous frequency. Fits on a region, drawn with their residuals and 95% intervals: one or two
+  exponentials (offset free or fixed), an exponential rise, the synaptic waveform, alpha, a line, polynomials,
+  power, Gaussian, Boltzmann, Hill, or a typed expression in t with a, b, c, d. A stack of transforms that
+  never touch the raw data: a baseline by region or by a sloping line, Bessel low-pass, high-pass, notch,
+  Gaussian smoothing, blanking after each stimulus, subtracting a trace (the sweeps' average, one sweep, or
+  another file's average: trace arithmetic between sweeps and files), scaling, an offset. The table of every
+  measure per sweep and region, and a plot of any measure against sweep, time, command level or another
+  measure. Clicks set an onset, a peak or a spike threshold on a sweep; a click leaves a sweep out, with a
+  reason. Every change goes through Undo (Ctrl+Z). **Keep** saves the measurement with the recording: Results
+  shows it under "Measured by hand" with its mean, SD, median and n per measure and the full description of how
+  it was made, and it is made again from that description. **Save as template** keeps the regions, measures,
+  fit and transforms for every file of a protocol, and **Run on every file of its protocol** measures and keeps
+  them all, as a Clampfit batch.
 - **The lab's definitions are settings, the Pare lab's first.** In Analyze, Intrinsic properties now has
   **Input resistance** (the lab's: a line over the hyperpolarizing steps, the linear portion of the V-I;
   NeuroExpress's line read at 0 pA; IPFX's slope over -100 to 0 pA), **Sag** (Ahmed 2021: the most negative Vm in

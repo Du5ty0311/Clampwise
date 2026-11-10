@@ -399,6 +399,9 @@ class ResultsScreen(Screen):
         self._lazy(self._every_number, "Every number")
         self._lazy(self._flags, "Flags and notes")
         self._lazy(self._how, "How it was measured")
+        hands = self._hands()
+        if hands:
+            self._lazy(lambda: self._by_hand(hands), f"Measured by hand ({len(hands)})")
         self.tabs.blockSignals(False)
         self.tabs.setCurrentIndex(0)
         self._build_tab(0)
@@ -491,6 +494,33 @@ class ResultsScreen(Screen):
         if run.notes:
             parts.insert(0, "<ul>" + "".join(f"<li>{n}</li>" for n in run.notes) + "</ul>")
         text.setHtml("".join(parts) or "<p>No flags and no notes.</p>")
+        return text
+
+    def _hands(self) -> list[dict]:
+        """The workbench's measurements kept with this recording."""
+        if self.window.project is None or self._run is None:
+            return []
+        try:
+            return self.window.project.hands(self._run.recording.source)
+        except Exception:
+            return []
+
+    def _by_hand(self, hands: list[dict]) -> QtWidgets.QWidget:
+        """Each hand measurement: its summary rows (mean, SD, median, n over the sweeps) and how it was made."""
+        from ...analysis.workbench import HandMeasurement
+
+        text = QtWidgets.QTextBrowser()
+        parts = ["<p><i>Measured by hand in the Workbench, kept with the recording; every number can be made again "
+                 "from its description.</i></p>"]
+        for h in hands:
+            m = HandMeasurement.from_dict(h["measurement"])
+            rows = "".join(f"<tr><td>{r['measure']}</td><td align='right'>{r['mean']:.4g}</td>"
+                           f"<td align='right'>{r['sd']:.3g}</td><td align='right'>{r['median']:.4g}</td>"
+                           f"<td align='right'>{r['n']}</td><td>{r['measured']}</td></tr>" for r in h["summary"])
+            parts.append(f"<h3>{h['name']} ({h['made_at'][:16].replace('T', ' ')})</h3>"
+                         "<table cellpadding='4'><tr><th>Measure</th><th>Mean</th><th>SD</th><th>Median</th>"
+                         f"<th>n</th><th></th></tr>{rows}</table><p>{m.describe()}</p>")
+        text.setHtml("".join(parts))
         return text
 
     def _how(self) -> QtWidgets.QWidget:

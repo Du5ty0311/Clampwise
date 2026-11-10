@@ -31,6 +31,7 @@ from .screens.files import FilesScreen
 from .screens.live import LiveScreen
 from .screens.results import ResultsScreen
 from .screens.settings import SettingsScreen
+from .screens.workbench import WorkbenchScreen
 
 SETTINGS_ORG = "Clampwise"
 
@@ -161,6 +162,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add(CheckScreen(self))
         self._add(AnalyzeScreen(self))
         self._add(ResultsScreen(self))
+        self._add(WorkbenchScreen(self))
         self._add(FiguresScreen(self))
         self._add(ExportScreen(self))
         self._add(LiveScreen(self))

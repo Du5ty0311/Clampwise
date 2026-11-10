@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS runs (
     recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
     made_at TEXT NOT NULL, recording_type TEXT, type_reason TEXT, stimulus_summary TEXT, notes TEXT,
     provenance TEXT, result_ids TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS hand (
+    id INTEGER PRIMARY KEY, recording_id INTEGER REFERENCES recordings(id) ON DELETE CASCADE,
+    name TEXT NOT NULL, json TEXT NOT NULL, summary TEXT DEFAULT '', made_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS templates (name TEXT PRIMARY KEY, protocol TEXT NOT NULL, json TEXT NOT NULL,
+    saved TEXT NOT NULL);
 """
 
 
@@ -443,6 +448,50 @@ class Project:
     def delete_preset(self, name: str) -> None:
         with self.db:
             self.db.execute("DELETE FROM presets WHERE name = ?", (name,))
+
+    # ---- hand measurements (the workbench): kept with the recording, made again from their description
+    def add_hand(self, path: str | Path, measurement, summary_rows: list[dict] | None = None) -> int:
+        """Keep a workbench measurement (analysis.workbench.HandMeasurement) with the recording; the summary rows
+        (each measure's mean over sweeps) go in beside it so Results can list them without re-measuring."""
+        d = measurement.to_dict()
+        with self.db:
+            cur = self.db.execute("INSERT INTO hand (recording_id, name, json, summary, made_at) VALUES (?, ?, ?, ?, ?)",
+                                  (self._rid(path), measurement.name, json.dumps(d),
+                                   json.dumps(summary_rows or [], default=float), _now()))
+        self._audit("hand measurement kept", path, None, {"name": measurement.name})
+        return int(cur.lastrowid)
+
+    def hands(self, path: str | Path) -> list[dict]:
+        """The recording's hand measurements: id, name, measurement (a dict), summary (rows), made_at."""
+        out = []
+        for r in self.db.execute("SELECT * FROM hand WHERE recording_id = ? ORDER BY id", (self._rid(path),)).fetchall():
+            out.append({"id": r["id"], "name": r["name"], "measurement": json.loads(r["json"]),
+                        "summary": json.loads(r["summary"] or "[]"), "made_at": r["made_at"]})
+        return out
+
+    def remove_hand(self, hand_id: int) -> None:
+        r = self.db.execute("SELECT h.name, r.path FROM hand h LEFT JOIN recordings r ON r.id = h.recording_id "
+                            "WHERE h.id = ?", (hand_id,)).fetchone()
+        with self.db:
+            self.db.execute("DELETE FROM hand WHERE id = ?", (hand_id,))
+        if r is not None:
+            self._audit("hand measurement removed", r["path"], {"name": r["name"]}, None)
+
+    def save_template(self, template) -> None:
+        """A workbench template (analysis.workbench.Template), by name, for every file of its protocol."""
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO templates VALUES (?, ?, ?, ?)",
+                            (template.name, template.protocol, json.dumps(template.measurement), _now()))
+
+    def templates(self) -> list:
+        from ..analysis.workbench import Template
+
+        return [Template(r["name"], r["protocol"], json.loads(r["json"]))
+                for r in self.db.execute("SELECT * FROM templates ORDER BY name").fetchall()]
+
+    def delete_template(self, name: str) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM templates WHERE name = ?", (name,))
 
     def apply_preset(self, name: str) -> None:
         """The preset's settings and mappings become the project's; its name is
