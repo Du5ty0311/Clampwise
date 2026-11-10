@@ -272,6 +272,10 @@ SETTINGS = (
             "step there is when none is.", "pA", "Ahmed, Headley & Pare 2021", advanced=True),
     Setting("max_rate_step_pa", 200.0, "Ahmed 2021's maximal rate: the step at (pA)", "The step nearest this "
             "current, within 25 pA.", "pA", "Ahmed, Headley & Pare 2021", advanced=True),
+    Setting("interneuron_half_width_ms", 0.6, "Interneuron: half-width under (ms)", "The lab's class rule: a first "
+            "spike narrower than this at half-amplitude from the threshold is an interneuron's, else a principal "
+            "cell's (Daniel, 2026-11-10).", "ms", "Ahmed, Headley & Pare 2021; Woodruff & Sah 2007", advanced=True,
+            minimum=0.1),
     Setting("small_step_min_pa", -100.0, "Small steps from (pA)", "Input resistance and tau are measured on the "
             "subthreshold steps from this current to 0 pA, where the membrane response is approximately linear.", "pA",
             "Gouwens et al. 2019"),
@@ -530,6 +534,10 @@ OUTPUTS = (
            "Ahmed, Headley & Pare 2021", label="AHP, Ahmed 2021"),
     Output("ap_ahp_ipfx", "IPFX's AHP: the trough within 50 ms after the peak minus the threshold (negative).",
            "mV", "Gouwens et al. 2019", label="AHP, IPFX"),
+    Output("cell_class", "The lab's class rule: 'interneuron' when the first spike at rheobase is narrower than "
+           "the set half-width (0.6 ms) at half-amplitude from the threshold, else 'principal'.", "",
+           "Ahmed, Headley & Pare 2021; Woodruff & Sah 2007", label="Cell class", headline=True),
+    Output("cell_class_words", "The class with the half-width it rests on.", "", label="Cell class: why"),
     Output("adaptation_pct", "Spike-frequency adaptation: the last interspike interval over the first, minus 1, "
            "as a percentage, on the first step giving 6 to 10 spikes (the interval step when none does).", "%",
            "Amir et al. 2011", label="Adaptation (%)"),
@@ -862,6 +870,16 @@ def run(recording: Recording, context, s) -> Result | None:
         out.values["ap_ahp_lab"] = ahp_lab
         out.values["ap_ahp"] = ahp_lab if (s["ahp_definition"] == AHP_LAB and np.isfinite(ahp_lab)) else x.ahp_mv
         out.values["ap_ahp_definition"] = s["ahp_definition"] if np.isfinite(ahp_lab) else AHP_IPFX
+        # the lab's one numeric class rule: an interneuron's spike is narrower than 0.6 ms at half-amplitude
+        # (Ahmed, Headley & Pare 2021, after Woodruff & Sah 2007), on the lab's half-width
+        hw_class = hw_lab if np.isfinite(hw_lab) else x.half_width_ms
+        if np.isfinite(hw_class):
+            narrow = hw_class < s["interneuron_half_width_ms"]
+            out.values["cell_class"] = "interneuron" if narrow else "principal"
+            out.values["cell_class_words"] = (f"{'interneuron' if narrow else 'principal cell'}: the first spike at "
+                                              f"rheobase is {hw_class:.2f} ms wide at half-amplitude from the threshold "
+                                              f"({'under' if narrow else 'at or over'} {s['interneuron_half_width_ms']:g} ms)")
+            out.choose("cell class", out.values["cell_class"], out.values["cell_class_words"])
         out.choose("spike measures", f"threshold {thr:.1f} mV ({rule}); amplitude {amp:.1f} mV; half-width "
                    f"{out.values['ap_half_width']:.2f} ms ({out.values['ap_half_width_definition'].split(':')[0]}); "
                    f"AHP {out.values['ap_ahp']:.1f} mV ({out.values['ap_ahp_definition'].split(':')[0]})",

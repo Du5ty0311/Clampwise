@@ -256,3 +256,18 @@ def test_the_holding_current_is_read_from_the_recorded_current_when_there_is_one
     assert abs(r.values["holding_current"] - 5.70) < 0.05            # NeuroExpress: Irest 5.70 pA
     assert abs(r.values["r_steady0"] - 117.36) < 2.0                  # NeuroExpress: Rend0 117.36 MOhm
     assert abs(r.values["first_threshold_5_mv"] + 37.03) < 1.0        # NeuroExpress: SpTh -37.03 mV
+
+
+def test_the_lab_s_class_rule_names_the_cell_by_its_half_width():
+    """Ahmed 2021 (after Woodruff & Sah 2007): a first spike narrower than 0.6 ms at half-amplitude from the
+    threshold is an interneuron's; the cut-off is a setting (Daniel, 2026-11-10)."""
+    r = pipeline.analyze(simulate.steps().recording).results["intrinsic"]
+    hw = r.values["ap_half_width_lab"]
+    assert np.isfinite(hw)
+    expected = "interneuron" if hw < 0.6 else "principal"
+    assert r.values["cell_class"] == expected and f"{hw:.2f} ms" in r.values["cell_class_words"]
+    assert "cell class" in r.choices
+    other = pipeline.analyze(simulate.steps().recording,
+                             pipeline.Settings(by_analysis={"intrinsic": {"interneuron_half_width_ms": hw + 1.0}})).results["intrinsic"]
+    assert other.values["cell_class"] == "interneuron"
+

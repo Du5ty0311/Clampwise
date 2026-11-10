@@ -124,10 +124,11 @@ OUTPUTS = (
            label="Spike latency (median)"),
     Output("direct_photocurrent", "The evoked analysis's judgement: yes when the recorded cell itself answers the "
            "light (see the evoked analysis).", "", label="Direct photocurrent"),
-    Output("pattern", "Which pattern lit the cell: from the patterned light's log with the recording, else from "
-           "the file's name (Cell_Only, ROI1, Full_Field).", "", label="Pattern lit"),
-    Output("pattern_source", "Where the pattern's name came from: the light's log, the file's name, or nothing.",
-           "", label="Pattern from"),
+    Output("pattern", "Which pattern lit the cell: from the patterned light's log with the recording, else the "
+           "condition typed in Files, else from the file's name (Cell_Only, ROI1, Full_Field).", "",
+           label="Pattern lit"),
+    Output("pattern_source", "Where the pattern's name came from: the light's log, the condition typed in Files, "
+           "the file's name, or nothing.", "", label="Pattern from"),
     Output("units", "The units of the amplitudes: the recorded signal's.", "", label="Amplitude units"),
     Output("z", "The window's largest departure from its baseline, over the sweep's baseline noise SD.", "ratio",
            level="sweep"),
@@ -367,8 +368,11 @@ def run(recording: Recording, context, s) -> Result | None:
     out.values["connected"] = verdict
     # which pattern lit the cell
     pattern, source = "", "nothing"
+    typed = str(getattr(getattr(recording, "identity", None), "condition", "") or "").strip()
     if ev is not None and ev.values.get("pattern"):
         pattern, source = str(ev.values["pattern"]), "the light's log"
+    elif typed:
+        pattern, source = typed, "the condition typed in Files"       # Daniel types conditions (2026-11-10)
     elif pattern_from_name(recording.source.stem):
         pattern, source = pattern_from_name(recording.source.stem), "the file's name"
     out.values.update({"pattern": pattern, "pattern_source": source})

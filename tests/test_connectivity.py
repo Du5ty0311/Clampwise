@@ -116,6 +116,15 @@ def test_the_pattern_comes_from_the_file_s_name_when_no_log_says():
     assert r.results["connectivity"].values["pattern"] == "ROI1"
 
 
+def test_the_pattern_comes_from_the_typed_condition_before_the_file_s_name():
+    from clampwise.core.recording import Identity
+
+    sim = simulate.photostim_steps(seed=2, name="ROI1_cell_response.abf")
+    sim.recording.identity = Identity(animal="A1", cell="cell1", condition="ROI2 dorsal")
+    c = _run(sim).results["connectivity"].values
+    assert c["pattern"] == "ROI2 dorsal" and "typed" in c["pattern_source"]
+
+
 def test_a_cell_s_files_are_put_side_by_side():
     from clampwise.analysis.cells import Cell, Member, analyze_cell
 

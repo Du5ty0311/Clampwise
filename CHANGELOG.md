@@ -55,6 +55,10 @@
   it was made, and it is made again from that description. **Save as template** keeps the regions, measures,
   fit and transforms for every file of a protocol, and **Run on every file of its protocol** measures and keeps
   them all, as a Clampfit batch.
+- **The cell's class, by the lab's rule.** Intrinsic properties names the cell an interneuron when its first
+  spike at rheobase is narrower than 0.6 ms at half-amplitude from the threshold (Ahmed 2021 after Woodruff &
+  Sah 2007), a principal cell otherwise, with the half-width it rests on; the cut-off is a setting. The pattern
+  lit in Connected or not is read from the condition typed in Files when there is one, before the file's name.
 - **The lab's definitions are settings, the Pare lab's first.** In Analyze, Intrinsic properties now has
   **Input resistance** (the lab's: a line over the hyperpolarizing steps, the linear portion of the V-I;
   NeuroExpress's line read at 0 pA; IPFX's slope over -100 to 0 pA), **Sag** (Ahmed 2021: the most negative Vm in
