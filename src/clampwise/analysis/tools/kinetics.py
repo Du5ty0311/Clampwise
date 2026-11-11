@@ -85,6 +85,48 @@ def find_onset(dev: np.ndarray, start: int, stop: int, threshold: float, sustain
     return int(start + hits[0])
 
 
+# How a response's onset is read; the first is the Pare lab's (Ahmed, Headley & Pare 2021) and the default
+ONSET_NOISE = "Pare lab: the first departure past the noise multiple that holds for 0.5 ms"
+ONSET_FRACTION = "10% of the peak: the last crossing before the peak"
+ONSET_FOOT = "the foot: a line through 20% and 80% of the rise, read at the baseline"
+ONSET_DEFINITIONS = (ONSET_NOISE, ONSET_FRACTION, ONSET_FOOT)
+
+
+def onset_fraction(t: np.ndarray, dev: np.ndarray, start: int, peak_idx: int, fraction: float = 0.1) -> float:
+    """The onset as the time the response last crosses ``fraction`` of its peak before the peak (searched
+    backwards from the peak, interpolated between samples); NaN when it never is below that level after
+    ``start``. ``dev``: baseline-subtracted and signed so the response is positive."""
+    peak = dev[peak_idx]
+    if not np.isfinite(peak) or peak <= 0 or peak_idx <= start:
+        return float("nan")
+    below = np.flatnonzero(dev[start:peak_idx + 1] < fraction * peak)
+    if not below.size:
+        return float("nan")
+    i = start + int(below[-1])
+    return float(interp_crossing(t, dev, i, i + 1, fraction * peak)) if i + 1 <= peak_idx else float("nan")
+
+
+def onset_foot(t: np.ndarray, dev: np.ndarray, start: int, peak_idx: int, lo: float = 0.2, hi: float = 0.8) -> float:
+    """The onset by the extrapolated foot: a straight line through the points where the rise is at ``lo`` and
+    ``hi`` of the peak, read where it meets the baseline (Jonas, Major & Sakmann 1993; Stimfit's latency). It
+    does not depend on the noise, and lands a little after the true start of a response that begins gently."""
+    t_lo, t_hi = onset_fraction(t, dev, start, peak_idx, lo), onset_fraction(t, dev, start, peak_idx, hi)
+    if not (np.isfinite(t_lo) and np.isfinite(t_hi)) or t_hi <= t_lo:
+        return float("nan")
+    return float(t_lo - lo * (t_hi - t_lo) / (hi - lo))
+
+
+def onset_by(definition: str, t: np.ndarray, dev: np.ndarray, start: int, peak_idx: int, threshold: float,
+             sustain: int) -> float:
+    """The onset's time by the named definition (``ONSET_DEFINITIONS``), NaN when it cannot be read."""
+    if definition == ONSET_FRACTION:
+        return onset_fraction(t, dev, start, peak_idx)
+    if definition == ONSET_FOOT:
+        return onset_foot(t, dev, start, peak_idx)
+    i = find_onset(dev, start, peak_idx + 1, threshold, sustain)
+    return float(t[i]) if i is not None and i < peak_idx else float("nan")
+
+
 def decay_start(dev: np.ndarray, peak_idx: int, stop_idx: int, sample_rate_hz: float,
                 fraction: float = DECAY_START_FRACTION) -> int:
     """Where the decay fit starts: the first sample after the peak where the

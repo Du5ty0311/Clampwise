@@ -143,6 +143,26 @@ def test_a_cell_s_files_are_put_side_by_side():
     assert rows["Full_Field.abf"]["connected"] == "yes"
     assert cc.values["n_connected"] == 2 and "ROI2" in cc.values["patterns_connected"]
     assert any(f.code == "direct photocurrent" for f in cc.flags)
+    # the patterns against each other (not two p values side by side): Fisher's exact on successes over windows
+    from scipy import stats as sps
+
+    pairs = {(r["pattern_a"], r["pattern_b"]): r for r in cc.tables["comparisons"]}
+    assert set(pairs) == {("ROI1", "ROI2"), ("ROI1", "Full field"), ("ROI2", "Full field")}      # the direct one left out
+    one = pairs[("ROI1", "ROI2")]
+    want = sps.fisher_exact([[one["successes_a"], one["windows_a"] - one["successes_a"]],
+                             [one["successes_b"], one["windows_b"] - one["successes_b"]]])[1]
+    assert one["p"] == pytest.approx(want) and one["p_holm"] >= one["p"] and one["different"]
+    assert all(r["p_holm"] >= r["p"] and r["different"] == (r["p_holm"] < 0.05) for r in pairs.values())
+    assert "ROI1 against ROI2" in cc.values["comparison"]
+    lo, hi = rows["ROI2.abf"]["success_rate_low"], rows["ROI2.abf"]["success_rate_high"]
+    assert 0 <= lo < rows["ROI2.abf"]["success_rate"] <= hi <= 1 and rows["ROI2.abf"]["smallest_detectable"] > 0
+
+
+def test_holm_s_correction():
+    from clampwise.analysis.connectivity import holm
+
+    assert holm([0.01, 0.04, 0.03]) == pytest.approx([0.03, 0.06, 0.06])
+    assert holm([0.5]) == [0.5] and holm([]) == []
 
 
 def test_health_sweep_by_sweep_calls_a_depolarized_cell_unhealthy_in_words():

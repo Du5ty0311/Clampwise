@@ -201,6 +201,11 @@ class Pulse:
     time_to_half_peak_s: float = NAN        # from the stimulus to half the peak (Turesson 2013's rise)
     decay_80_20_s: float = NAN              # the decay from 80% to 20% of the peak (Ahmed & Pare 2023)
     initial_slope: float = NAN              # units per ms over the first half of the rise (Popescu 2007)
+    onset_noise_s: float = NAN              # the onset on the average by each definition (kinetics.ONSET_...)
+    onset_10pct_s: float = NAN
+    onset_foot_s: float = NAN
+    decay_tau_weighted_s: float = NAN       # two exponentials: (a1 tau1 + a2 tau2) / (a1 + a2)
+    decay_two_exponentials: bool = False    # whether two fit the decay better than one (F test, p < 0.01)
     flags: list[str] = field(default_factory=list)
 
 
@@ -253,9 +258,18 @@ def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, bas
         if e1 > e0 and e1 <= dev.size:
             p.at_light_end = float(np.mean(dev[e0:e1]))
     onset = kinetics.find_onset(dev, r0, peak + 1, s["onset_noise_sd"] * p.noise_sd, max(1, int(round(0.5e-3 * fs))))
+    # the onset by the field's other two definitions, beside the lab's (whichever is chosen is the latency)
+    if p.detected:
+        p.onset_10pct_s = kinetics.onset_fraction(t, dev, r0, peak) - t0
+        p.onset_foot_s = kinetics.onset_foot(t, dev, r0, peak) - t0
     if onset is not None and onset < peak:
         lat = float(t[onset] - t0)
-        p.onset_raw_s = lat
+        p.onset_raw_s = p.onset_noise_s = lat
+        chosen = s.get("onset_definition", kinetics.ONSET_NOISE)
+        if chosen == kinetics.ONSET_FRACTION:
+            lat = p.onset_10pct_s
+        elif chosen == kinetics.ONSET_FOOT:
+            lat = p.onset_foot_s
         # the initial slope (the LTP readout: Popescu et al. 2007): a line over the first half of the rise,
         # from the onset to half the peak, in units per ms
         half_i = onset + int(np.argmax(dev[onset:peak + 1] >= 0.5 * dev[peak])) if peak > onset else onset
@@ -265,10 +279,10 @@ def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, bas
         if light_blank_s > 0 and onset <= r0 + max(1, int(round(0.1e-3 * fs))):
             p.flags.append(f"the response is already under way where the light's blank ends ({blank * 1e3:.1f} ms): "
                            "its onset lies inside the blank and is not known")
-        if light and lat < s["light_min_latency_ms"] / 1e3:
-            p.flags.append(f"onset {lat * 1e3:.2f} ms after the light, sooner than a synapse can answer "
+        if light and p.onset_raw_s < s["light_min_latency_ms"] / 1e3:
+            p.flags.append(f"onset {p.onset_raw_s * 1e3:.2f} ms after the light, sooner than a synapse can answer "
                            f"({s['light_min_latency_ms']:g} ms): the light itself or noise; latency not measured")
-        else:
+        elif np.isfinite(lat):
             p.latency_avg_s = lat
     peak_dev = dev[peak]
     end, returned = r1, True
@@ -306,6 +320,8 @@ def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, bas
         start = kinetics.decay_start(dev, peak, decay_stop, fs)
         tau, r2, amp = _decay(t, ys, start, decay_stop, p.baseline, purpose="evoked decay tau, from 80% of the peak")
         p.decay_tau_s, p.decay_r2 = tau, r2
+        p.decay_tau_weighted_s, p.decay_two_exponentials = _two_exponentials(t, ys, start, decay_stop, p.baseline,
+                                                                             polarity, tau)
         if np.isfinite(tau):
             p.tail = (amp, tau, float(t[start]))
             start50 = kinetics.decay_start(dev, peak, decay_stop, fs, fraction=0.5)
@@ -324,6 +340,42 @@ def _measure(t: np.ndarray, y: np.ndarray, t0: float, fs: float, s: dict, *, bas
     if c1 - c0 > 2:
         p.integral = float(np.trapezoid(y[c0:c1] - p.baseline, t[c0:c1]) * 1e3)    # pA*ms (fC), turned into pC below; mV*ms as is
     return p
+
+
+def _two_exponentials(t, y, i0, i1, baseline, polarity, tau_one) -> tuple[float, bool]:
+    """(the amplitude-weighted tau of a two-exponential fit of the decay over [i0, i1), whether two exponentials
+    fit it better than one). Better: both components carry at least 10% of the amplitude, their taus differ at
+    least twofold, the slow one lies inside the window, and an F test of the two fits gives p < 0.01. The
+    weighted tau, (a1 tau1 + a2 tau2) / (a1 + a2), is what a decay with a fast and a slow part is reported by;
+    for a decay that is one exponential it equals that one's tau."""
+    from scipy import stats as sps
+
+    n = i1 - i0
+    if n < 20 or not np.isfinite(tau_one) or tau_one <= 0:
+        return NAN, False
+    x = t[i0:i1] - t[i0]
+    z = polarity * (np.asarray(y[i0:i1], float) - baseline)
+    try:
+        two = fits.biexp_decay(x, z, tau_mono=tau_one, purpose="evoked decay, two exponentials")
+    except Exception:
+        return float(tau_one), False
+    if not two.ok:                                   # no second component to find: one exponential it is
+        return float(tau_one), False
+    tau_w = float(two["tau_w"])
+    one = fits.exp_decay(x, z, purpose="evoked decay, one exponential (against two)")
+    if not one.ok or not np.isfinite(tau_w) or tau_w <= 0:
+        return float(tau_one), False
+    rss1 = float(np.sum((z - one.curve(x)) ** 2))
+    rss2 = float(np.sum((z - two.curve(x)) ** 2))
+    # samples of a filtered trace are not independent: count one per 0.5 ms for the test
+    n_eff = max(8.0, (x[-1] - x[0]) / 0.5e-3)
+    better = False
+    if rss2 > 0 and rss1 > rss2 and n_eff > 6:
+        f = ((rss1 - rss2) / 2.0) / (rss2 / (n_eff - 5.0))
+        fast = float(two["fast_fraction"])
+        better = bool(sps.f.sf(f, 2, n_eff - 5.0) < 0.01 and 0.1 <= fast <= 0.9
+                      and two["tau2"] >= 2.0 * two["tau1"] and not two.params.get("slow_beyond_window", False))
+    return (tau_w if better else float(tau_one)), better
 
 
 def _decay(t, y, i0, i1, baseline, purpose: str = "") -> tuple[float, float, float]:
@@ -470,10 +522,14 @@ def _pulse_row(p: Pulse, p1_amplitude: float, vc: bool, spike_at: np.ndarray) ->
         "pulse": p.number, "time_s": p.time_s, "amplitude": p.amplitude, "amplitude_local": p.amplitude_local,
         "pn_p1": float(p.amplitude / p1_amplitude) if finite else NAN,
         "latency_median_ms": p.latency_median_s * 1e3, "jitter_ms": p.jitter_s * 1e3,
-        "latency_average_ms": p.latency_avg_s * 1e3, "time_to_peak_ms": p.peak_time_s * 1e3,
+        "latency_average_ms": p.latency_avg_s * 1e3, "latency_noise_ms": p.onset_noise_s * 1e3,
+        "latency_10pct_ms": p.onset_10pct_s * 1e3, "latency_foot_ms": p.onset_foot_s * 1e3,
+        "time_to_peak_ms": p.peak_time_s * 1e3,
         "rise_10_90_ms": p.rise_10_90_s * 1e3, "rise_20_80_ms": p.rise_20_80_s * 1e3,
         "decay_tau_ms": p.decay_tau_s * 1e3, "decay_r2": p.decay_r2,
-        "decay_tau_from_peak_ms": p.decay_tau_from_peak_s * 1e3, "half_width_ms": p.half_width_s * 1e3,
+        "decay_tau_from_peak_ms": p.decay_tau_from_peak_s * 1e3,
+        "decay_tau_weighted_ms": p.decay_tau_weighted_s * 1e3, "decay_two_exponentials": p.decay_two_exponentials,
+        "half_width_ms": p.half_width_s * 1e3,
         "time_to_half_peak_ms": p.time_to_half_peak_s * 1e3, "decay_80_20_ms": p.decay_80_20_s * 1e3,
         "initial_slope": p.initial_slope,
         "integral": p.integral / (1e3 if vc else 1.0), "snr": p.snr, "detected": p.detected,
@@ -523,6 +579,13 @@ SETTINGS = (
             "from the baseline past this many times its noise that stays there for 0.5 ms (the lab's criterion: "
             "twice the noise, then growing without returning to baseline; 3 was Clampwise's).", "",
             "Ahmed, Headley & Pare 2021", minimum=1.0),
+    Setting("onset_definition", kinetics.ONSET_NOISE, "Onset (latency) read as", "Which definition the latency "
+            "follows; the other two are reported beside it on the average. The lab's: the first departure past the "
+            "noise multiple below that holds for 0.5 ms. 10% of the peak: the last time the rise is under a tenth "
+            "of the peak. The foot: a line through 20% and 80% of the rise, read where it meets the baseline; it "
+            "ignores the noise and reads a little late on a response that begins gently. On single sweeps the last "
+            "two need a clean peak: with small responses the lab's is the steadier.", "",
+            "Ahmed, Headley & Pare 2021; Jonas, Major & Sakmann 1993 (the foot)", choices=kinetics.ONSET_DEFINITIONS),
     Setting("polarity", "auto", "Response direction", "From pulse 1 of the average, or set.",
             choices=("auto", "up", "down"), advanced=True),
 )
@@ -543,6 +606,24 @@ OUTPUTS = (
     Output("p1_rise_20_80", kinetics.DEFINITIONS["rise_20_80"], "ms"),
     Output("p1_decay_tau", kinetics.DEFINITIONS["decay_tau"], "ms"),
     Output("p1_decay_tau_from_peak", "Decay tau fitted from the peak.", "ms", ""),
+    Output("p1_decay_tau_weighted", "Pulse 1's decay as two exponentials when two fit it better than one (each "
+           "at least 10% of the amplitude, taus at least twofold apart, F test p < 0.01): the amplitude-weighted "
+           "tau, (a1 tau1 + a2 tau2) / (a1 + a2). Equal to the single tau when one exponential is enough.", "ms",
+           "the weighted time constant of a double-exponential decay", label="Pulse 1 decay tau (weighted)"),
+    Output("p1_decay_two_exponentials", "yes when pulse 1's decay is two exponentials by that test, no when one "
+           "is enough.", "", label="Pulse 1 decay: two exponentials"),
+    Output("p1_latency_noise", "Pulse 1's onset on the average by the lab's rule: the first departure past the "
+           "noise multiple that holds for 0.5 ms.", "ms", "Ahmed, Headley & Pare 2021",
+           label="Pulse 1 onset (noise rule, average)"),
+    Output("p1_latency_10pct", "Pulse 1's onset on the average as the last time the rise is under 10% of the "
+           "peak.", "ms", "the fraction-of-peak onset", label="Pulse 1 onset (10% of the peak, average)"),
+    Output("p1_latency_foot", "Pulse 1's onset on the average by the extrapolated foot: a line through 20% and 80% "
+           "of the rise, read at the baseline.", "ms", "Jonas, Major & Sakmann 1993",
+           label="Pulse 1 onset (foot, average)"),
+    Output("ppr_mean_of_ratios", "The mean over sweeps of each sweep's own pulse 2 / pulse 1 (sweeps whose pulse 1 "
+           "is a failure left out). Shown beside the paired-pulse ratio for comparison only: a ratio of two noisy "
+           "numbers is skewed upward, so this reads higher than the ratio of the means and can show facilitation "
+           "that is not there.", "ratio", "Kim & Alger 2001", label="Paired-pulse ratio, mean of ratios (biased)"),
     Output("p1_half_width", kinetics.DEFINITIONS["half_width"], "ms"),
     Output("p1_time_to_half_peak", "Pulse 1: from the stimulus to half the peak on the rise (the lab's rise "
            "time).", "ms", "Turesson, Rodriguez-Sierra & Pare 2013", label="Pulse 1 time to half peak"),
@@ -953,7 +1034,7 @@ def _by_condition(recording: Recording, context, s, cond: Conditions, out: Resul
                               "data", severity="note"))
 
 
-@register("evoked", "Evoked responses, every pulse", version=4, types=EVOKED, settings=SETTINGS, outputs=OUTPUTS,
+@register("evoked", "Evoked responses, every pulse", version=5, types=EVOKED, settings=SETTINGS, outputs=OUTPUTS,
           description="Single pulses, paired pulses and trains: each pulse's amplitude, latency, kinetics, charge "
                       "and reliability, measured on the average and sweep by sweep. Sweeps that differ under the "
                       "stimulus (a step family played under it, a rising light) are measured level by level, with "
@@ -1223,11 +1304,18 @@ def run(recording: Recording, context, s) -> Result:
             # later pulse can start on a residue its tail model did not take off)
             pre0 = int(np.searchsorted(t, ons[k, j] - 0.002))
             local = float(np.median(dev[pre0:max(r0 - 1, pre0 + 1)])) if j > 0 else 0.0
-            on = kinetics.find_onset(dev - local, r0, pk, s["onset_noise_sd"] * noise, max(1, int(round(0.5e-3 * fs))))
+            sustain = max(1, int(round(0.5e-3 * fs)))
+            on = kinetics.find_onset(dev - local, r0, pk, s["onset_noise_sd"] * noise, sustain)
             if on is not None:
                 lat = float(t[on] - ons[k, j])
                 if not (light and lat < s["light_min_latency_ms"] / 1e3):
-                    onsets_sweep[k, j] = lat
+                    chosen = s.get("onset_definition", kinetics.ONSET_NOISE)
+                    if chosen != kinetics.ONSET_NOISE and pk - 1 > r0:
+                        # the sweep's own peak near the average's, then the chosen rule on this sweep
+                        peak_k = r0 + int(np.argmax((dev - local)[r0:pk]))
+                        lat = kinetics.onset_by(chosen, t, dev - local, r0, peak_k, 0.0, sustain) - ons[k, j]
+                    if np.isfinite(lat):
+                        onsets_sweep[k, j] = lat
     out.choose("sweep amplitude", f"mean over {s['mean_window_ms']:g} ms at the average's peak time",
                "the same time in every sweep, so a failure reads near zero")
     thresholds = []
@@ -1286,6 +1374,11 @@ def run(recording: Recording, context, s) -> Result:
         "p1_jitter": p1.jitter_s * 1e3, "p1_latency_average": p1.latency_avg_s * 1e3,
         "p1_rise_10_90": p1.rise_10_90_s * 1e3, "p1_rise_20_80": p1.rise_20_80_s * 1e3,
         "p1_decay_tau": p1.decay_tau_s * 1e3, "p1_decay_tau_from_peak": p1.decay_tau_from_peak_s * 1e3,
+        "p1_decay_tau_weighted": p1.decay_tau_weighted_s * 1e3,
+        "p1_decay_two_exponentials": ("yes" if p1.decay_two_exponentials else "no") if np.isfinite(
+            p1.decay_tau_weighted_s) else "",
+        "p1_latency_noise": p1.onset_noise_s * 1e3, "p1_latency_10pct": p1.onset_10pct_s * 1e3,
+        "p1_latency_foot": p1.onset_foot_s * 1e3,
         "p1_half_width": p1.half_width_s * 1e3, "p1_integral": p1.integral / (1e3 if vc else 1.0),
         "p1_time_to_half_peak": p1.time_to_half_peak_s * 1e3, "p1_decay_80_20": p1.decay_80_20_s * 1e3,
         "p1_initial_slope": p1.initial_slope,
@@ -1293,6 +1386,14 @@ def run(recording: Recording, context, s) -> Result:
         "ppr": ratio(p2.amplitude, p1.amplitude) if p2 else NAN,
         "units": units, "integral_units": "pC" if vc else "mV*ms",
     })
+    # the mean of the sweeps' own ratios, beside the ratio of the means it is biased above (Kim & Alger 2001)
+    out.values["ppr_mean_of_ratios"] = NAN
+    if p2 is not None:
+        both = member[:, 0] & member[:, 1] & np.isfinite(per_sweep[:, 0]) & np.isfinite(per_sweep[:, 1])
+        a1, a2 = polarity * per_sweep[both, 0], polarity * per_sweep[both, 1]
+        ok = a1 > (thresholds[0] if np.isfinite(thresholds[0]) else 0.0)
+        if int(ok.sum()) >= 3:
+            out.values["ppr_mean_of_ratios"] = float(np.mean(a2[ok] / a1[ok]))
     if p2 is not None and not moving:
         # pulse 2 against its own pre-pulse baseline on the plain average: the raw ratio, for comparison
         raw = _measure(t, rows[member[:, 1]].mean(axis=0), float(fixed[1]), fs, s, baseline=None, polarity=polarity,

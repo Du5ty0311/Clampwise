@@ -33,10 +33,14 @@ def _channels(signal_units: str, command_units: str, extra: list[Channel] = ()) 
     return out + list(extra)
 
 
-def psc(t: np.ndarray, onset_s: float, amp: float, rise_s: float, decay_s: float) -> np.ndarray:
-    """A synaptic current/potential: amp (1 - e^-t/rise) e^-t/decay from onset, scaled so its peak is amp."""
-    tt = t - onset_s
-    shape = np.where(tt >= 0, (1 - np.exp(-np.maximum(tt, 0) / rise_s)) * np.exp(-np.maximum(tt, 0) / decay_s), 0.0)
+def psc(t: np.ndarray, onset_s: float, amp: float, rise_s: float, decay_s: float, slow_s: float = 0.0,
+        slow_fraction: float = 0.0) -> np.ndarray:
+    """A synaptic current/potential: amp (1 - e^-t/rise) e^-t/decay from onset, scaled so its peak is amp.
+    With ``slow_fraction`` of the decay carried by a second, slower exponential (``slow_s``): a decay of two
+    exponentials, (1 - f) e^-t/decay + f e^-t/slow."""
+    tt = np.maximum(t - onset_s, 0)
+    fall = np.exp(-tt / decay_s) if not slow_fraction else         (1 - slow_fraction) * np.exp(-tt / decay_s) + slow_fraction * np.exp(-tt / slow_s)
+    shape = np.where(t - onset_s >= 0, (1 - np.exp(-tt / rise_s)) * fall, 0.0)
     peak = shape.max() if shape.max() > 0 else 1.0
     return amp * shape / peak
 
@@ -44,8 +48,10 @@ def psc(t: np.ndarray, onset_s: float, amp: float, rise_s: float, decay_s: float
 def evoked(*, n_sweeps: int = 20, fs: float = 20_000.0, sweep_s: float = 1.0, onsets_s=(0.2, 0.25),
            amplitudes=(-50.0, -40.0), rise_s: float = 0.0008, decay_s: float = 0.010, latency_s: float = 0.003,
            jitter_s: float = 0.0002, noise: float = 2.0, holding: float = -70.0, voltage_clamp: bool = True,
-           baseline: float = -20.0, failures: float = 0.0, seed: int = 0, light: bool = True) -> Simulated:
-    """Evoked responses to one or more pulses per sweep, with a TTL trigger channel."""
+           baseline: float = -20.0, failures: float = 0.0, seed: int = 0, light: bool = True,
+           decay_slow_s: float = 0.0, slow_fraction: float = 0.0) -> Simulated:
+    """Evoked responses to one or more pulses per sweep, with a TTL trigger channel. ``slow_fraction`` of the
+    decay on a second exponential of ``decay_slow_s`` gives a two-exponential decay."""
     rng = np.random.default_rng(seed)
     n = int(sweep_s * fs)
     t = np.arange(n) / fs
@@ -60,7 +66,8 @@ def evoked(*, n_sweeps: int = 20, fs: float = 20_000.0, sweep_s: float = 1.0, on
             trigger[s, lo:lo + int(0.002 * fs)] = 5.0
             a = 0.0 if rng.random() < failures else amp * (1 + 0.1 * rng.normal())
             amps.append(a)
-            signal[s] += psc(t, onset + latency_s + jitter_s * rng.normal(), a, rise_s, decay_s)
+            signal[s] += psc(t, onset + latency_s + jitter_s * rng.normal(), a, rise_s, decay_s, decay_slow_s,
+                             slow_fraction)
         per_sweep_amps.append(amps)
         signal[s] += rng.normal(0, noise, n)
     units = "pA" if voltage_clamp else "mV"
@@ -73,6 +80,7 @@ def evoked(*, n_sweeps: int = 20, fs: float = 20_000.0, sweep_s: float = 1.0, on
                     epochs=[[Epoch("hold", 0.0, sweep_s, holding)] for _ in range(n_sweeps)])
     truth = {"onsets_s": list(onsets_s), "amplitudes": list(amplitudes), "per_sweep_amplitudes": per_sweep_amps,
              "rise_s": rise_s, "decay_s": decay_s, "latency_s": latency_s, "jitter_s": jitter_s,
+             "decay_slow_s": decay_slow_s, "slow_fraction": slow_fraction,
              "ppr": amplitudes[1] / amplitudes[0] if len(amplitudes) > 1 else float("nan"), "noise": noise,
              "failures": failures, "kind": "light" if light else "electrical"}
     return Simulated(rec, truth)

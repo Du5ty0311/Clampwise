@@ -76,6 +76,40 @@ def evoked() -> list[Row]:
                     "a threshold crossing lags the true onset"))
     rows.append(Row("evoked", "single pulse", "jitter (ms)", 0.2, e.values["p1_jitter"], 0.08))
     rows.append(Row("evoked", "single pulse", "decay tau (ms)", 10.0, e.values["p1_decay_tau"], 0.5))
+    rows.append(Row("evoked", "single pulse", "decay tau, weighted (ms): one exponential is enough", 10.0,
+                    e.values["p1_decay_tau_weighted"], 0.5))
+    rows.append(Row("evoked", "single pulse", "two exponentials (1 yes, 0 no)", 0.0,
+                    float(e.values["p1_decay_two_exponentials"] == "yes"), 0.0))
+    # the onset by the field's other two definitions: their true values read on the noise-free waveform
+    from clampwise.analysis.tools import kinetics
+
+    fine_t = np.arange(int(0.05 * 200_000)) / 200_000.0
+    shape = simulate.psc(fine_t, 0.003, 1.0, sim.truth["rise_s"], sim.truth["decay_s"])
+    top = int(np.argmax(shape))
+    for name, true_ms, key in (("10% of the peak", kinetics.onset_fraction(fine_t, shape, 0, top) * 1e3, "p1_latency_10pct"),
+                               ("the foot (20-80% line)", kinetics.onset_foot(fine_t, shape, 0, top) * 1e3, "p1_latency_foot")):
+        rows.append(Row("evoked", "single pulse", f"onset by {name}, on the average (ms)", true_ms, e.values[key], 0.2,
+                        "the average of sweeps jittered by 0.2 ms begins early: the median of the sweeps' is the latency"))
+    for definition, true_ms in ((kinetics.ONSET_FRACTION, kinetics.onset_fraction(fine_t, shape, 0, top) * 1e3),
+                                (kinetics.ONSET_FOOT, kinetics.onset_foot(fine_t, shape, 0, top) * 1e3)):
+        alt = pipeline.analyze(sim.recording, pipeline.Settings(by_analysis={"evoked": {"onset_definition": definition}}))
+        rows.append(Row("evoked", "single pulse", f"latency median with onset read as {definition.split(':')[0]} (ms)",
+                        true_ms, alt.results["evoked"].values["p1_latency_median"], 0.15))
+    # a decay of two exponentials: the amplitude-weighted tau, its truth taken where the fit starts (80% of the peak)
+    for fraction, slow in ((0.4, 0.040), (0.3, 0.060)):
+        two = simulate.evoked(onsets_s=(0.2,), amplitudes=(-80.0,), decay_s=0.005, decay_slow_s=slow,
+                              slow_fraction=fraction, n_sweeps=40, seed=3, sweep_s=0.6)
+        got = pipeline.analyze(two.recording, pipeline.Settings(by_analysis={"evoked": {"decay_window_ms": 150.0}}))
+        long_t = np.arange(int(0.3 * 200_000)) / 200_000.0
+        wave = simulate.psc(long_t, 0.0, 1.0, two.truth["rise_s"], 0.005, slow, fraction)
+        pk = int(np.argmax(wave))
+        at = long_t[pk + int(np.argmax(wave[pk:] <= 0.8))]
+        a1, a2 = (1 - fraction) * np.exp(-at / 0.005), fraction * np.exp(-at / slow)
+        case = f"decay of two exponentials (5 ms, and {fraction:.0%} at {slow * 1e3:g} ms)"
+        rows.append(Row("evoked", case, "weighted tau (ms)", (a1 * 5.0 + a2 * slow * 1e3) / (a1 + a2),
+                        got.results["evoked"].values["p1_decay_tau_weighted"], 1.5))
+        rows.append(Row("evoked", case, "two exponentials (1 yes, 0 no)", 1.0,
+                        float(got.results["evoked"].values["p1_decay_two_exponentials"] == "yes"), 0.0))
     for hz in (8, 20, 50, 100):
         isi = 1.0 / hz
         sim = simulate.evoked(onsets_s=tuple(0.1 + isi * k for k in range(8)),
@@ -90,6 +124,14 @@ def evoked() -> list[Row]:
     sim = simulate.evoked(failures=0.3, n_sweeps=60, seed=8)
     e = pipeline.analyze(sim.recording).results["evoked"]
     rows.append(Row("evoked", "30% failures", "success rate", 0.7, e.values["p1_success_rate"], 0.1))
+    # the ratio of the means against the mean of the ratios: on noisy sweeps the second reads high (Kim & Alger 2001)
+    noisy = simulate.evoked(onsets_s=(0.2, 0.25), amplitudes=(-20.0, -16.0), noise=4.0, n_sweeps=120, seed=11)
+    e = pipeline.analyze(noisy.recording).results["evoked"]
+    truth = np.array(noisy.truth["per_sweep_amplitudes"]).mean(axis=0)
+    rows.append(Row("evoked", "paired pulses on noisy sweeps", "PPR, ratio of the means", truth[1] / truth[0],
+                    e.values["ppr"], 0.04))
+    rows.append(Row("evoked", "paired pulses on noisy sweeps", "the mean of ratios reads above it (1 yes, 0 no)", 1.0,
+                    float(e.values["ppr_mean_of_ratios"] > e.values["ppr"]), 0.0, "the bias the ratio of means avoids"))
     # the lab's photostim-on-steps protocol: each step level on its own, the reversal from the fixed latency
     for e_rev, v_rest, rm in ((-10.0, -60.0, 100.0), (-62.0, -65.0, 60.0), (-75.0, -55.0, 120.0)):
         sim = simulate.photostim_steps(e_rev=e_rev, v_rest=v_rest, rm_mohm=rm, seed=2)
@@ -120,6 +162,23 @@ def connectivity() -> list[Row]:
         c = r.results["connectivity"].values
         case = f"light on 20 sweeps at 0 pA, {success:.0%} of pulses answered"
         true_rate = float(np.mean([h[0] for h in sim.truth["hits"]]))
+        if success == 0.6:
+            # the success rate's interval holds the truth, and is Wilson's (12 of 20: 0.387 to 0.781)
+            from clampwise.analysis.tools import fits
+
+            lo, hi = fits.wilson(int(c["successes"]), int(c["n_windows"]))
+            rows.append(Row("connectivity", case, "the 95% interval holds the true rate (1 yes, 0 no)", 1.0,
+                            float(c["success_rate_low"] <= true_rate <= c["success_rate_high"]), 0.0))
+            rows.append(Row("connectivity", case, "interval, lower end (Wilson)", lo, c["success_rate_low"], 1e-9))
+            rows.append(Row("connectivity", "Wilson's interval for 12 of 20", "lower end", 0.3866, fits.wilson(12, 20)[0],
+                            0.0005, "Brown, Cai & DasGupta 2001's formula, worked by hand"))
+            rows.append(Row("connectivity", "Wilson's interval for 12 of 20", "upper end", 0.7812, fits.wilson(12, 20)[1],
+                            0.0005))
+        if success == 1.0:
+            # every response is well above what the recording can detect; the limit is a few noise SDs
+            rows.append(Row("connectivity", case, "smallest detectable response under the true one (1 yes, 0 no)", 1.0,
+                            float(0 < c["smallest_detectable"] < abs(sim.truth["amplitudes"][0])), 0.0,
+                            f"limit {c['smallest_detectable']:.2f} mV, response {sim.truth['amplitudes'][0]:.1f} mV"))
         rows.append(Row("connectivity", case, "connected (1 yes, 0 no)", float(true_rate > 0), float(c["connected"] == "yes"),
                         0.0, f"p = {c['p']:.3f}, false-positive rate {c['false_positive_rate']:.0%}"))
         rows.append(Row("connectivity", case, "success rate", true_rate, c["success_rate"], 0.06,

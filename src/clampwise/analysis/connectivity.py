@@ -41,7 +41,7 @@ import numpy as np
 from ..core.recording import Recording
 from .registry import Output, Setting, register
 from .result import Flag, Result
-from .tools import kinetics, ledger
+from .tools import fits, kinetics, ledger
 
 NAN = float("nan")
 DRAWS = 2000
@@ -99,6 +99,16 @@ OUTPUTS = (
     Output("success_rate", "The share of windows whose departure beats the sham threshold (or that hold a spike).",
            "fraction", label="Success rate", headline=True),
     Output("successes", "How many windows are successes.", "count", label="Successes"),
+    Output("success_rate_low", "The lower end of the success rate's 95% interval (Wilson's score interval: sound "
+           "for few windows, where the usual plus-or-minus is not).", "fraction",
+           "Wilson 1927; Brown, Cai & DasGupta 2001", label="Success rate, 95% interval from"),
+    Output("success_rate_high", "The upper end of that interval.", "fraction",
+           "Wilson 1927; Brown, Cai & DasGupta 2001", label="Success rate, 95% interval to"),
+    Output("smallest_detectable", "The smallest response a window could have held and still counted as a success: "
+           "the sham threshold times the sweeps' median baseline noise. A connection whose responses are smaller "
+           "than this cannot be told from none in this recording: 'not connected' means 'none this large'.",
+           "signal units", "detection limits of a connection: Campagnola et al. 2022",
+           label="Smallest detectable response"),
     Output("n_windows", "Response windows: every pulse of every sweep measured.", "count", label="Windows"),
     Output("n_sham_windows", "Sham windows pooled for the null distribution.", "count", label="Sham windows"),
     Output("latency_median", "Median onset of the successes after the stimulus (the lab's onset: past twice the "
@@ -143,7 +153,7 @@ def _windows(st, sweeps: list[int], n_pulses: int) -> np.ndarray:
     return np.vstack([np.asarray(st.times_s[i][:n_pulses], float) for i in sweeps])
 
 
-@register("connectivity", "Connected or not", version=1, types={"cc_evoked", "vc_evoked"}, settings=SETTINGS,
+@register("connectivity", "Connected or not", version=2, types={"cc_evoked", "vc_evoked"}, settings=SETTINGS,
           outputs=OUTPUTS, requires=("evoked",),
           description="Whether the recorded cell answers the stimulus more often than chance: every response "
                       "window against matched sham windows in the same sweeps, with the false-positive rate "
@@ -300,8 +310,10 @@ def run(recording: Recording, context, s) -> Result | None:
             continue
         r_j = float(np.median(rows_z[hv, j]))
         d_j = draw_medians([shams[k] for k in range(len(sweeps)) if hv[k]], DRAWS // 4)
+        low, high = fits.wilson(int(success[:, j].sum()), int(hv.sum()))
         pulse_rows.append({"pulse": j + 1, "n_windows": int(hv.sum()), "successes": int(success[:, j].sum()),
                            "success_rate": float(success[:, j].sum() / hv.sum()),
+                           "success_rate_low": low, "success_rate_high": high,
                            "p": float((1 + np.sum(d_j >= r_j)) / (1 + d_j.size)),
                            "spikes": int(spiked[:, j].sum())})
     # the successes' direction and fixed peak time, from their average (aligned on the stimulus)
@@ -337,8 +349,12 @@ def run(recording: Recording, context, s) -> Result | None:
     early = len(early_keys)
     lats = np.array(list(lat.values()))
     n_succ = int(success.sum())
+    rate_low, rate_high = fits.wilson(n_succ, int(have.sum()))
+    measured = noises[np.isfinite(noises) & have.any(axis=1)]
     out.values.update({
         "p": p, "threshold_z": threshold, "successes": n_succ, "success_rate": float(n_succ / have.sum()),
+        "success_rate_low": rate_low, "success_rate_high": rate_high,
+        "smallest_detectable": float(threshold * np.median(measured)) if measured.size else NAN,
         "latency_median": float(np.median(lats)) * 1e3 if lats.size else NAN,
         "jitter": float(np.std(lats, ddof=1)) * 1e3 if lats.size > 1 else NAN, "n_early": early,
         "efficacy": float(np.mean([amp[key] for key in all_keys if not spiked[key]])) if any(not spiked[key] for key in all_keys) else NAN,
@@ -434,10 +450,25 @@ CELL_OUTPUTS = (
     Output("patterns_not", "The patterns whose recordings are not connected.", "", label="Patterns not connected",
            level="cell"),
     Output("summary", "Each file's verdict in words, in time order.", "", label="Summary", level="cell"),
+    Output("comparison", "Each pair of patterns compared directly: their successes over windows by Fisher's exact "
+           "test, the p values corrected over the pairs (Holm). One pattern passing its own test and another "
+           "failing its own is not a difference between them: this test is.", "",
+           "Fisher's exact test; Nieuwenhuis, Forstmann & Wagenmakers 2011", label="Patterns compared",
+           level="cell"),
 )
 
 
-@register("connectivity_cell", "Connected or not, over a cell's files", version=1, types={"cc_evoked", "vc_evoked"},
+def holm(p: list[float]) -> list[float]:
+    """Holm's step-down correction of ``p`` over its own length, in the order given."""
+    order = np.argsort(p)
+    out, worst = [NAN] * len(p), 0.0
+    for rank, i in enumerate(order):
+        worst = max(worst, min(1.0, (len(p) - rank) * p[i]))
+        out[i] = worst
+    return out
+
+
+@register("connectivity_cell", "Connected or not, over a cell's files", version=2, types={"cc_evoked", "vc_evoked"},
           outputs=CELL_OUTPUTS, level="cell",
           description="A cell's recordings with a stimulus side by side (the targeted cell alone, each region, "
                       "the full field): connected or not, success rate, latency and jitter, amplitude with and "
@@ -447,7 +478,7 @@ def run_cell(cell, s) -> Result | None:
     members = [m for m in cell.members if m.result("connectivity") is not None]
     if not members:
         return None
-    out = Result("connectivity_cell", 1)
+    out = Result("connectivity_cell", 2)
 
     def when(m):
         rec = m.recording
@@ -460,7 +491,10 @@ def run_cell(cell, s) -> Result | None:
         v = c.values
         rows.append({"file": m.name, "pattern": v.get("pattern", ""), "connected": v.get("connected", ""),
                      "p": v.get("p", NAN), "success_rate": v.get("success_rate", NAN),
+                     "success_rate_low": v.get("success_rate_low", NAN),
+                     "success_rate_high": v.get("success_rate_high", NAN),
                      "successes": v.get("successes", NAN), "n_windows": v.get("n_windows", NAN),
+                     "smallest_detectable": v.get("smallest_detectable", NAN),
                      "latency_median_ms": v.get("latency_median", NAN), "jitter_ms": v.get("jitter", NAN),
                      "efficacy": v.get("efficacy", NAN), "potency": v.get("potency", NAN),
                      "direct_photocurrent": v.get("direct_photocurrent", ""), "units": v.get("units", "")})
@@ -475,6 +509,27 @@ def run_cell(cell, s) -> Result | None:
                                                + (f", {r['latency_median_ms']:.1f} ms)" if np.isfinite(r['latency_median_ms'])
                                                   else ")") if np.isfinite(r["p"]) else "")
                                             for r in rows)})
+    # the patterns against each other: successes over windows, Fisher's exact test, Holm over the pairs
+    from scipy import stats as sps
+
+    tested = [r for r in rows if r["connected"] in ("yes", "no") and np.isfinite(r["successes"])
+              and np.isfinite(r["n_windows"]) and r["n_windows"] > 0]
+    pairs = [(a, b) for i, a in enumerate(tested) for b in tested[i + 1:]]
+    raw = [float(sps.fisher_exact([[int(a["successes"]), int(a["n_windows"] - a["successes"])],
+                                   [int(b["successes"]), int(b["n_windows"] - b["successes"])]])[1]) for a, b in pairs]
+    corrected = holm(raw) if raw else []
+    out.tables["comparisons"] = [
+        {"pattern_a": a["pattern"] or a["file"], "pattern_b": b["pattern"] or b["file"],
+         "successes_a": int(a["successes"]), "windows_a": int(a["n_windows"]),
+         "successes_b": int(b["successes"]), "windows_b": int(b["n_windows"]), "p": p_raw, "p_holm": p_adj,
+         "different": bool(p_adj < 0.05)} for (a, b), p_raw, p_adj in zip(pairs, raw, corrected)]
+    out.values["comparison"] = "; ".join(
+        f"{r['pattern_a']} against {r['pattern_b']}: {r['successes_a']} of {r['windows_a']} against "
+        f"{r['successes_b']} of {r['windows_b']} windows, p = {r['p_holm']:.3g}"
+        + (" (different)" if r["different"] else " (no difference shown)") for r in out.tables["comparisons"])
+    if out.tables["comparisons"]:
+        out.choose("patterns compared", "Fisher's exact test on successes over windows, Holm over the pairs",
+                   "a pattern passing its own test and another failing is not a difference between them")
     direct = [r for r in rows if r["direct_photocurrent"] == "yes"]
     if direct:
         out.flags.append(Flag("direct photocurrent", f"{len(direct)} of {len(rows)} file(s) show the recorded cell "

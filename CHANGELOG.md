@@ -34,6 +34,19 @@
   - **Edit said "nothing drawn to edit"** on a graph that drew nothing (the cell-health Rs with no test step).
     The Edit button is then off, with the graph's own reason. The Show menu ticks the graph shown.
   - The Workbench measured everything twice on each change (once for the change, once for its place in Undo).
+- **Three more ways to read a response's onset, decay and paired-pulse ratio, beside the lab's.** In Analyze,
+  Evoked responses has **Onset (latency) read as**: the lab's rule (the first departure past twice the noise that
+  holds for 0.5 ms, the default), 10% of the peak, or the foot (a line through 20% and 80% of the rise, read at
+  the baseline; Jonas, Major & Sakmann 1993), each on the average beside the others whichever is chosen. The
+  decay is also fitted with two exponentials, and when two fit better than one (an F test) the amplitude-weighted
+  tau is given. The mean of the sweeps' own pulse 2 / pulse 1 ratios is shown beside the paired-pulse ratio of
+  the means, marked as biased upward (Kim & Alger 2001): it is never the headline.
+- **A success rate has its interval, a "not connected" its detection limit, and two patterns are compared with
+  each other.** Connected or not gives the success rate's 95% interval (Wilson's, sound for 20 windows) and the
+  smallest response the recording could have detected (the sham threshold times the noise): "not connected"
+  means "none this large". Over a cell's files, each pair of patterns is compared directly (Fisher's exact test
+  on successes over windows, Holm over the pairs): one pattern passing its own test and another failing is not
+  a difference between them.
 - **Connected or not, with the false-positive rate stated.** A connectivity experiment (the light aimed at
   labelled neighbours, one region at a time, with the patched cell opsin-negative) asks whether the recorded cell
   answers more often than chance. The new **Connected or not** analysis takes every light pulse of every sweep as
