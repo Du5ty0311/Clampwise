@@ -36,12 +36,42 @@ class WorkbenchEdit(QtWidgets.QUndoCommand):
     def __init__(self, screen, before: dict, after: dict, what: str) -> None:
         super().__init__(f"workbench: {what}")
         self.screen, self.before, self.after = screen, before, after
+        self._done = True                      # the change is already made when the command is pushed
 
     def redo(self) -> None:
+        if self._done:                         # pushed: nothing to do again (the screen measures once, not twice)
+            self._done = False
+            return
         self.screen._apply_state(self.after)
 
     def undo(self) -> None:
         self.screen._apply_state(self.before)
+
+
+class KeptEdit(QtWidgets.QUndoCommand):
+    """A change to what the project keeps from the Workbench (a measurement kept or deleted, a template saved or
+    deleted, a template run on a protocol's files), undone through the window's stack like any other step.
+    ``before`` and ``after``: {"hands": {path: its kept measurements}, "templates": [...]}."""
+
+    def __init__(self, screen, before: dict, after: dict, what: str) -> None:
+        super().__init__(f"workbench: {what}")
+        self.screen, self.before, self.after = screen, before, after
+        self._done = True                      # the change is already made when the command is pushed
+
+    def redo(self) -> None:
+        if self._done:
+            self._done = False
+            return
+        self.screen._restore_kept(self.after)
+
+    def undo(self) -> None:
+        self.screen._restore_kept(self.before)
+
+
+def able(widget, on: bool, does: str, why_not: str) -> None:
+    """``widget`` enabled when it can do something, its tooltip saying what it does, or why it cannot now."""
+    widget.setEnabled(bool(on))
+    widget.setToolTip(does if on else why_not)
 
 
 class WorkbenchScreen(Screen):
@@ -61,10 +91,10 @@ class WorkbenchScreen(Screen):
         self._click_mode = ""                 # "", "onset", "peak", "threshold", "exclude"
         self._pending = None
         self._quiet = False
-        self.add_action(widgets.primary("Keep this measurement", self.keep, "Saved with the recording; Results "
-                                        "lists it as measured by hand, with every choice (Ctrl+S)"))
-        self.add_action(widgets.button("Save as template...", self.save_template, "The regions, measures, fit and "
-                                       "transforms, to run on every file of a protocol"))
+        self.keep_button = widgets.primary("Keep this measurement", self.keep)
+        self.template_button = widgets.button("Save as template...", self.save_template)
+        self.add_action(self.keep_button)
+        self.add_action(self.template_button)
         # ---- the body: the trace, the table and plot under it
         split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         top = QtWidgets.QWidget()
@@ -79,9 +109,14 @@ class WorkbenchScreen(Screen):
         for key, words in wb.MODES.items():
             self.mode.addItem(words, key)
         self.mode.currentIndexChanged.connect(lambda _i: self._changed("mode"))
+        self.mode.setAccessibleName("Sweeps shown and measured as")
+        self.mode.setToolTip("Measure every sweep on its own, or one trace made from them: their average, their "
+                             "median, or the sweep closest to their mean")
         bar.addWidget(self.mode)
         self.channel = QtWidgets.QComboBox()
         self.channel.currentIndexChanged.connect(lambda _i: self._changed("channel"))
+        self.channel.setAccessibleName("Channel")
+        self.channel.setToolTip("The channel drawn and measured")
         bar.addWidget(self.channel)
         self.show_stimulus = QtWidgets.QCheckBox("Stimulus")
         self.show_stimulus.setChecked(True)
@@ -108,6 +143,9 @@ class WorkbenchScreen(Screen):
         self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.rows_model = RowsModel([], self.table)       # one model, its rows replaced on every measurement
+        self.table.setModel(self.rows_model)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.tabs.addTab(self.table, "Table")
         plot_page = QtWidgets.QWidget()
         pl = box("v", "xs")
@@ -115,9 +153,14 @@ class WorkbenchScreen(Screen):
         self.plot_y = QtWidgets.QComboBox()
         self.plot_x = QtWidgets.QComboBox()
         self.plot_region = QtWidgets.QComboBox()
-        for w, name in ((self.plot_y, "Measure"), (self.plot_x, "against"), (self.plot_region, "region")):
+        for w, name, tip in ((self.plot_y, "Measure", "The measure plotted, one point per sweep (and pulse)"),
+                             (self.plot_x, "against", "What it is plotted against: the sweep's number, its time in "
+                              "the recording, the command level, or another measure"),
+                             (self.plot_region, "region", "The region whose measures are plotted")):
             pbar.addWidget(label(name, "muted"))
             pbar.addWidget(w)
+            w.setAccessibleName(f"Plot: {name}")
+            w.setToolTip(tip)
             w.currentIndexChanged.connect(lambda _i: self._draw_series())
         pbar.addStretch(1)
         pl.addLayout(pbar)
@@ -147,9 +190,12 @@ class WorkbenchScreen(Screen):
 
     @staticmethod
     def _scrolled(widget) -> QtWidgets.QScrollArea:
+        """``widget`` scrolling up and down only: it is as wide as the room, its rows wrapping, so no control
+        ends up past the right edge."""
         s = QtWidgets.QScrollArea()
         s.setWidgetResizable(True)
         s.setFrameShape(QtWidgets.QFrame.NoFrame)
+        s.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         s.setWidget(widget)
         return s
 
@@ -161,20 +207,23 @@ class WorkbenchScreen(Screen):
         self.region_list.setMaximumHeight(110)
         self.region_list.currentRowChanged.connect(self._region_picked)
         dl.addWidget(self.region_list)
-        rb = box("h", "xs")
-        rb.addWidget(widgets.button("Add", self._add_region, "A region over the middle of the view (drag its edges)"))
-        rb.addWidget(widgets.button("Remove", self._remove_region, "", quiet=True))
-        dl.addLayout(rb)
+        self.add_region_button = widgets.button("Add region", self._add_region)
+        self.remove_region_button = widgets.button("Remove region", self._remove_region, quiet=True)
+        dl.addWidget(widgets.Wrap(self.add_region_button, self.remove_region_button, stretch=(1, 1), spacing="xs"))
         self.r_name = QtWidgets.QLineEdit()
         self.r_kind = QtWidgets.QComboBox()
         self.r_kind.addItems(list(wb.REGION_KINDS))
         self.r_start = QtWidgets.QDoubleSpinBox()
         self.r_end = QtWidgets.QDoubleSpinBox()
-        for sp in (self.r_start, self.r_end):
+        for sp, name in ((self.r_start, "The region's start"), (self.r_end, "The region's end")):
             sp.setRange(-1e6, 1e6)
             sp.setDecimals(2)
             sp.setSuffix(" ms")
-        self.r_per_pulse = QtWidgets.QCheckBox("Repeat on each stimulus pulse (times from the pulse)")
+            sp.setAccessibleName(name)
+            sp.setToolTip(f"{name}, in ms from the sweep's start (from each pulse when the region repeats on every "
+                          "pulse)")
+        self.r_kind.setAccessibleName("Region kind")
+        self.r_per_pulse = QtWidgets.QCheckBox("Repeat on each stimulus pulse")
         self.r_pulse = QtWidgets.QSpinBox()
         self.r_pulse.setRange(0, 999)
         self.r_pulse.setSpecialValueText("every pulse")
@@ -184,14 +233,12 @@ class WorkbenchScreen(Screen):
             sig.connect(lambda *_a: self._region_edited())
         dl.addWidget(widgets.field("Name", self.r_name))
         dl.addWidget(widgets.field("Kind", self.r_kind, "baseline: taken off the measures; fit: the fit's stretch"))
-        se = box("h", "xs")
-        se.addWidget(self.r_start)
-        se.addWidget(self.r_end)
-        dl.addLayout(se)
+        dl.addWidget(widgets.field("From, to", widgets.Wrap(self.r_start, self.r_end, stretch=(1, 1), spacing="xs")))
         dl.addWidget(self.r_per_pulse)
         dl.addWidget(widgets.field("Pulse", self.r_pulse, "0: every pulse"))
         dl.addWidget(widgets.hairline())
-        dl.addWidget(label("Measures (Clampfit's Statistics)", "heading"))
+        dl.addWidget(label("Measures", "heading"))
+        dl.addWidget(label("Clampfit's Statistics, in each measure region of each sweep", "hint", wrap=True))
         self.measure_list = QtWidgets.QListWidget()
         self.measure_list.setMaximumHeight(150)
         for key, (title, words) in wb.MEASURES.items():
@@ -252,33 +299,45 @@ class WorkbenchScreen(Screen):
         dl.addWidget(widgets.field("On region", self.fit_region))
         dl.addWidget(widgets.field("Expression", self.fit_custom, "for the typed model"))
         dl.addWidget(widgets.hairline())
-        dl.addWidget(label("Transforms (the raw data stay as they are)", "heading"))
+        dl.addWidget(label("Transforms", "heading"))
+        dl.addWidget(label("Applied in order before measuring; the raw data stay as they are", "hint", wrap=True))
         self.transform_list = QtWidgets.QListWidget()
         self.transform_list.setMaximumHeight(90)
         dl.addWidget(self.transform_list)
-        tb = box("h", "xs")
         add = QtWidgets.QToolButton()
-        add.setText("Add")
+        add.setText("Add transform")
         add.setPopupMode(QtWidgets.QToolButton.InstantPopup)
         menu = QtWidgets.QMenu(add)
         for key, words in wb.TRANSFORMS.items():
             menu.addAction(words, lambda k=key: self._add_transform(k))
         add.setMenu(menu)
-        tb.addWidget(add)
-        tb.addWidget(widgets.button("Remove", self._remove_transform, "", quiet=True))
-        tb.addWidget(widgets.button("Clear", lambda: self._set_transforms([]), "", quiet=True))
-        dl.addLayout(tb)
+        self.add_transform_button = add
+        self.remove_transform_button = widgets.button("Remove", self._remove_transform, quiet=True)
+        self.remove_transform_button.setAccessibleName("Remove transform")
+        self.clear_transforms_button = widgets.button("Clear all", lambda: self._set_transforms([]), quiet=True)
+        self.clear_transforms_button.setAccessibleName("Clear transforms")
+        dl.addWidget(widgets.Wrap(add, self.remove_transform_button, self.clear_transforms_button, spacing="xs"))
+        self.transform_list.currentRowChanged.connect(lambda _r: self._enable())
         dl.addWidget(widgets.hairline())
-        dl.addWidget(label("By click", "heading"))
-        cb = box("h", "xs")
-        for what, tip in (("onset", "Click the trace to set the onset of the sweep under the mouse"),
-                          ("peak", "Click to set the peak"), ("threshold", "Click to set a spike threshold"),
-                          ("exclude", "Click a sweep to leave it out, with a reason")):
-            cb.addWidget(widgets.button(what.capitalize(), lambda _=False, w=what: self._set_click_mode(w), tip))
-        dl.addLayout(cb)
+        dl.addWidget(label("By click on the trace", "heading"))
+        self.click_buttons = {}
+        for what, words, tip in (
+                ("onset", "Set onset", "Then click the trace: the onset of the sweep under the mouse is set there"),
+                ("peak", "Set peak", "Then click the trace: the peak of the sweep under the mouse is set there"),
+                ("threshold", "Set threshold", "Then click the trace: a spike threshold is set there"),
+                ("exclude", "Leave out a sweep", "Then click a sweep: it is left out of the measures, with the "
+                                                 "reason you give")):
+            b = widgets.button(words, lambda _=False, w=what: self._set_click_mode(
+                "" if self._click_mode == w else w), tip)
+            b.setCheckable(True)
+            self.click_buttons[what] = (b, tip)
+        row = [b for b, _tip in self.click_buttons.values()]
+        dl.addWidget(widgets.Wrap(*row[:2], stretch=(1, 1), spacing="xs"))
+        dl.addWidget(widgets.Wrap(*row[2:], stretch=(1, 1), spacing="xs"))
         self.set_words = label("", "muted", wrap=True)
         dl.addWidget(self.set_words)
-        dl.addWidget(widgets.button("Clear what was set and the exclusions", self._clear_overrides, "", quiet=True))
+        self.clear_set_button = widgets.button("Clear clicks and exclusions", self._clear_overrides, quiet=True)
+        dl.addWidget(self.clear_set_button)
         dl.addWidget(widgets.hairline())
         dl.addWidget(label("Kept with this recording", "heading"))
         self.name_box = QtWidgets.QLineEdit("by hand")
@@ -286,27 +345,99 @@ class WorkbenchScreen(Screen):
         self.kept = QtWidgets.QListWidget()
         self.kept.setMaximumHeight(90)
         self.kept.itemDoubleClicked.connect(self._load_kept)
+        self.kept.currentRowChanged.connect(lambda _r: self._enable())
         dl.addWidget(self.kept)
-        kb = box("h", "xs")
-        kb.addWidget(widgets.button("Load", self._load_kept, "Open the kept measurement (double-click does too)"))
-        kb.addWidget(widgets.button("Delete", self._delete_kept, "", quiet=True))
-        dl.addLayout(kb)
+        self.load_kept_button = widgets.button("Load", self._load_kept)
+        self.load_kept_button.setAccessibleName("Load kept")
+        self.delete_kept_button = widgets.button("Delete", self._delete_kept, quiet=True)
+        self.delete_kept_button.setAccessibleName("Delete kept")
+        dl.addWidget(widgets.Wrap(self.load_kept_button, self.delete_kept_button, stretch=(1, 1), spacing="xs"))
         dl.addWidget(label("Templates", "heading"))
         self.template_list = QtWidgets.QComboBox()
+        self.template_list.setAccessibleName("Template")
+        self.template_list.setToolTip("The saved templates: a measurement's regions, measures, fit and transforms, "
+                                      "for every file of a protocol")
+        self.template_list.currentIndexChanged.connect(lambda _i: self._enable())
         dl.addWidget(self.template_list)
-        tpl = box("h", "xs")
-        tpl.addWidget(widgets.button("Apply here", self._apply_template, "The template's regions and measures on "
-                                                                           "this recording's sweeps"))
-        tpl.addWidget(widgets.button("Run on every file of its protocol", self._run_template,
-                                     "Each file measured and kept, as a Clampfit batch"))
-        tpl.addWidget(widgets.button("Delete", self._delete_template, "", quiet=True))
-        dl.addLayout(tpl)
+        self.apply_template_button = widgets.button("Apply here", self._apply_template)
+        self.run_template_button = widgets.button("Run on its protocol's files", self._run_template)
+        self.delete_template_button = widgets.button("Delete", self._delete_template, quiet=True)
+        self.delete_template_button.setAccessibleName("Delete template")
+        dl.addWidget(widgets.Wrap(self.apply_template_button, self.delete_template_button, stretch=(1, 1),
+                                  spacing="xs"))
+        dl.addWidget(self.run_template_button)
         dl.addStretch(1)
         body = QtWidgets.QWidget()
         body.setLayout(dl)
         outer = box("v")
         outer.addWidget(self._scrolled(body))
         self.details.setLayout(outer)
+        for w, name in ((self.r_pulse, "Which pulse"), (self.direction, "Direction of the peak"),
+                        (self.smooth, "Smoothing points"), (self.onset_method, "Onset by"),
+                        (self.onset_sd, "Onset noise multiple"), (self.fit_model, "Fit model"),
+                        (self.fit_region, "Fit on region")):
+            w.setAccessibleName(name)
+        for combo in body.findChildren(QtWidgets.QComboBox):     # a long choice is cut, never widens the panel
+            combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(10)
+            combo.view().setMinimumWidth(combo.view().sizeHintForColumn(0) + 24)     # its list shows it whole
+        self._enable()
+
+    def _enable(self) -> None:
+        """Every control on when it can do something, off (saying why) when it cannot."""
+        if not hasattr(self, "delete_template_button"):          # called while the panel is still being made
+            return
+        rec, m, project = self._recording, self._m, self.window.project
+        no_rec = "Select a recording in Files first."
+        has = rec is not None
+        stim = has and bool(rec.stimulus.times_s) and any(len(x) for x in rec.stimulus.times_s)
+        able(self.show_stimulus, stim, "Mark each stimulus pulse on the trace (dashed lines)",
+             no_rec if not has else "No stimulus was found in this recording, so there is none to mark.")
+        able(self.show_command, has and rec.command is not None, "Draw the command (the step) under the trace, "
+             "scaled to fit", no_rec if not has else "This recording has no command channel to draw.")
+        able(self.add_region_button, has, "A new region over the middle of the view; drag its edges, or type its "
+             "times", no_rec)
+        region = self._current_region()
+        able(self.remove_region_button, region is not None, "Remove the selected region (Undo brings it back)",
+             "No region is selected.")
+        able(self.r_per_pulse, region is not None and (stim or region.per_pulse), "The region's times count from "
+             "each stimulus pulse, so it repeats on every pulse of every sweep", "No region is selected."
+             if region is None else "No stimulus was found in this recording, so a region cannot repeat on its "
+             "pulses.")
+        able(self.r_pulse, region is not None and region.per_pulse, "0: every pulse; 1, 2...: that pulse only",
+             "For a region that repeats on each stimulus pulse.")
+        able(self.add_transform_button, has, "A step applied to every sweep before it is measured, after the ones "
+             "already listed; the raw data stay as they are", no_rec)
+        k = self.transform_list.currentRow()
+        able(self.remove_transform_button, 0 <= k < len(m.transforms), "Remove the selected transform (Undo brings "
+             "it back)", "No transform is selected." if m.transforms else "There is no transform to remove.")
+        able(self.clear_transforms_button, bool(m.transforms), "Remove every transform (Undo brings them back)",
+             "There is no transform to clear.")
+        for what, (b, tip) in self.click_buttons.items():
+            able(b, has, tip, no_rec)
+            b.setChecked(self._click_mode == what)
+        able(self.clear_set_button, bool(m.overrides or m.exclusions), "Forget every onset, peak and threshold set "
+             "by a click and bring back the sweeps left out (Undo restores them)",
+             "Nothing was set by a click and no sweep is left out.")
+        ready = has and project is not None and self._result is not None
+        able(self.keep_button, ready, "Saved with the recording; Results lists it as measured by hand, with every "
+             "choice (Ctrl+S). Undo takes it back.", "Select a recording of an open project first.")
+        able(self.template_button, has and project is not None, "The regions, measures, fit and transforms, to run "
+             "on every file of a protocol", "Select a recording of an open project first.")
+        picked = self.kept.currentItem() is not None
+        none_kept = "Nothing is kept with this recording yet (Keep this measurement)." if not self.kept.count() \
+            else "Select a kept measurement in the list."
+        able(self.load_kept_button, picked, "Open the selected kept measurement here (double-click does too)",
+             none_kept)
+        able(self.delete_kept_button, picked, "Delete the selected kept measurement (Undo brings it back)",
+             none_kept)
+        tpl = self.template_list.count() > 0 and self.template_list.currentData() is not None
+        none_tpl = "No template is saved yet (Save as template...)."
+        able(self.apply_template_button, tpl and has, "The template's regions, measures, fit and transforms on "
+             "this recording's sweeps", none_tpl if not tpl else no_rec)
+        able(self.run_template_button, tpl, "Every file of the project whose protocol the template names is "
+             "measured and kept, as a Clampfit batch (Undo takes the batch back)", none_tpl)
+        able(self.delete_template_button, tpl, "Delete the selected template (Undo brings it back)", none_tpl)
 
     # ---- the window's calls
     def on_theme(self, palette) -> None:
@@ -328,8 +459,10 @@ class WorkbenchScreen(Screen):
             return
         self._pending = None
         if path is None or self.window.project is None:
-            self._recording, self._path = None, None
+            self._recording, self._path, self._result = None, None, None
             self.plot.clear()
+            self.rows_model.set_rows([])
+            self._enable()
             return
         try:
             self._recording = self.window.recording(path)
@@ -445,6 +578,7 @@ class WorkbenchScreen(Screen):
             self.set_words.setText("; ".join(words))
         finally:
             self._quiet = was_quiet
+        self._enable()
 
     def _show_region(self) -> None:
         r = self._current_region()
@@ -534,6 +668,7 @@ class WorkbenchScreen(Screen):
     def _region_picked(self, _row: int) -> None:
         self._show_region()
         self._highlight_region()
+        self._enable()
 
     def _region_edited(self) -> None:
         r = self._current_region()
@@ -710,6 +845,8 @@ class WorkbenchScreen(Screen):
         self.click_label.setText({"": "", "onset": "Click the trace: the onset", "peak": "Click the trace: the peak",
                                   "threshold": "Click the trace: the spike threshold",
                                   "exclude": "Click a sweep to leave it out"}[mode] + (" (Esc to stop)" if mode else ""))
+        for what, (b, _tip) in self.click_buttons.items():
+            b.setChecked(mode == what)
 
     def _clicked(self, event) -> None:
         if not self._click_mode or self._recording is None or self._result is None:
@@ -762,13 +899,13 @@ class WorkbenchScreen(Screen):
         except Exception as exc:
             self.window.say(f"The measurement failed: {type(exc).__name__}: {exc}")
             self._result = None
+            self.rows_model.set_rows([])
             return
         rows = self._result["rows"]
+        # the table's rows: the sweep as kept (from 0; the model shows it from 1, as every table does)
         shown = [{k: v for k, v in r.items() if k not in ("start_ms", "end_ms")} for r in rows]
-        for r in shown:
-            r["sweep"] = (r["sweep"] + 1) if r["sweep"] is not None else ""
-        self.table.setModel(RowsModel(shown, self.table))
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.rows_model.headings = wb.headings(self._m.measures, self._units(), self._command_units())
+        self.rows_model.set_rows(shown)
         fit = self._result.get("fit")
         self.fit_words.setText(fit["words"] if fit else "No fit yet: choose a model and a fit region in the details "
                                                         "panel.")
@@ -777,6 +914,19 @@ class WorkbenchScreen(Screen):
         self._summarize()
         if draw:
             self._draw()
+
+    def _units(self) -> str:
+        """The units of the channel measured."""
+        try:
+            return wb.channel_named(self._recording, self._m.selection.channel).units
+        except Exception:
+            return ""
+
+    def _command_units(self) -> str:
+        from ...core.recording import Role
+
+        cmd = self._recording.channel(Role.COMMAND) if self._recording is not None else None
+        return cmd.units if cmd is not None else ""
 
     def _draw(self) -> None:
         if self._recording is None or self._result is None:
@@ -823,10 +973,11 @@ class WorkbenchScreen(Screen):
             item.setZValue(-10)
             item.sigRegionChangeFinished.connect(lambda _it, name=r.name: self._region_dragged(name))
             self.plot.addItem(item)
-            text = pg.TextItem(r.name + (" (each pulse)" if r.per_pulse else ""), color=colours[i % len(colours)],
-                               anchor=(0, 1))
-            text.setPos(a, self.plot.viewRange()[1][1])
-            self.plot.addItem(text)
+            # the name rides on the region's left edge, each region a line lower so two names never sit on
+            # each other
+            pg.InfLineLabel(item.lines[0], r.name + (", each pulse" if r.per_pulse else ""),
+                            position=0.97 - 0.07 * (i % 6), anchor=(0, 0.5), color=colours[i % len(colours)],
+                            fill=pg.mkBrush(QtGui.QColor(pal.plot_background)))
             self._region_items[r.name] = item
             if r.per_pulse and self._m.selection.sweeps:
                 k0 = self._m.selection.sweeps[0]
@@ -878,32 +1029,56 @@ class WorkbenchScreen(Screen):
     def _summarize(self) -> None:
         if self._result is None:
             return
-        rows = wb.summary_rows(self._m, self._result)
-        lines = [f"<b>{r['measure']}</b>: mean {r['mean']:.4g}" + (f", SD {r['sd']:.3g}" if np.isfinite(r['sd']) else "")
-                 if np.isfinite(r["mean"]) else f"<b>{r['measure']}</b>: nothing measured"
-                 + (f", median {r['median']:.4g}" if np.isfinite(r['median']) else "") + f" (n = {r['n']})"
-                 for r in rows]
-        self.summary.setText("<br>".join(lines) + "<br><br><i>" + self._m.describe() + "</i>")
+        self.summary.setText("<br>".join(wb.summary_lines(self._m, self._result, self._units())) + "<br><br><i>"
+                             + self._m.describe() + "</i>")
 
     # ---- keeping, templates
     def keep(self) -> None:
         if self._recording is None or self.window.project is None or self._result is None:
             self.window.say("Nothing to keep: select a recording in a project first.")
             return
+        before = self._kept_state()
         self._m.name = self.name_box.text().strip() or "by hand"
-        wb.stamp(self._m, __version__)
-        self.window.project.add_hand(self._path, self._m, wb.summary_rows(self._m, self._result))
+        kept = wb.stamp(wb.HandMeasurement.from_dict(self._m.to_dict()), __version__)
+        self.window.project.add_hand(self._path, kept, wb.summary_rows(kept, self._result))
+        self._commit_kept(before, f"keep '{kept.name}'")
         self._fill_kept()
-        self.window.say(f"Kept '{self._m.name}' with {self._path.name}; Results lists it as measured by hand.")
+        self.window.say(f"Kept '{kept.name}' with {self._path.name}; Results lists it as measured by hand "
+                        "(Undo takes it back).")
+
+    # what the project keeps from here, as one thing that Undo can put back
+    def _kept_state(self, paths=None) -> dict:
+        p = self.window.project
+        paths = [self._path] if paths is None else list(paths)
+        return {"hands": {str(x): [{k: v for k, v in h.items() if k != "id"} for h in p.hands(x)]
+                          for x in paths if x is not None},
+                "templates": [(t.name, t.protocol, t.measurement) for t in p.templates()]}
+
+    def _commit_kept(self, before: dict, what: str) -> None:
+        after = self._kept_state([Path(x) for x in before["hands"]])
+        if after != before:
+            self.window.undo.push(KeptEdit(self, before, after, what))
+
+    def _restore_kept(self, state: dict) -> None:
+        p = self.window.project
+        if p is None:
+            return
+        for path, hands in state["hands"].items():
+            p.set_hands(path, hands)
+        p.set_templates([wb.Template(*t) for t in state["templates"]])
+        self._fill_kept()
+        self._fill_templates()
 
     def _fill_kept(self) -> None:
         self.kept.clear()
-        if self._path is None or self.window.project is None:
-            return
-        for h in self.window.project.hands(self._path):
-            item = QtWidgets.QListWidgetItem(f"{h['name']} ({h['made_at'][:16].replace('T', ' ')})")
-            item.setData(QtCore.Qt.UserRole, h["id"])
-            self.kept.addItem(item)
+        if self._path is not None and self.window.project is not None:
+            for h in self.window.project.hands(self._path):
+                item = QtWidgets.QListWidgetItem(f"{h['name']} ({h['made_at'][:16].replace('T', ' ')})")
+                item.setData(QtCore.Qt.UserRole, h["id"])
+                self.kept.addItem(item)
+            if self.kept.count():
+                self.kept.setCurrentRow(self.kept.count() - 1)        # the newest, ready to load or delete
+        self._enable()
 
     def _load_kept(self, *_a) -> None:
         item = self.kept.currentItem()
@@ -921,8 +1096,11 @@ class WorkbenchScreen(Screen):
         item = self.kept.currentItem()
         if item is None or self.window.project is None:
             return
+        before = self._kept_state()
         self.window.project.remove_hand(item.data(QtCore.Qt.UserRole))
+        self._commit_kept(before, "delete a kept measurement")
         self._fill_kept()
+        self.window.say("The kept measurement is deleted (Undo brings it back).")
 
     def save_template(self) -> None:
         if self._recording is None or self.window.project is None:
@@ -934,16 +1112,24 @@ class WorkbenchScreen(Screen):
                                                      text=self._recording.protocol or "*")
         if not ok:
             return
+        before = self._kept_state()
         self.window.project.save_template(wb.Template.from_measurement(name.strip(), pattern.strip() or "*", self._m))
+        self._commit_kept(before, f"save the template '{name.strip()}'")
         self._fill_templates()
+        self.template_list.setCurrentIndex(max(0, self.template_list.findData(name.strip())))
         self.window.say(f"Template '{name.strip()}' saved for protocols matching '{pattern.strip() or '*'}'.")
 
     def _fill_templates(self) -> None:
+        now = self.template_list.currentData()
+        self.template_list.blockSignals(True)
         self.template_list.clear()
-        if self.window.project is None:
-            return
-        for tpl in self.window.project.templates():
-            self.template_list.addItem(f"{tpl.name} ({tpl.protocol})", tpl.name)
+        if self.window.project is not None:
+            for tpl in self.window.project.templates():
+                self.template_list.addItem(f"{tpl.name} (protocols matching {tpl.protocol})", tpl.name)
+            self.template_list.setCurrentIndex(max(0, self.template_list.findData(now)) if
+                                               self.template_list.count() else -1)
+        self.template_list.blockSignals(False)
+        self._enable()
 
     def _template(self) -> wb.Template | None:
         name = self.template_list.currentData()
@@ -966,15 +1152,17 @@ class WorkbenchScreen(Screen):
             return
         from ...io import load
 
-        done, failed = 0, []
+        done, failed, other = 0, [], 0
         rows = [r for r in project.recordings()]
+        before = self._kept_state([r.path for r in rows])
 
         def work():
-            nonlocal done
+            nonlocal done, other
             for r in rows:
                 try:
                     rec = load(r.path)
                     if not tpl.matches(rec.protocol):
+                        other += 1
                         continue
                     if not rec.stimulus.times_s:
                         from ...analysis.stimulus import find_stimulus
@@ -990,13 +1178,20 @@ class WorkbenchScreen(Screen):
             return done
 
         self.window.in_background(f"Running the template '{tpl.name}'", work)
+        self._commit_kept(before, f"run the template '{tpl.name}'")
         self._fill_kept()
         self.window.say(f"Template '{tpl.name}' measured and kept on {done} file(s)"
-                        + (f"; failed on {len(failed)}: {failed[0]}" if failed else "") + ".")
+                        + (f"; {other} file(s) of other protocols left alone" if other else "")
+                        + (f"; failed on {len(failed)}: {failed[0]}" if failed else "")
+                        + (" (Undo takes the batch back)." if done else
+                           f": no file's protocol matches '{tpl.protocol}'."))
 
     def _delete_template(self) -> None:
         tpl = self._template()
         if tpl is None:
             return
+        before = self._kept_state()
         self.window.project.delete_template(tpl.name)
+        self._commit_kept(before, f"delete the template '{tpl.name}'")
         self._fill_templates()
+        self.window.say(f"Template '{tpl.name}' deleted (Undo brings it back).")

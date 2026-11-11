@@ -120,6 +120,8 @@ class TracePicker(QtWidgets.QDialog):
         self.align.addItem("the stimulus (pulse 1)", 1)
         self.align.addItem("the stimulus (pulse 2)", 2)
         self.align.addItem("the start of the sweep", 0)
+        self.align.setAccessibleName("Align each sweep on")
+        self.align.currentIndexChanged.connect(lambda _i: self._said_selection())
         self.align_field = widgets.field("Align each sweep on", self.align, "Time 0 of each trace", inline=True)
         ll.addWidget(self.align_field)
         ll.addWidget(label("2. Add them as a trace", "heading"))
@@ -129,6 +131,10 @@ class TracePicker(QtWidgets.QDialog):
         self.mode = QtWidgets.QComboBox()
         for k, text in traces.MODES.items():
             self.mode.addItem(text, k)
+        self.mode.setAccessibleName("Draw the new trace as")
+        self.mode.setToolTip("How the trace added next is drawn: the average of its sweeps, every sweep, or the "
+                             "sweep closest to their mean (each trace's own choice is in the list on the right)")
+        self.mode.currentIndexChanged.connect(lambda _i: self._said_selection())
         add.addWidget(self.name, 1)
         add.addWidget(self.mode)
         add.addWidget(widgets.primary("Add as a trace", self._add, "Add the selected sweeps as one named trace"))
@@ -153,12 +159,14 @@ class TracePicker(QtWidgets.QDialog):
                             context=QtCore.Qt.WidgetWithChildrenShortcut)
         rl.addWidget(self.list)
         row = box("h", "s")
+        self.buttons = {}
         for text, tip, slot in (("Remove trace", "Remove the selected trace (Delete)", self._remove),
-                                ("Up", "Draw it earlier", lambda: self._move(-1)),
-                                ("Down", "Draw it later", lambda: self._move(1)),
+                                ("Up", "Draw the selected trace earlier", lambda: self._move(-1)),
+                                ("Down", "Draw the selected trace later", lambda: self._move(1)),
                                 ("Show its sweeps", "Select the selected trace's sweeps on the left",
                                  self._show_sweeps)):
-            row.addWidget(widgets.button(text, slot, tip, quiet=True))
+            self.buttons[text] = (widgets.button(text, slot, tip, quiet=True), tip)
+            row.addWidget(self.buttons[text][0])
         row.addStretch(1)
         rl.addLayout(row)
         row = box("h", "s")
@@ -166,9 +174,12 @@ class TracePicker(QtWidgets.QDialog):
                                  "trace", lambda: self._change_items(True)),
                                 ("Remove selected sweeps from it", "Take the sweeps selected on the left out of the "
                                  "selected trace", lambda: self._change_items(False))):
-            row.addWidget(widgets.button(text, slot, tip, quiet=True))
+            self.buttons[text] = (widgets.button(text, slot, tip, quiet=True), tip)
+            row.addWidget(self.buttons[text][0])
         row.addStretch(1)
         rl.addLayout(row)
+        self.list.itemSelectionChanged.connect(self._enable)
+        self.table.itemSelectionChanged.connect(self._enable)
         self.plot = pg.PlotWidget()
         theme.style_plot(self.plot, self.window_.palette)
         self.plot.addLegend(offset=(10, 10))
@@ -269,7 +280,7 @@ class TracePicker(QtWidgets.QDialog):
                 self.blank.setValue(traces.dsi_blank(self._roles))
         else:
             rec = w.recording(Path(path))
-            starts = list(getattr(rec, "sweep_start_times_s", []) or [])
+            starts = [float(v) for v in np.asarray(getattr(rec, "sweep_start_times_s", ()), float).ravel()]
             self.table.setColumnCount(3)
             self.table.setHorizontalHeaderLabels(["Sweep", "Starts at (s)", "Stimulus"])
             self.table.setRowCount(rec.n_sweeps)
@@ -298,7 +309,35 @@ class TracePicker(QtWidgets.QDialog):
 
     def _said_selection(self) -> None:
         n = len({i.row() for i in self.table.selectedIndexes()})
-        self.picked.setText(f"{n} sweep{'s' if n != 1 else ''} selected (Ctrl or Shift + click to select several)")
+        dsi = bool(self.source.currentData()) and self.source.currentData()[0] == "dsi"
+        how = self.mode.currentText().lower() + ("" if dsi else f", time 0 at {self.align.currentText()}")
+        self.picked.setText(f"{n} sweep{'s' if n != 1 else ''} selected (Ctrl or Shift + click to select several); "
+                            f"added as a trace they are drawn as {how}")
+
+    def _enable(self) -> None:
+        """Each button of the traces list on when it would do something; off, saying why, when it would not."""
+        if not hasattr(self, "buttons"):
+            return
+        i, n = self.list.currentRow() if self.list.selectedIndexes() else -1, len(self.sets)
+        picked = self._selected_items() if self._rows else []
+        none = "The figure has no trace yet: select sweeps and Add as a trace." if not n else \
+            "Select a trace in the list first."
+        key = lambda it: (str(it[0]), int(it[1]), int(it[2]))     # noqa: E731
+        have = {key(it) for it in self.sets[i].items} if 0 <= i < n else set()
+        new = [it for it in picked if key(it) not in have]
+        old = [it for it in picked if key(it) in have]
+        no_sweeps = "Select sweeps in the table on the left first."
+        for text, on, why in (
+                ("Remove trace", 0 <= i < n, none), ("Show its sweeps", 0 <= i < n, none),
+                ("Up", i > 0, none if i < 0 else "The selected trace is already drawn first."),
+                ("Down", 0 <= i < n - 1, none if i < 0 else "The selected trace is already drawn last."),
+                ("+ Add selected sweeps to it", 0 <= i < n and bool(new), none if i < 0 else no_sweeps if not picked
+                 else "Every selected sweep is already in this trace."),
+                ("Remove selected sweeps from it", 0 <= i < n and bool(old), none if i < 0 else no_sweeps
+                 if not picked else "None of the selected sweeps is in this trace.")):
+            b, tip = self.buttons[text]
+            b.setEnabled(bool(on))
+            b.setToolTip(tip if on else why)
 
     def _select_rows(self, rows: list[int]) -> None:
         self.table.clearSelection()
@@ -313,7 +352,7 @@ class TracePicker(QtWidgets.QDialog):
     def _select_time(self) -> None:
         a, b = self.t_from.value(), self.t_to.value()
         rec = self.window_.recording(Path(self._rows[0][0])) if self._rows else None
-        starts = list(getattr(rec, "sweep_start_times_s", []) or []) if rec is not None else []
+        starts = [float(v) for v in np.asarray(getattr(rec, "sweep_start_times_s", ()), float).ravel()]             if rec is not None else []
         self._select_rows([k for k, s in enumerate(starts) if a <= s <= b])
 
     def _select_episode(self) -> None:
@@ -348,12 +387,19 @@ class TracePicker(QtWidgets.QDialog):
                 mode.addItem(text, k)
             mode.setCurrentIndex(max(0, mode.findData(s.mode)))
             mode.currentIndexChanged.connect(lambda _i, s=s, c=mode: self._mode(s, c))
+            mode.setAccessibleName("A trace is drawn as")
+            mode.setToolTip(f"How {s.name} is drawn")
             self.list.setCellWidget(i, 1, mode)
             n = QtWidgets.QTableWidgetItem(str(len(s.items)))
             n.setFlags(n.flags() & ~QtCore.Qt.ItemIsEditable)
             self.list.setItem(i, 2, n)
         self.list.blockSignals(False)
         self.ok.setEnabled(bool(self.sets))
+        self.ok.setToolTip("Draw these traces in the figure's panel" if self.sets else
+                           "The figure has no trace yet: select sweeps and Add as a trace.")
+        if self.sets and not self.list.selectedIndexes():
+            self.list.selectRow(len(self.sets) - 1)              # the trace just made, ready to be changed
+        self._enable()
 
     def _mode(self, s: traces.TraceSet, combo) -> None:
         s.mode = combo.currentData()

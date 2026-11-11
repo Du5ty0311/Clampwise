@@ -2,6 +2,38 @@
 
 ## 1.8.1 — not released yet
 
+- **Buttons that were broken in the Workbench, Figures and the figure builder.** Every button, checkbox, pick
+  list and menu action of the three screens (and of the trace picker and the digitizer) is now pressed by a test,
+  on a simulated recording of every recording type and on copies of real light and step recordings; it fails on
+  a control that raises, does nothing, cannot be undone, or is greyed without saying why
+  (`tests/test_every_control.py`; `docs/development/CONTROLS.md` lists each control with what was checked). What
+  it found, fixed:
+  - **The Workbench's table could crash the screen.** Removing the only measure region, or repeating a region on
+    the pulses of a recording with no stimulus, left a table with no columns whose header still asked for the old
+    ones (an IndexError on every redraw). The table now keeps one model and is told when its columns change.
+  - **The table's Sweep column read one too high** (2 to n + 1), and its headings had no units; they now read
+    Peak (mV), Time of peak (ms), Area (mV·ms), Command (pA). The Summary tab gave n only for measures with
+    nothing measured; every line has its n.
+  - **"Choose traces..." and "Raw traces from the recordings" did nothing** in the figure builder on any
+    recording with more than one sweep (the dialog raised while listing the sweeps). They open.
+  - **The Workbench's side panel was cut off at the right**: Remove (region), the hint lines and the template
+    buttons lay past the edge. Its rows now wrap to the panel's width, and each region's name is on its own line
+    of the trace (two names sat on top of each other).
+  - **Keep, Delete (a kept measurement), Save as template, Delete (a template) and a template's batch run could
+    not be undone.** They go through Undo like every other step.
+  - **Buttons that did nothing now say why they are off**: Remove and Clear with no transform, Load and Delete
+    with nothing kept, Apply here and Run with no template, Stimulus and "Repeat on each stimulus pulse" on a
+    recording with no stimulus, the Groups tab's Up, Down, Hide and Show with no group selected, the trace
+    picker's Up, Down and "Remove selected sweeps from it", the digitizer's Trace and Click before calibration,
+    and the builder's Undo, Redo, Remove panel and right-click entries.
+  - **Figures showed a graph twice.** A light-evoked recording opened on "Amplitude vs. time" in two panels (one
+    per pulse position, one per sweep: they are now named for what a row is), a voltage-step family on the slope
+    resistance twice, and a file with one graph to give showed it four times. A panel never repeats another's
+    graph; with fewer than four to give, the unused panels give up their room and a line says why (for a file
+    whose type is unknown: that only its baseline was measured, and what to do).
+  - **Edit said "nothing drawn to edit"** on a graph that drew nothing (the cell-health Rs with no test step).
+    The Edit button is then off, with the graph's own reason. The Show menu ticks the graph shown.
+  - The Workbench measured everything twice on each change (once for the change, once for its place in Undo).
 - **Connected or not, with the false-positive rate stated.** A connectivity experiment (the light aimed at
   labelled neighbours, one region at a time, with the patched cell opsin-negative) asks whether the recorded cell
   answers more often than chance. The new **Connected or not** analysis takes every light pulse of every sweep as

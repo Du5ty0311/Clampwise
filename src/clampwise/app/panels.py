@@ -214,7 +214,28 @@ def views(run) -> list[View]:
             # results kept before drawables said their domain: the averaged event by its name
             if getattr(d, "domain", "") == "event" or (not getattr(d, "domain", "") and d.label == "averaged event"):
                 out.append(_event_view(res, akey, d, run))
-    return out + _heat_views(run)
+    return _distinct(out) + _heat_views(run)
+
+
+# what one row of a result table is, for a graph's title when two tables give a graph of the same name
+ROW_WORDS = {"pulses": "each pulse position", "sweeps": "every sweep", "steps": "every step", "fi": "f-I curve",
+             "events": "every event", "spikes": "every spike", "timecourse": "over time", "episodes": "every episode",
+             "course": "every response", "windows": "every window", "by_command": "each command level",
+             "by_intensity": "each light level", "patterns": "each pattern"}
+
+
+def _distinct(found: list[View]) -> list[View]:
+    """The views with no two alike in title and units: those that would be get their table's words added
+    ("Amplitude vs. time (each pulse position)" and "... (every sweep)")."""
+    seen: dict[tuple, int] = {}
+    for v in found:
+        seen[(v.title, v.units)] = seen.get((v.title, v.units), 0) + 1
+    for v in found:
+        if seen[(v.title, v.units)] > 1:
+            parts = v.key.split(".")
+            table = parts[1] if len(parts) > 2 else parts[0]
+            v.title = f"{v.title} ({ROW_WORDS.get(table, table.replace('_', ' '))})"
+    return found
 
 
 def _evenly(x: np.ndarray) -> bool:
@@ -446,14 +467,34 @@ def _event_view(res, akey, d, run) -> View:
     return View(f"{akey}.{d.label}", d.label[:1].upper() + d.label[1:], f"[{u or '-'} vs. ms]", draw)
 
 
+EDIT_TIP = ("Edit this graph as a publication figure in the figure builder: its data, colours, axes and labels, "
+            "then export")
+
+
+def drawn_anything(item) -> bool:
+    """Whether a plot item holds data (points, a line, bars or an image), not only axes and reference lines."""
+    for it in item.items:
+        if isinstance(it, (pg.PlotDataItem, pg.ScatterPlotItem)):
+            x, _y = it.getData()
+            if x is not None and len(x):
+                return True
+        elif isinstance(it, pg.BarGraphItem):
+            h = it.opts.get("height")
+            if h is not None and np.size(h):
+                return True
+        elif isinstance(it, pg.ImageItem) and it.image is not None:
+            return True
+    return False
+
+
 def corner_buttons(owner, maximize: bool = True, detach: bool = True) -> list[QtWidgets.QToolButton]:
     """A graph's edit-as-figure, maximize (and restore) and own-window buttons; they emit the
     owner's ``edit_requested``, ``maximize_requested`` and ``detach_requested``."""
     edit = QtWidgets.QToolButton()
     edit.setText("Edit")
-    edit.setToolTip("Edit this graph as a publication figure in the figure builder: its data, colours, axes and "
-                    "labels, then export")
+    edit.setToolTip(EDIT_TIP)
     edit.clicked.connect(lambda: owner.edit_requested.emit(owner))
+    owner.edit_button = edit
     out = [edit]
     if not detach:
         return out
@@ -526,12 +567,17 @@ class Panel(QtWidgets.QFrame):
         else the first not ``taken`` by another panel. Returns the key shown."""
         self._views = all_views
         self.menu.clear()
+        self._actions = {}
         for v in all_views:
-            self.menu.addAction(f"{v.title} {v.units}", lambda k=v.key: self.show_view(k))
+            a = self.menu.addAction(f"{v.title} {v.units}", lambda k=v.key: self.show_view(k))
+            a.setCheckable(True)
+            self._actions[v.key] = a
         keys = [v.key for v in all_views]
-        if self._key not in keys:
-            self._key = next((k for w in self.wanted for k in keys if k.startswith(w)), "") or next(
-                (k for k in keys if k not in taken), keys[0] if keys else "")
+        if self._key not in keys or self._key in taken:
+            # the first graph asked for that no other panel shows, else the first left; none left: nothing (a
+            # panel never repeats another's graph)
+            self._key = next((k for w in self.wanted for k in keys if k.startswith(w) and k not in taken), "") or \
+                next((k for k in keys if k not in taken), "")
         self.show_view(self._key)
         return self._key
 
@@ -543,8 +589,13 @@ class Panel(QtWidgets.QFrame):
         import html
 
         self.title.setText(f"<b>{html.escape(view.title)}</b> {html.escape(view.units)}" if view else
-                           "Nothing to show")
+                           "Nothing more to show")
         self.title.setToolTip(f"{view.title} {view.units}" if view else "")
+        for k, a in getattr(self, "_actions", {}).items():
+            a.setChecked(k == key)
+        self.menu_button.setEnabled(bool(self._views))
+        self.menu_button.setToolTip("What this graph shows (the one shown is ticked)" if self._views else
+                                    "This recording's results give no graph to choose from.")
         legend = item.addLegend(offset=(10, 10))
         legend.clear()
         clear_heatmap(item)
@@ -561,7 +612,9 @@ class Panel(QtWidgets.QFrame):
         elif view is not None:
             text = view.draw(item, self.palette)
         else:
-            text = ""
+            n = len(self._views)
+            text = (f"This recording's results give {n} graph{'s' if n != 1 else ''}, shown in the other panel"
+                    f"{'s' if n != 1 else ''}." if n else "This recording has no results to draw.")
             item.setLabel("bottom", "")
             item.setLabel("left", "")
         legend.setLabelTextColor(self.palette.plot_text)
@@ -573,6 +626,10 @@ class Panel(QtWidgets.QFrame):
             theme.keep_in_frame(item)
         self.readout.setText(text)
         self.readout.setToolTip(text)
+        has = view is not None and (drawn_anything(item) if not heat else view.built() is not None)
+        self.edit_button.setEnabled(has)
+        self.edit_button.setToolTip(EDIT_TIP if has else "Nothing is drawn in this graph, so there is nothing to "
+                                    "edit as a figure" + (f": {text}" if text else "."))
 
     def mouseDoubleClickEvent(self, event) -> None:
         if self.tools and event.pos().y() < self.plot.geometry().top():      # on the title line

@@ -69,6 +69,12 @@ MEASURES = {
     "instantaneous_frequency": ("Instantaneous frequency", "1 over the mean interval between the spikes in the "
                                                            "region, Hz"),
 }
+# each measure's units: "u" stands for the measured channel's own (mV, pA)
+MEASURE_UNITS = {"mean": "u", "sd": "u", "min": "u", "max": "u", "peak": "u", "antipeak": "u", "peak_to_peak": "u",
+                 "time_of_peak": "ms", "time_of_antipeak": "ms", "area": "u·ms", "half_width": "ms", "rise_time": "ms",
+                 "decay_time": "ms", "max_rise_slope": "u/ms", "time_of_max_rise": "ms", "max_decay_slope": "u/ms",
+                 "time_of_max_decay": "ms", "onset_latency": "ms", "slope": "u/ms", "value_at": "u",
+                 "threshold_crossings": "", "spike_count": "", "instantaneous_frequency": "Hz"}
 FIT_MODELS = {
     "exp1": "One exponential (offset free)", "exp1_fixed": "One exponential (offset fixed at the baseline)",
     "exp2": "Two exponentials", "rise1": "Exponential rise", "synaptic": "Synaptic (rise and decay exponentials)",
@@ -723,6 +729,43 @@ def plot_series(rows: list[dict], y_key: str, x_key: str, region: str = "") -> t
         x = np.array([r.get(x_key, NAN) for r in picked], float)
     y = np.array([r.get(y_key, NAN) for r in picked], float)
     return x, y, picked
+
+
+def units_of(measure: str, signal_units: str = "") -> str:
+    """A measure's units on a channel recorded in ``signal_units`` ("mV·ms" for an area in mV)."""
+    return MEASURE_UNITS.get(measure, "").replace("u", signal_units or "units")
+
+
+def headings(measures: list[str], signal_units: str = "", command_units: str = "") -> dict[str, str]:
+    """The table's column names: each measure by its name with its units, and the columns every row has."""
+    out = {"trace": "Trace", "sweep": "Sweep", "region": "Region", "pulse": "Pulse",
+           "time_s": "Sweep starts at (s)", "command": f"Command ({command_units})" if command_units else "Command",
+           "baseline": f"Baseline ({signal_units})" if signal_units else "Baseline", "excluded": "Left out"}
+    for key in measures:
+        u = units_of(key, signal_units)
+        out[key] = MEASURES.get(key, (key,))[0] + (f" ({u})" if u else "")
+    return out
+
+
+def summary_lines(m: HandMeasurement, result: dict, signal_units: str = "") -> list[str]:
+    """The Summary tab's lines (HTML): each measure's mean, SD, median and n over the sweeps, with units."""
+    lines = []
+    for region, measures in result["summary"].items():
+        for key, s in measures.items():
+            name = f"<b>{region}: {MEASURES.get(key, (key,))[0]}</b>"
+            u = units_of(key, signal_units)
+            u = f" {u}" if u else ""
+            if not s["n"]:
+                lines.append(f"{name}: nothing measured (n = 0)")
+                continue
+            lines.append(f"{name}: mean {s['mean']:.4g}{u}"
+                         + (f", SD {s['sd']:.3g}" if np.isfinite(s["sd"]) else "")
+                         + (f", median {s['median']:.4g}" if np.isfinite(s["median"]) else "") + f" (n = {s['n']})")
+    fit = result.get("fit")
+    if fit and fit.get("ok"):
+        lines.append(f"<b>Fit, {FIT_MODELS.get(m.fit_model, m.fit_model)}</b> on {fit.get('region', '')}: "
+                     f"{fit['words']}")
+    return lines
 
 
 def stamp(m: HandMeasurement, version: str = "") -> HandMeasurement:

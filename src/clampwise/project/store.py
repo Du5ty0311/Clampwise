@@ -469,6 +469,26 @@ class Project:
                         "summary": json.loads(r["summary"] or "[]"), "made_at": r["made_at"]})
         return out
 
+    def set_hands(self, path: str | Path, hands: list[dict]) -> None:
+        """The recording's kept hand measurements become exactly ``hands`` (as ``hands`` gives them: name,
+        measurement, summary, made_at), each keeping when it was made: what undoing a Keep or a Delete does."""
+        rid = self._rid(path)
+        with self.db:
+            self.db.execute("DELETE FROM hand WHERE recording_id = ?", (rid,))
+            for h in hands:
+                self.db.execute("INSERT INTO hand (recording_id, name, json, summary, made_at) VALUES (?, ?, ?, ?, ?)",
+                                (rid, h["name"], json.dumps(h["measurement"]),
+                                 json.dumps(h.get("summary") or [], default=float), h.get("made_at") or _now()))
+        self._audit("hand measurements set", path, None, {"names": [h["name"] for h in hands]})
+
+    def set_templates(self, templates: list) -> None:
+        """The project's workbench templates become exactly ``templates`` (undoing a save or a delete)."""
+        with self.db:
+            self.db.execute("DELETE FROM templates")
+            for t in templates:
+                self.db.execute("INSERT OR REPLACE INTO templates VALUES (?, ?, ?, ?)",
+                                (t.name, t.protocol, json.dumps(t.measurement), _now()))
+
     def remove_hand(self, hand_id: int) -> None:
         r = self.db.execute("SELECT h.name, r.path FROM hand h LEFT JOIN recordings r ON r.id = h.recording_id "
                             "WHERE h.id = ?", (hand_id,)).fetchone()

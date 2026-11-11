@@ -144,7 +144,10 @@ class ItemTable(QtWidgets.QWidget):
         return sorted({i.row() for i in self.table.selectedIndexes()})
 
     def _enable(self) -> None:
-        self.remove_button.setEnabled(self.table.rowCount() > 0)
+        on = self.table.rowCount() > 0
+        self.remove_button.setEnabled(on)
+        self.remove_button.setToolTip(f"Remove the selected {self.noun}(s) from the figure (Delete)" if on else
+                                      f"There is no {self.noun} to remove.")
 
     def _emit(self, *_args) -> None:
         if not self._loading:
@@ -276,16 +279,38 @@ class SeriesTable(QtWidgets.QWidget):
         context_menu(self.table, self._menu)
         lay.addWidget(self.table)
         row = box("h", "s")
+        self.buttons = {}
         for text, tip, slot in (("Up", "Draw the selected group earlier", lambda: self._move(-1)),
-                                ("Down", "Draw it later", lambda: self._move(1)),
+                                ("Down", "Draw the selected group later", lambda: self._move(1)),
                                 ("Hide from the figure", "Leave the selected group out of the figure (and its "
                                  "numbers); Show brings it back", lambda: self._show(False)),
                                 ("Show", "Put the selected group back in the figure", lambda: self._show(True)),
                                 ("Reset to the theme", "Every group's look from the theme again", self._reset)):
-            row.addWidget(widgets.button(text, slot, tip, quiet=True))
+            self.buttons[text] = (widgets.button(text, slot, tip, quiet=True), tip)
+            row.addWidget(self.buttons[text][0])
         row.addStretch(1)
         lay.addLayout(row)
         self.setLayout(lay)
+        self.table.itemSelectionChanged.connect(self._enable)
+        self._enable()
+
+    def _enable(self) -> None:
+        """Each button on when it would change something; off, its tooltip saying why, when it would not."""
+        i, n = self.table.currentRow() if self.table.selectedIndexes() else -1, len(self._names)
+        shown = 0 <= i < n and self.table.cellWidget(i, 1) is not None and self.table.cellWidget(i, 1).isChecked()
+        none = "This panel draws no groups yet." if not n else "Select a group in the table first."
+        series, _order = self.value() if n else ({}, [])
+        own = any(k not in getattr(self, "_extra", {}).get(g, {}) for g, d in series.items() for k in d)
+        for text, on, why in (("Up", i > 0, none if i < 0 else "The selected group is already drawn first."),
+                              ("Down", 0 <= i < n - 1, none if i < 0 else "The selected group is already drawn last."),
+                              ("Hide from the figure", shown, none if i < 0 else "The selected group is already "
+                                                                                  "hidden."),
+                              ("Show", 0 <= i < n and not shown, none if i < 0 else "The selected group is already "
+                                                                                    "shown."),
+                              ("Reset to the theme", own, "Every group's look already comes from the theme.")):
+            b, tip = self.buttons[text]
+            b.setEnabled(bool(on))
+            b.setToolTip(tip if on else why)
 
     def set_rows(self, names: list[str], series: dict, defaults: dict) -> None:
         self._loading = True
@@ -328,7 +353,14 @@ class SeriesTable(QtWidgets.QWidget):
                 sig.connect(self._emit)
             for j, w in enumerate((shown, colour, marker, line, width, filled, name_edit), start=1):
                 self.table.setCellWidget(i, j, w)
+            for w, words in ((shown, "shown in the figure"), (colour, "colour"), (marker, "marker"), (line, "line"),
+                             (width, "line width"), (filled, "filled markers"), (name_edit, "name in the legend")):
+                w.setAccessibleName(f"A group's {words}")
+                if not w.toolTip():
+                    w.setToolTip(f"{name or 'The data'}: {words}")
         self._loading = False
+        if hasattr(self, "buttons"):
+            self._enable()
 
     def value(self) -> tuple[dict, list]:
         series = {}
@@ -357,6 +389,7 @@ class SeriesTable(QtWidgets.QWidget):
 
     def _emit(self, *_args) -> None:
         if not self._loading:
+            self._enable()
             self.changed.emit()
 
     def _show(self, on: bool, row: int | None = None) -> None:
@@ -499,6 +532,12 @@ class DigitizeDialog(QtWidgets.QDialog):
                                            "Then click on the curve: every column of that colour is read")
         self.click_button = widgets.button("Click points", lambda: self._mode("points"),
                                            "Then click each point to read it")
+        for w in (self.trace_button, self.click_button):
+            w.setCheckable(True)
+            w.setProperty("oneOfSeveral", True)        # the way of reading in use stays pressed
+        for w in (self.log_x, self.log_y):
+            w.setToolTip("The axis is logarithmic: the two known values are read on a log scale")
+            w.toggled.connect(lambda _on: self._said_table())
         self.names = QtWidgets.QLineEdit("x, y")
         self.names.setToolTip("The two columns' names, with units: e.g. Time (min), Slope (%)")
         for w in (self.log_x, self.log_y, self.trace_button, self.click_button, label("Columns:", "muted"),
@@ -519,6 +558,8 @@ class DigitizeDialog(QtWidgets.QDialog):
         fix.addWidget(label("Right-click a point to remove it.", "hint"))
         fix.addStretch(1)
         lay.addLayout(fix)
+        self.range_said = label("", "muted", wrap=True)
+        lay.addWidget(self.range_said)
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+Z"), self, self.undo_last)
         widgets.resizable(self, lay, "digitize", (900, 700))
         self._mode("calibrate")
@@ -526,13 +567,40 @@ class DigitizeDialog(QtWidgets.QDialog):
     def _mode(self, mode: str) -> None:
         self.mode = mode
         ready = len(self.clicks) == 4
+        need = "Calibrate first: click two known values on each axis."
         self.trace_button.setEnabled(ready)
+        self.trace_button.setToolTip("Then click on the curve: every column of that colour is read" if ready else need)
         self.click_button.setEnabled(ready)
-        self.done.setEnabled(bool(self.points))
+        self.click_button.setToolTip("Then click each point to read it" if ready else need)
+        self.trace_button.setChecked(mode == "trace")
+        self.click_button.setChecked(mode == "points")
+        self._can_finish()
         if mode == "trace":
             self.say.setText("Click on the curve: the columns of its colour are read")
         elif mode == "points":
             self.say.setText("Click each point; they are read as you go")
+
+    def _can_finish(self) -> None:
+        on = bool(self.points) and len(self.clicks) == 4
+        self.done.setEnabled(on)
+        self.done.setToolTip("Make the figure from the digitized points" if on else
+                             "No point is read yet: calibrate, then trace a curve or click points.")
+        self._said_table()
+
+    def _said_table(self) -> None:
+        """The range the points read now span, so a wrong calibration or a log axis is seen at once."""
+        if not hasattr(self, "range_said"):
+            return
+        if not self.points or len(self.clicks) < 4:
+            self.range_said.setText("")
+            return
+        try:
+            t = self.table()
+            x, y = t.iloc[:, 0], t.iloc[:, 1]
+            self.range_said.setText(f"{len(t)} points read: {t.columns[0]} from {x.min():.4g} to {x.max():.4g}, "
+                                    f"{t.columns[1]} from {y.min():.4g} to {y.max():.4g}")
+        except Exception as exc:
+            self.range_said.setText(f"The points cannot be read with this calibration: {exc}")
 
     def calibration(self):
         (cx1, _, vx1), (cx2, _, vx2), (_, ry1, vy1), (_, ry2, vy2) = self.clicks
@@ -577,7 +645,7 @@ class DigitizeDialog(QtWidgets.QDialog):
         self._drop(self._point_marks)
         every = 4 if self.mode == "trace" else 1
         self._point_marks = [self.scene.addEllipse(a - 2, b - 2, 4, 4, self.point_pen) for a, b in self.points[::every]]
-        self.done.setEnabled(bool(self.points))
+        self._can_finish()
 
     def undo_last(self) -> None:
         if self.points:
@@ -592,13 +660,13 @@ class DigitizeDialog(QtWidgets.QDialog):
             self.mode = "calibrate"
             self.say.setText(self.STEPS[len(self.clicks)][2])
             self._mode("calibrate")
-        self.done.setEnabled(bool(self.points))
+        self._can_finish()
 
     def clear_points(self) -> None:
         self.points = []
         self._drop(self._point_marks)
         self._point_marks = []
-        self.done.setEnabled(False)
+        self._can_finish()
 
     def restart(self) -> None:
         self.clear_points()
@@ -635,7 +703,7 @@ class DigitizeDialog(QtWidgets.QDialog):
                 self._point_marks = [self.scene.addEllipse(a - 1, b - 1, 2, 2, self.point_pen)
                                      for a, b in self.points[::4]]
                 self.say.setText(f"{len(self.points)} columns read from the curve")
-        self.done.setEnabled(bool(self.points))
+        self._can_finish()
 
     def table(self):
         names = [n.strip() for n in self.names.text().split(",")] + ["x", "y"]
@@ -696,6 +764,22 @@ class Builder(QtWidgets.QMainWindow):
             b.clicked.connect(slot)
         return b
 
+    def _data_menu(self, m: QtWidgets.QMenu) -> None:
+        m.clear()
+        for text, slot in (("Raw traces from the recordings (pick sweeps, average them)...", self.choose_traces),
+                           ("A table of this project...", self.open_project_table),
+                           ("A CSV or Excel file...", self.open_file),
+                           ("A saved figure (to edit it again)...", self.open_figure),
+                           ("A picture of a plot (digitize it)...", self.open_picture)):
+            m.addAction(text, slot)
+        m.addSeparator()
+        a = m.addAction("Remove this panel's data", self.clear_data)
+        has = bool(self.recipe.data)
+        a.setEnabled(has)
+        a.setToolTip("This panel without its table, its look kept (Undo brings the table back)" if has else
+                     "This panel has no data to remove.")
+        m.setToolTipsVisible(True)
+
     def _build(self) -> None:
         central = QtWidgets.QWidget()
         outer = box("v", "s")
@@ -703,13 +787,7 @@ class Builder(QtWidgets.QMainWindow):
         bar = QtWidgets.QWidget()
         bar.setObjectName("toolbar")
         top = box("h", "xs", "s")
-        top.addWidget(self._tool("Open data", "Where the numbers come from", [
-            ("Raw traces from the recordings (pick sweeps, average them)...", self.choose_traces),
-            ("A table of this project...", self.open_project_table),
-            ("A CSV or Excel file...", self.open_file),
-            ("A saved figure (to edit it again)...", self.open_figure),
-            ("A picture of a plot (digitize it)...", self.open_picture),
-            ("Remove this panel's data", self.clear_data)]))
+        top.addWidget(self._tool("Open data", "Where the numbers come from", self._data_menu))
         top.addWidget(_vline())
         self.undo_button = self._tool("Undo", "Undo the last change (Ctrl+Z)", slot=self.undo)
         self.redo_button = self._tool("Redo", "Redo it (Ctrl+Y)", slot=self.redo)
@@ -723,6 +801,7 @@ class Builder(QtWidgets.QMainWindow):
         for k, (w, h) in SIZES.items():
             self.size.addItem(f"{k[:1].upper() + k[1:]} column ({w:g} mm)", k)
         self.size.currentIndexChanged.connect(self._edited)
+        self.size.setAccessibleName("Figure size")
         top.addWidget(self.size)
         top.addWidget(_vline())
         top.addWidget(self._tool("Styles", "Save this look, or use a saved one", self._styles_menu))
@@ -769,6 +848,7 @@ class Builder(QtWidgets.QMainWindow):
         self.zoom.setToolTip("Fit the figure to the window, or show it at its printed size (and larger) to judge "
                              "the font sizes and line widths")
         self.zoom.currentIndexChanged.connect(lambda _i: self._fit_canvas())
+        self.zoom.setAccessibleName("Zoom")
         head.addWidget(self.zoom)
         tl.addLayout(head)
         self.fig = Figure(dpi=SCREEN_DPI)
@@ -807,6 +887,8 @@ class Builder(QtWidgets.QMainWindow):
         caption, line, help_text = CONTROLS[key]
         wide = isinstance(control, (SeriesTable, FilterList, ItemTable))
         w = widgets.field(caption, control, line, caption, help_text, manual_key="figures", inline=not wide)
+        if not control.accessibleName():
+            control.setAccessibleName(caption)          # what a screen reader (and the controls test) calls it
         self.fields[key] = w
         into.add(w) if isinstance(into, widgets.Advanced) else into.addWidget(w)
         if self._sections:
@@ -885,6 +967,7 @@ class Builder(QtWidgets.QMainWindow):
         self.question_box.setToolTip("The question sets up the standard plot for it; any other plot can be tried "
                                      "on the Plot tab")
         self.question_box.activated.connect(self._question_chosen)
+        self.question_box.setAccessibleName("What do you want to show?")
         outer.addWidget(self.question_box)
         self.why = label("", "hint", wrap=True)
         outer.addWidget(self.why)
@@ -934,6 +1017,7 @@ class Builder(QtWidgets.QMainWindow):
         for w, tip in ((self.sheet, "The sheet"), (self.header, "The row holding the column names (from 1)"),
                        (self.skip, "Rows under the names to skip (units)")):
             w.setToolTip(tip)
+            w.setAccessibleName(tip.split(" (")[0])
         self.header.setRange(1, 100)
         self.skip.setRange(0, 20)
         for lab, w in ((self.sheet_label, self.sheet), (label("Names in row", "muted"), self.header),
@@ -1047,6 +1131,8 @@ class Builder(QtWidgets.QMainWindow):
         logs = QtWidgets.QWidget()
         lg = box("h", "s")
         self.x_log, self.y_log = self._check("x"), self._check("y")
+        self.x_log.setAccessibleName("Log x axis")
+        self.y_log.setAccessibleName("Log y axis")
         lg.addWidget(self.x_log)
         lg.addWidget(self.y_log)
         lg.addStretch(1)
@@ -1113,6 +1199,7 @@ class Builder(QtWidgets.QMainWindow):
             self.colours[key].changed.connect(self._edited)
             self._f(key, self.colours[key], lay)
         self.transparent = self._check("Transparent background")
+        self.transparent.setToolTip("No background colour: a slide's own colour shows through (PNG, SVG, PDF)")
         lay.addWidget(self.transparent)
         self._section(lay, "Legend and panel letters")
         spin("legend_cols", 1, 6, 1, 0)
@@ -1161,7 +1248,12 @@ class Builder(QtWidgets.QMainWindow):
                 self.tabs.addTab(f"Panel {chr(ord('A') + k)}")
             self.tabs.setCurrentIndex(self.current)
             self.add_panel.setEnabled(len(self.spec.panels) < 6)
+            self.add_panel.setToolTip("Add a panel, starting as a copy of this one" if len(self.spec.panels) < 6
+                                      else "A figure holds six panels at most.")
             self.remove_panel_button.setEnabled(len(self.spec.panels) > 1)
+            self.remove_panel_button.setToolTip("Remove the panel being edited (its × does the same; Undo brings it "
+                                                "back)" if len(self.spec.panels) > 1 else
+                                                "A figure keeps at least one panel.")
             self.tabs.setTabsClosable(len(self.spec.panels) > 1)
             self.tabs.blockSignals(False)
             q = [k for k, *_ in QUESTIONS].index(r.question) if r.question in QUESTION else 0
@@ -1400,15 +1492,21 @@ class Builder(QtWidgets.QMainWindow):
             self._history.append(text)
             del self._history[:-40]
             self._future.clear()
-        self.undo_button.setEnabled(len(self._history) > 1)
-        self.redo_button.setEnabled(bool(self._future))
+        self._undo_buttons()
+
+    def _undo_buttons(self) -> None:
+        can_undo, can_redo = len(self._history) > 1, bool(self._future)
+        self.undo_button.setEnabled(can_undo)
+        self.undo_button.setToolTip("Undo the last change (Ctrl+Z)" if can_undo else "Nothing to undo yet.")
+        self.redo_button.setEnabled(can_redo)
+        self.redo_button.setToolTip("Redo the change just undone (Ctrl+Y)" if can_redo else
+                                    "Nothing to redo: no change was undone.")
 
     def _restore(self, text: str) -> None:
         self.spec = Spec.from_json(text)
         self.current = min(self.current, len(self.spec.panels) - 1)
         self._load_controls()
-        self.undo_button.setEnabled(len(self._history) > 1)
-        self.redo_button.setEnabled(bool(self._future))
+        self._undo_buttons()
         self.redraw()
 
     def undo(self) -> None:
@@ -1483,18 +1581,23 @@ class Builder(QtWidgets.QMainWindow):
     def _panel_actions(self, m: QtWidgets.QMenu, k: int) -> None:
         n = len(self.spec.panels)
         letter = chr(ord("A") + k)
-        m.addAction(f"Edit panel {letter}", lambda: self.tabs.setCurrentIndex(k))
-        a = m.addAction(f"Duplicate panel {letter}", lambda: self.duplicate_panel(k))
-        a.setEnabled(n < 6)
-        a = m.addAction(f"Remove panel {letter}", lambda: self.remove_panel(k))
-        a.setEnabled(n > 1)
-        a = m.addAction("Move it left", lambda: self.move_panel(k, -1))
-        a.setEnabled(k > 0)
-        a = m.addAction("Move it right", lambda: self.move_panel(k, 1))
-        a.setEnabled(k < n - 1)
+        def add(text, slot, on=True, why=""):
+            a = m.addAction(text, slot)
+            a.setEnabled(bool(on))
+            if not on:
+                a.setToolTip(why)
+            return a
+
+        full = "A figure holds six panels at most."
+        if k != self.current:
+            add(f"Edit panel {letter}", lambda: self.tabs.setCurrentIndex(k))
+        add(f"Duplicate panel {letter}", lambda: self.duplicate_panel(k), n < 6, full)
+        add(f"Remove panel {letter}", lambda: self.remove_panel(k), n > 1, "A figure keeps at least one panel.")
+        add("Move it left", lambda: self.move_panel(k, -1), k > 0, "It is the first panel already.")
+        add("Move it right", lambda: self.move_panel(k, 1), k < n - 1, "It is the last panel already.")
         m.addSeparator()
-        a = m.addAction("Add a new panel", lambda: self.set_panels(n + 1))
-        a.setEnabled(n < 6)
+        add("Add a new panel", lambda: self.set_panels(n + 1), n < 6, full)
+        m.setToolTipsVisible(True)
 
     def _tab_menu(self, m: QtWidgets.QMenu, pos) -> None:
         k = self.tabs.tabAt(pos)
@@ -1745,6 +1848,7 @@ class Builder(QtWidgets.QMainWindow):
                                 lambda k=p.key: self.apply_preset(k))
                 a.setEnabled(not why)
                 a.setToolTip(why or p.line)
+        m.setToolTipsVisible(True)
 
     def selection(self) -> "presets.Selection":
         """What a preset is filled from: the selected recording's results and its cell's, and, across cells, this
@@ -1801,7 +1905,7 @@ class Builder(QtWidgets.QMainWindow):
         if saved:
             m.addSeparator()
         for name, d in saved.items():
-            m.addAction(f"Use “{name}”", lambda d=d: self.apply_style(d))
+            m.addAction(f"Use “{name}”", lambda d=d, n=name: self.apply_style(d, n))
         if saved:
             gone = m.addMenu("Delete a saved style")
             for name in saved:
@@ -1824,6 +1928,7 @@ class Builder(QtWidgets.QMainWindow):
 
             saved[name.strip()] = asdict(self.spec.style)
             self.window_._settings().setValue("figure_styles", json.dumps(saved))
+            self.statusBar().showMessage(f"This look is saved as the style “{name.strip()}” (Styles lists it).", 5000)
 
     def export_styles(self, path: str | None = None) -> None:
         if path is None:
@@ -1832,6 +1937,7 @@ class Builder(QtWidgets.QMainWindow):
         if path:
             Path(path).write_text(json.dumps({"format": "clampwise-figure-styles", "styles": self._styles()},
                                              indent=1), encoding="utf-8")
+            self.statusBar().showMessage(f"{len(self._styles())} saved style(s) written to {Path(path).name}.", 5000)
 
     def import_styles(self, path: str | None = None) -> None:
         if path is None:
@@ -1845,11 +1951,18 @@ class Builder(QtWidgets.QMainWindow):
             return
         saved = {**self._styles(), **d.get("styles", {})}
         self.window_._settings().setValue("figure_styles", json.dumps(saved))
+        self.statusBar().showMessage(f"{len(d.get('styles', {}))} style(s) read from {Path(path).name}; Styles lists "
+                                     "them.", 5000)
 
-    def apply_style(self, d: dict) -> None:
+    def apply_style(self, d: dict, name: str = "") -> None:
+        before = self.spec.to_json()
         self.spec.style = Style(**{k: v for k, v in d.items() if k in Style.__dataclass_fields__})
         self._load_controls()
         self._changed()
+        same = self.spec.to_json() == before
+        self.statusBar().showMessage((f"The style “{name}”" if name else "The style") +
+                                     (" is this figure's look already." if same else " is applied (Undo takes it "
+                                                                                    "back)."), 5000)
 
     def methods_text(self) -> str:
         return methods.paragraph(self._drawn, getattr(self.window_, "project", None))

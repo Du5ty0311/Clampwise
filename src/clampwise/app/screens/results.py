@@ -171,10 +171,21 @@ def fmt(v, units: str = "") -> str:
 class RowsModel(QtCore.QAbstractTableModel):
     """An analysis's table rows (dicts) for a view, formatted as the screen shows numbers."""
 
-    def __init__(self, rows: list[dict], parent=None) -> None:
+    def __init__(self, rows: list[dict], parent=None, headings: dict | None = None) -> None:
         super().__init__(parent)
-        self.rows = rows
-        self.cols = list(dict.fromkeys(k for r in rows[:200] for k in r))
+        self.headings = headings or {}       # a screen's own words for its columns, before the shared ones
+        self.rows: list[dict] = []
+        self.cols: list[str] = []
+        self.set_rows(rows)
+
+    def set_rows(self, rows: list[dict]) -> None:
+        """Other rows (and other columns) in the same model: the view is told the whole table changed, so it
+        never asks for a column that is gone (a new model on every redraw left the header asking the old
+        columns' names of a table with fewer)."""
+        self.beginResetModel()
+        self.rows = list(rows)
+        self.cols = list(dict.fromkeys(k for r in self.rows[:200] for k in r))
+        self.endResetModel()
 
     def rowCount(self, parent=QtCore.QModelIndex()) -> int:          # noqa: N802 (Qt's name)
         return 0 if parent.isValid() else len(self.rows)
@@ -183,12 +194,14 @@ class RowsModel(QtCore.QAbstractTableModel):
         return 0 if parent.isValid() else len(self.cols)
 
     def headerData(self, section, orientation, role=QtCore.Qt.DisplayRole):      # noqa: N802
-        if role == QtCore.Qt.DisplayRole and orientation == QtCore.Qt.Horizontal:
+        if role == QtCore.Qt.DisplayRole and orientation == QtCore.Qt.Horizontal and 0 <= section < len(self.cols):
             c = self.cols[section]
-            return HEADINGS.get(c, c.replace("_", " "))
+            return self.headings.get(c) or HEADINGS.get(c, c.replace("_", " "))
         return None
 
     def data(self, index, role=QtCore.Qt.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self.rows) and 0 <= index.column() < len(self.cols)):
+            return None
         v = self.rows[index.row()].get(self.cols[index.column()])
         numeric = isinstance(v, (int, float)) and not isinstance(v, bool)
         if numeric and self.cols[index.column()] in ONE_BASED:

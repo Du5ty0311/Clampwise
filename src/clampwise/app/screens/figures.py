@@ -140,12 +140,14 @@ class Across(QtWidgets.QWidget):
                                        getattr(self, "_heads", [])})
             self._hm = hm
             text = draw_heatmap(item, self.window.palette, hm, heat_options(), "across.correlation")
-            self.readout.setText(text if hm is not None else "Correlations need at least 4 recordings with two "
-                                 "headline numbers that vary.")
+            need = "Correlations need at least 4 recordings with two headline numbers that vary."
+            self.readout.setText(text if hm is not None else need)
+            self._editable(hm is not None, need)
             return
         t, xk, yk = self.kind.currentData(), self.x.currentData(), self.y.currentData()
         if not (t and xk and yk):
             self.readout.setText("Analyze recordings to compare them here.")
+            self._editable(False, "No recording is analyzed yet, so nothing is drawn to edit.")
             return
         _, where, attr = CATEGORIES[max(0, self.colour.currentIndex())]
         groups: dict[str, list] = {}
@@ -167,6 +169,13 @@ class Across(QtWidgets.QWidget):
         n = sum(len(v) for v in groups.values())
         self.readout.setText(f"{n} recording(s) with both numbers, in {len(groups)} group(s) by "
                              f"{self.colour.currentText().lower()}; hover a point for its file.")
+        self._editable(n > 0, "No recording has both numbers, so nothing is drawn to edit.")
+
+    def _editable(self, on: bool, why_not: str) -> None:
+        from ..panels import EDIT_TIP
+
+        self.edit_button.setEnabled(on)
+        self.edit_button.setToolTip(EDIT_TIP if on else why_not)
 
     def copy(self) -> "Across":
         """The same comparison, for a window of its own (its selectors its own from then on)."""
@@ -226,13 +235,18 @@ class FiguresScreen(Screen):
                                         "graphs show here.", [("Go to Files", lambda: window.go("files"), False)])
         self.stack.addWidget(self.empty)
         grid_page = QtWidgets.QWidget()
+        page = box("v", "xs")
+        self.note = label("", "muted", wrap=True)          # why fewer than four graphs show, when they do
+        self.note.setVisible(False)
+        page.addWidget(self.note)
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(theme.SPACE["s"])
         grid.setContentsMargins(*[theme.SPACE["xs"]] * 4)
         self.panels = [Panel(window.palette) for _ in range(4)]
         for k, p in enumerate(self.panels):
             grid.addWidget(p, k // 2, k % 2)
-        grid_page.setLayout(grid)
+        page.addLayout(grid, 1)
+        grid_page.setLayout(page)
         self.stack.addWidget(grid_page)
         self.across = Across(window)
         self.stack.addWidget(self.across)
@@ -257,7 +271,7 @@ class FiguresScreen(Screen):
                 w.setVisible(restore)
         else:
             for p in self.panels:
-                p.setVisible(restore or p is graph)
+                p.setVisible((restore and bool(p._key)) or p is graph)
         graph.max_button.setText("⤢" if restore else "⤡")
         graph.max_button.setToolTip("Fill the Figures area with this graph (double-click its title); Esc restores"
                                     if restore else "Back to every graph (Esc)")
@@ -336,7 +350,27 @@ class FiguresScreen(Screen):
         taken: set[str] = set()
         for p in self.panels:
             taken.add(p.set_views(found, taken))
+        shown = [p for p in self.panels if p._key]
+        if self.maximized is None or self.maximized not in shown:
+            if self.maximized is not None:
+                self.maximized.max_button.setText("⤢")
+                self.maximized = None
+            for p in self.panels:                   # a panel with no graph left gives its room to the others
+                p.setVisible(bool(p._key))
+        self.note.setText(self._why_few(run, kind, len(shown)))
+        self.note.setVisible(bool(self.note.text()))
         self.stack.setCurrentIndex(1)
+
+    def _why_few(self, run, kind: str, n: int) -> str:
+        """Why fewer than four graphs show, in a line ("" when four do)."""
+        if n >= len(self.panels):
+            return ""
+        many = f"{n} graph{'s' if n != 1 else ''}"
+        if kind == "unknown":
+            why = getattr(run, "type_reason", "") or "its protocol was not recognised"
+            return (f"Only {many}: Clampwise could not tell what kind of recording this is ({why}), so only its "
+                    "baseline was measured. Set its type in Check, then analyze it, to see its graphs.")
+        return f"Only {many}: this recording's results give no other."
 
     def _health_views(self, path) -> list:
         """The cell health timeline: Rs, holding and noise across the cell's files on one clock."""
