@@ -42,6 +42,11 @@ a region can repeat on every stimulus pulse), tick the statistics you want (peak
 slopes, onset latency, spikes...), fit a model on a region, stack transforms that never touch the raw data
 (baselines, filters, blanking, subtracting another sweep or file), plot any measure against sweep, time, command
 or another measure, click to set an onset, a peak or a threshold, or to leave a sweep out with a reason.
+<b>Cursors</b> gives two lines to drag, with each one's time and value, their difference, the slope and the mean
+between them; <b>Region to the cursors</b> sets the selected region to span them. <b>Sweep ▶</b> and <b>◀</b>
+(Page Down, Page Up) step through the sweeps one at a time (<b>Alone</b>: without the others). With the trace
+clicked, the arrow keys move the selected region by 0.1 ms (Shift: 1 ms; Alt: its end alone).
+<b>Send to a figure</b> puts the traces in view, or the table, into the figure builder as a new panel.
 <b>Keep this measurement</b> saves it with the recording: Results lists it under "Measured by hand" with how it
 was made, and makes it again from that description. <b>Save as template</b> keeps the regions and measures for
 every file of a protocol; <b>Run on every file of its protocol</b> measures them all.</li>
@@ -92,10 +97,36 @@ def _figures_page() -> str:
     from ...figure.recipe import PLOTS, QUESTIONS, STANDARD, SUMMARIES
 
     e = html.escape
-    out = ["<h2>Making figures</h2><p>Figures, <b>Make a figure</b>. Begin with what the figure should show; the "
-           "builder sets up the standard plot for it and writes a description beneath the figure (suitable for a "
-           "figure legend), together with any conditions under which it could mislead. Unless otherwise selected, "
-           "each value is one value per cell, and the caption states the unit of analysis.</p>"
+    out = ["<h2>Making figures</h2><p>Figures, <b>Make a figure</b> opens an empty page. <b>Add panel...</b> asks "
+           "what the panel shows (traces of a recording, a graph of the Figures screen, a measurement kept in the "
+           "Workbench, a table of the project, a spreadsheet, a picture of a plot to digitize, another saved "
+           "figure) and how it is drawn (each plot as a small picture). A description is written beneath the "
+           "figure (suitable for a figure legend), with any condition under which it could mislead. Unless "
+           "otherwise selected, each value is one value per cell, and the caption states the unit of analysis.</p>"
+           "<p><b>Working on the figure itself.</b> Click anything to select it (a panel, an axis, a title, a "
+           "group, the legend, a bracket, the scale bars, a stimulus bar, a text, a letter): its settings show "
+           "under <b>Selected</b>; with nothing selected, the figure's own (width, journal, text sizes, colours). "
+           "Drag to move it, or use the arrow keys (0.5 mm; with Shift, 2 mm). Double-click text to rewrite it "
+           "in place (Enter keeps it, Esc leaves it). Delete removes it. Right-click lists everything else. "
+           "Undo (Ctrl+Z) takes back each step.</p>"
+           "<p><b>The data and the statistics.</b> <b>Data and statistics</b> shows the table the selected panel "
+           "is drawn from, with the columns it uses named. Select rows and <b>Leave the selected rows out</b> to "
+           "draw the figure without them (they stay in the table, greyed; the legend says how many). Choose the "
+           "test (Welch's or Student's t, Mann-Whitney, paired t, Wilcoxon; for a proportion, Fisher's exact "
+           "test) and which groups are compared; <b>Draw the result on the graph</b> adds a bracket per pair. A "
+           "bracket can be dragged and hidden, and its text double-clicked and replaced with your own result.</p>"
+           "<p><b>Where the panels sit.</b> <b>Arrange</b> offers templates of common figures and the number of "
+           "columns; a panel can span columns and rows (its settings), hold an inset (right-click, Add an inset), "
+           "or, after <b>Place every panel freely</b>, be dragged anywhere and resized by its handles, with "
+           "aligning, even spacing and a snap grid.</p>"
+           "<p><b>Size and export.</b> The page is 85, 114 or 174 mm wide, or a width typed; a journal (optional) "
+           "sets its own widths, font and text sizes. <b>Export...</b> checks the figure first (text under 5 pt, "
+           "lines under 0.5 pt), then writes PDF, SVG or EPS with the text kept as editable text at the exact "
+           "size in millimetres (for Illustrator), or TIFF or PNG at 600 dpi. An exported file opens here again "
+           "as the editable figure.</p>"
+           "<p><b>All settings</b> holds every control of the selected panel and of the figure's look in full, "
+           "and the older way in: begin with what the figure should show, and the builder sets up the standard "
+           "plot for it.</p>"
            "<p><b>Editing a graph from the Figures screen.</b> Every graph on the Figures screen (including heat "
            "maps and Across recordings) has an <b>Edit</b> button that opens it here with its data, series, colours, "
            "error bars, reference lines and axis titles. Everything can then be changed like any other figure, "

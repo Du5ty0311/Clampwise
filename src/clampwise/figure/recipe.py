@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field, fields
 import pandas as pd
 
 FORMAT = "clampwise-figure"
-VERSION = 1
+VERSION = 2          # 2: free layout, journal sizes, separate text sizes, electrophysiology elements
 
 # (key, title, why the standard plot is used, the standard plot, the other plots that answer it)
 QUESTIONS = (
@@ -45,11 +45,12 @@ QUESTIONS = (
      ("cumulative", "histogram", "density", "qq")),
     ("counts", "Counts and proportions",
      "How many cells fall in each category (responded or not, a cell type, a firing pattern), per group: bars of "
-     "the counts or the percentages, every count written on its bar.", "count_bar",
-     ("count_bar", "stacked_bar", "pie", "donut")),
+     "the counts or the percentages, every count written on its bar; or the share of each group in one category "
+     "(connected, a success) with its 95% interval.", "count_bar",
+     ("count_bar", "stacked_bar", "proportion", "pie", "donut")),
     ("example", "A raw example",
      "A trace or an averaged response with scale bars instead of axes; the sweep closest to the group's mean "
-     "when picked for you.", "trace", ("trace",)),
+     "when picked for you.", "trace", ("trace", "raster")),
 )
 QUESTION = {q[0]: q for q in QUESTIONS}
 
@@ -74,6 +75,8 @@ PLOTS = {
                    "cell or per group"),
     "histogram": ("Histogram", "how many values fall in each bin, one per group"),
     "trace": ("Trace", "a recorded trace or an averaged response, with scale bars"),
+    "raster": ("Raster with its histogram", "one row of ticks per sweep at each spike or event, and under it the "
+               "rate in time bins"),
     "raincloud": ("Raincloud", "half a violin, a box and every point beside it: the distribution, its summary and "
                   "the data at once"),
     "dot": ("Centre and spread only", "the group centre and its spread as a dot and whiskers, every point faint"),
@@ -89,6 +92,8 @@ PLOTS = {
     "qq": ("Q-Q plot", "each group's quantiles against a normal distribution's: a straight line means normal"),
     "count_bar": ("Bars of counts", "how many in each category, groups side by side"),
     "stacked_bar": ("Stacked bars", "each group's categories stacked to its total (or to 100%)"),
+    "proportion": ("Proportion with its 95% interval", "the share of each group in one category (connected, a "
+                   "success): a bar, Wilson's interval, k of n written; groups compared by Fisher's exact test"),
     "pie": ("Pie", "each category's share of the whole, one pie per group"),
     "donut": ("Donut", "a pie with the total in the middle"),
 }
@@ -256,11 +261,39 @@ CONTROLS = {
                "Click a colour to choose it; order changes where each group sits."),
     "size_by": ("Point size from", "A column whose values set each point's size (bubble chart)", ""),
     "percent": ("Show percentages", "Each category's share of its group, instead of the count", ""),
+    "row_unit": ("A row of the table is", "What one row is, in the caption's words (a response window, a sweep, an "
+                 "event) when the points are rows and not cells", ""),
+    "event": ("The category counted", "For a proportion: which category of x each group's share is of (connected, "
+              "success); the first one when not named", "Wilson's score interval: Wilson 1927; Brown, Cai & "
+              "DasGupta 2001"),
     "ref_lines": ("Reference lines", "Horizontal or vertical lines at given values, each with an optional label",
                   "A line at a value on either axis, with its name. Example: a horizontal line at 100 named "
                   "baseline. Add with + Add, remove with Remove selected, the right-click menu or Delete."),
     "x_rotate": ("X labels' angle", "Turn the x axis labels (degrees), for long group names", ""),
     "minor_ticks": ("Minor ticks", "Small ticks between the labelled ones", ""),
+    "tick_size": ("Tick labels' size", "In points (0: a little under the text size)", ""),
+    "label_size": ("Axis titles' size", "In points (0: the text size)", ""),
+    "title_size": ("Panel titles' size", "In points (0: the text size)", ""),
+    "letter_size": ("Panel letters' size", "In points (0: the text size plus 2)", "Nature: 8 pt bold lower case."),
+    "annotation_size": ("Text and scale bars' size", "In points (0: a little under the text size)", ""),
+    "legend_size": ("Legend's size", "In points (0: a little under the text size)", ""),
+    "axis_width": ("Axis lines' width", "In points", "0.5 to 1 pt prints well."),
+    "letter_bold": ("Bold panel letters", "", ""),
+    "zero_axes": ("Axes cross at zero", "The axes drawn through 0, 0 instead of at the left and bottom",
+                  "For a current-voltage plot, where the sign matters."),
+    "clip_y": ("Cut the traces at", "From ... to ... in y's units: what goes beyond is not drawn (blank: all of it)",
+               "Cut the action potentials when the subthreshold response is the point: 'spikes truncated' is "
+               "then said in the caption. Example: -90, -20."),
+    "stats_text": ("Brackets say", "The exact p value, stars, or both", "Journals ask for exact p values; "
+                   "J Physiol does not accept asterisks alone."),
+    "test": ("Test", "Which test's p value the brackets and the caption carry",
+             "Automatic: Welch's t test for separate groups, the paired t test for the same cells in two "
+             "conditions. The rank tests (Mann-Whitney, Wilcoxon) assume no normal distribution. The other of each "
+             "pair is always reported beside."),
+    "pairs": ("Compare", "Each group with the first, or every pair of groups", "p values are Holm-corrected over "
+              "the comparisons made."),
+    "bin_width": ("Histogram bins of", "The width of the rate histogram's bins under a raster, in x's units "
+                  "(blank: chosen for you)", ""),
 }
 
 
@@ -323,7 +356,39 @@ class Recipe:
     ref_lines: list = field(default_factory=list)   # {"axis": "x"|"y", "at": value, "label": ""}
     size_by: str = ""                            # a column for a bubble chart's point size
     percent: bool = False                        # counts as % of each group
+    event: str = ""                              # a proportion: the category of x counted ("": the first)
+    row_unit: str = ""                           # what one row of the table is, for the caption ("response window")
     x_rotate: float = 0.0
+    # ---- where the panel sits (figure/page.py)
+    span: list = field(default_factory=list)     # [columns, rows] it takes in the grid ([]: one cell)
+    rect: list = field(default_factory=list)     # [x, y, width, height] mm on the page, when placed freely
+    inset_of: int = -1                           # the panel it sits inside (-1: none)
+    inset_rect: list = field(default_factory=list)   # [x, y, width, height] as fractions of that panel's plot area
+    letter: str = ""                             # the panel's letter ("": the next one; "-": none)
+    letter_offset: list = field(default_factory=list)   # [dx, dy] mm from the panel's top left corner, when moved
+    legend_at: list = field(default_factory=list)    # [x, y] of the legend's upper left corner as axes fractions,
+    #                                                  when dragged (then ``legend``'s location is not used)
+    # ---- electrophysiology (figure/elements.py)
+    scale_bar: dict = field(default_factory=dict)    # {"x", "y" lengths, "at": [fx, fy], "width", "x_label",
+    #                                                  "y_label", "show_x", "show_y", "corner"}: blank is automatic
+    stim_bars: list = field(default_factory=list)    # {"start", "end", "nm" or "colour", "kind", "label", "y",
+    #                                                  "height", "hidden"}: the light's (or a shock's) time over a trace
+    command: dict = field(default_factory=dict)      # {"show": bool, "share": 0.22}: the command under the trace
+    #                                                  (from the y2 column of a trace panel's table)
+    vm_labels: dict = field(default_factory=dict)    # trace -> what is written at its start ("-65 mV")
+    show_vm: bool = True
+    clip_y: list = field(default_factory=list)       # [low, high]: traces cut there (spikes truncated)
+    stack: bool = False                              # traces one under the other instead of overlaid
+    stack_gap: float = 0.0                           # how far apart, in y's units (0: a little over their range)
+    zero_axes: bool = False                          # the axes cross at 0, 0 (I-V plots)
+    brackets: list = field(default_factory=list)     # {"a", "b", "text", "y", "hidden"}: a comparison's bracket as
+    #                                                  set by hand (the others are placed automatically)
+    stats_text: str = "p"                            # what a bracket says: "p" (exact), "stars", "both"
+    test: str = ""                                   # which test's p a bracket carries (stats.TESTS; "": the
+    #                                                  usual one for the design: Welch's t, or the paired t)
+    pairs: str = "first"                             # groups compared: each with the "first", or "all" pairs
+    excluded: list = field(default_factory=list)     # rows of the table left out by hand (their row numbers)
+    bin_width: float = 0.0                           # a raster's histogram bins, in x's units (0: automatic)
 
     def frame(self) -> pd.DataFrame | None:
         return unpack(self.data)
@@ -354,30 +419,94 @@ class Style:
     jitter: float = 0.12
     cap_size: float = 2.5
     minor_ticks: bool = False
+    # each kind of text its own size in points; 0 follows ``font_size``
+    tick_size: float = 0.0
+    label_size: float = 0.0
+    title_size: float = 0.0
+    letter_size: float = 0.0
+    annotation_size: float = 0.0
+    legend_size: float = 0.0
+    axis_width: float = 0.8
+    letter_bold: bool = True
+    group_colours: dict = field(default_factory=dict)   # a group's (a condition's) colour wherever it is drawn:
+    #                                                     the same condition, the same colour, in every panel
 
     def apply_theme(self, name: str) -> None:
         for k, v in THEMES.get(name, {}).items():
             setattr(self, k, v)
         self.theme = name
 
+    def size_of(self, what: str) -> float:
+        """The size in points of ``what``: tick, label, title, letter, annotation or legend."""
+        own = float(getattr(self, f"{what}_size", 0.0) or 0.0)
+        if own > 0:
+            return own
+        return {"tick": 0.9, "label": 1.0, "title": 1.0, "annotation": 0.9, "legend": 0.9}.get(what, 1.0) \
+            * self.font_size + (2.0 if what == "letter" else 0.0)
+
+    def apply_journal(self, key: str) -> None:
+        """The journal's font and sizes (figure/journals.py): text, panel letters and their case, least line."""
+        from .journals import JOURNALS, MIN_LINE_PT
+
+        j = JOURNALS.get(key)
+        if j is None:
+            return
+        self.font, self.font_size = j.font, j.text_pt
+        self.tick_size = self.label_size = self.title_size = self.annotation_size = self.legend_size = 0.0
+        if j.min_pt and self.size_of("tick") < j.min_pt:         # the smallest text still within the journal's range
+            self.tick_size = self.annotation_size = self.legend_size = j.min_pt
+        self.letter_size, self.letter_bold = j.letter_pt, j.letter_bold
+        self.label_style = j.letter_style if self.label_style in ("A", "a") else self.label_style
+        self.line_width = max(self.line_width, j.min_line_pt or MIN_LINE_PT)
+        self.axis_width = max(min(self.axis_width, 0.8), j.min_line_pt or MIN_LINE_PT)
+
 @dataclass
 class Spec:
-    """A whole figure: panels in a grid, labelled A, B, C..."""
+    """A whole figure: its panels (in a grid, placed freely, or inset in one another: figure/page.py), the page
+    they sit on, and the look they share."""
     panels: list[Recipe] = field(default_factory=lambda: [Recipe()])
     columns: int = 1
-    size: str = "single"                         # a SIZES key, or "w x h" in mm
+    size: str = "single"                         # a column width's name ("single", "one and a half", "double"),
+    #                                              or "w x h" in mm for a page of any size
     labels: bool = True
     style: Style = field(default_factory=Style)
     format: str = FORMAT
     version: int = VERSION
+    journal: str = ""                            # a journals.JOURNALS key: whose column widths ``size`` names
+    #                                              ("": Clampwise's own 85 / 114 / 174 mm)
+    height_mm: float = 0.0                       # the page's height (0: as high as its rows need)
+    col_ratios: list = field(default_factory=list)   # each grid column's share of the width ([]: equal)
+    row_ratios: list = field(default_factory=list)   # each grid row's share of the height
+    texts: list = field(default_factory=list)    # words on the page itself: {"x", "y" mm, "text", "size", "bold"}
+    snap_mm: float = 0.0                         # a panel dragged or resized lands on this grid (0: anywhere)
+
+    def width_mm(self) -> float:
+        if self.size in SIZES:
+            from .journals import width_mm
+
+            w = width_mm(self.journal, self.size) if self.journal else None
+            return float(w if w else SIZES[self.size][0])
+        return float(self.size.partition("x")[0])
+
+    def page_mm(self, rows: int | None = None) -> tuple[float, float]:
+        """The page's (width, height) in mm; its height the one set, else what ``rows`` grid rows need (never
+        over the journal's limit)."""
+        from . import page
+        from .journals import JOURNALS
+
+        if self.size not in SIZES:
+            w, _, h = self.size.partition("x")
+            return float(w), float(h)
+        w = self.width_mm()
+        if self.height_mm and self.height_mm > 0:
+            return w, float(self.height_mm)
+        rows = page.rows_used(self) if rows is None else rows
+        h = page.auto_height(w, max(1, self.columns), rows, self.row_ratios)
+        limit = JOURNALS[self.journal].max_height_mm if self.journal in JOURNALS else None
+        return w, min(h, limit) if limit else h
 
     def size_mm(self) -> tuple[float, float]:
-        if self.size in SIZES:
-            w, h = SIZES[self.size]
-            rows = -(-len(self.panels) // max(1, self.columns))
-            return w, h * max(1, rows) / (1 if rows == 1 else 1.25)
-        w, _, h = self.size.partition("x")
-        return float(w), float(h)
+        return self.page_mm()
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -390,4 +519,8 @@ class Spec:
         known = {f.name for f in fields(Recipe)}
         panels = [Recipe(**{k: v for k, v in p.items() if k in known}) for p in d.get("panels", [])]
         style = Style(**{k: v for k, v in d.get("style", {}).items() if k in {f.name for f in fields(Style)}})
-        return cls(panels or [Recipe()], d.get("columns", 1), d.get("size", "single"), d.get("labels", True), style)
+        own = {f.name for f in fields(cls)} - {"panels", "style", "format", "version"}
+        spec = cls(panels or [Recipe()], style=style, **{k: v for k, v in d.items() if k in own})
+        if int(d.get("version", 1)) < 2:         # a figure saved before letters had their own size: as it looked
+            spec.style.letter_size = spec.style.letter_size or spec.style.font_size + 3
+        return spec

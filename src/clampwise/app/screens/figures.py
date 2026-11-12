@@ -206,12 +206,22 @@ DEFAULTS = {
                     ("spike_train.return_map.next_isi_s",), ("spike_train.autocorrelogram.count",)),
     "dsi": (("dsi.time course.pct",), ("dsi.time course.power_pct",), ("dsi.fourier",),
             ("dsi.episodes.suppression_pct",)),
-    "vc_evoked": (("evoked.pulses.amplitude",), ("evoked.sweeps.",), ("evoked.pulses.latency",),
-                  ("evoked.pulses.decay",)),
+    # a stimulus experiment in voltage clamp: the sweeps around the stimulus, each pulse's amplitude, the test
+    # of a connection (response windows against sham windows), the latency
+    "vc_evoked": (("light.example", "evoked.pulses.amplitude"), ("evoked.pulses.amplitude", "evoked.sweeps."),
+                  ("connectivity.sham", "evoked.sweeps.", "evoked.pulses.latency"),
+                  ("evoked.pulses.latency", "evoked.pulses.decay")),
+    # the lab's connectivity runs in current clamp: the sweeps with the light's bars, the response windows
+    # against the sham windows with the verdict, the patterns side by side (one file alone: its pulses), and the
+    # cell's health sweep by sweep
+    "cc_evoked": (("light.example",), ("connectivity.sham", "evoked.pulses.amplitude"),
+                  ("connectivity_cell.patterns", "connectivity.success", "evoked.sweeps."),
+                  ("sweep_health.v_before", "sweep_health.", "evoked.pulses.latency")),
+    # a recording whose kind could not be told: its sweeps, and nothing else until its type is set
+    "unknown": (("recording.sweeps",), ("!none",), ("!none",), ("!none",)),
 }
 DEFAULTS["dsi_cell"] = tuple(tuple(w.replace("dsi.", "dsi_cell.", 1) for w in ws) for ws in DEFAULTS["dsi"])
 DEFAULTS["cc_spontaneous"] = DEFAULTS["vc_spontaneous"]
-DEFAULTS["cc_evoked"] = DEFAULTS["vc_evoked"]
 
 
 class FiguresScreen(Screen):
@@ -226,7 +236,7 @@ class FiguresScreen(Screen):
                                             "Compare every analyzed recording of a type, one point each")
         self.across_button.setCheckable(True)
         self.add_action(self.across_button)
-        self.add_action(widgets.primary("Make a figure", self.open_builder,
+        self.add_action(widgets.primary("Make a figure", lambda *_a: self.open_builder(),
                                         "The figure builder: from what you want to show to a publication figure. "
                                         "To start from a graph below, use its Edit button."))
         self.builder = None
@@ -244,6 +254,7 @@ class FiguresScreen(Screen):
         grid.setContentsMargins(*[theme.SPACE["xs"]] * 4)
         self.panels = [Panel(window.palette) for _ in range(4)]
         for k, p in enumerate(self.panels):
+            p.peers = self.panels
             grid.addWidget(p, k // 2, k % 2)
         page.addLayout(grid, 1)
         grid_page.setLayout(page)
@@ -333,7 +344,8 @@ class FiguresScreen(Screen):
                 from types import SimpleNamespace
 
                 run = SimpleNamespace(results={**run.results, **cell.results}, recording=run.recording,
-                                      recording_type=run.recording_type)
+                                      recording_type=run.recording_type,
+                                      type_reason=getattr(run, "type_reason", ""))
                 kind = "dsi_cell" if "dsi_cell" in cell.results else kind
         found = views(run) if run is not None and run.results else []
         if self.window.project is not None and not self.window.project.features()["heat_maps"]:
@@ -367,9 +379,14 @@ class FiguresScreen(Screen):
             return ""
         many = f"{n} graph{'s' if n != 1 else ''}"
         if kind == "unknown":
-            why = getattr(run, "type_reason", "") or "its protocol was not recognised"
-            return (f"Only {many}: Clampwise could not tell what kind of recording this is ({why}), so only its "
-                    "baseline was measured. Set its type in Check, then analyze it, to see its graphs.")
+            why = str(getattr(run, "type_reason", "") or "").strip()
+            for lead in ("unknown (detected):", "unknown:"):          # the reason itself, not its label
+                if why.lower().startswith(lead):
+                    why = why[len(lead):].strip()
+            why = why or "its protocol was not recognised"
+            return (f"These are the recording's sweeps as recorded. Clampwise could not tell what kind of recording "
+                    f"this is ({why}), so only its baseline was measured: set its type in Check, then analyze it, "
+                    "to see its graphs. Show lists what there is.")
         return f"Only {many}: this recording's results give no other."
 
     def _health_views(self, path) -> list:
@@ -428,7 +445,7 @@ class FiguresScreen(Screen):
                                                             "dashed lines: drift limits")
 
             return View(f"health.{measure}", f"Cell health: {name.lower()} over the cell's files",
-                        f"[{unit or signal or '-'} vs. min]", draw)
+                        f"[{unit or signal or '-'} vs. min]", draw, group="Cell health over the cell's files")
 
         return [make(m) for m in ("rs", "holding", "noise")]
 

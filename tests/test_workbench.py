@@ -67,6 +67,16 @@ def test_the_statistics_list_on_a_known_waveform():
     assert s["max_rise_slope"] > 0 > s["max_decay_slope"]
     assert s["onset_latency"] == pytest.approx(0.0, abs=0.3)
     assert s["spike_count"] == 0
+    # the decay's time constant, sweep by sweep: 20 ms here (the rise still adds a little just after the peak)
+    assert s["decay_tau"] == pytest.approx(20.0, rel=0.08)
+    pure = np.where(t >= 0.1, 2.0 - 5.0 * np.exp(-(t - 0.1) / 0.012), 2.0)        # a downward response, tau 12 ms
+    down = wb.statistics(t, pure, 0.1, 0.2, fs, baseline=2.0)
+    assert down["decay_tau"] == pytest.approx(12.0, rel=0.01)
+    # a downward response is measured like an upward one: its peak negative, as recorded, its kinetics found
+    # (they were left blank, and the peak came out positive)
+    assert down["peak"] == pytest.approx(-5.0, abs=0.01) and down["antipeak"] == pytest.approx(0.0, abs=0.01)
+    assert down["decay_time"] == pytest.approx(12.0 * np.log(9.0), rel=0.02)          # 90 to 10% of an exponential
+    assert np.isnan(wb.statistics(t, pure, 0.1, 0.2, fs, baseline=2.0, want={"peak"})["decay_tau"])   # not asked for
     # a region of flat baseline: nothing
     s0 = wb.statistics(t, y, 0.0, 0.09, fs, baseline=2.0)
     assert abs(s0["mean"]) < 1e-9 and s0["sd"] == 0

@@ -35,7 +35,9 @@ from .widgets import box, label
 UNITS = ((r"_pa$", "pA"), (r"_mv$", "mV"), (r"_ms$", "ms"), (r"_s$", "s"), (r"_hz$", "Hz"), (r"_pct$", "%"),
          (r"_pf$", "pF"), (r"^r_", "MOhm"), (r"^v_", "mV"), (r"^spikes$|^count$|^bursts$", "count"),
          (r"^amplitude|^baseline_level$|^sweep_level$|^sweep_noise_sd$", "signal units"), (r"^charge$", "charge units"))
-OWN_VIEWS = {("dsi", "fourier"), ("dsi_cell", "fourier")}                         # tables drawn by their own view below
+# tables drawn by their own view (below, or in lightviews.py), not as one column against another
+OWN_VIEWS = {("dsi", "fourier"), ("dsi_cell", "fourier"), ("connectivity", "shams"), ("connectivity_cell", "windows"),
+             ("connectivity_cell", "comparisons")}
 POSITIONS = {"peak_s", "end_s", "baseline_s"}             # where something is, not a measure of it
 # a table's x, in this order of preference; the rest are its y
 X_COLUMNS = ("onset_s", "time_ms", "time_s", "time_min", "current_pa", "v_mv", "amplitude_pa", "bin_start_s", "start_s", "lag_s", "isi_s",
@@ -87,6 +89,9 @@ class View:
     units: str
     draw: Callable | None = None        # (PlotItem, palette) -> readout
     heatmap: Callable | None = None     # () -> Heatmap, built the first time it is shown
+    figure: Callable | None = None      # (the recording's name) -> Spec: the graph as a figure made for it; without
+    #                                     one, what the graph drew is read back (editable.from_plot)
+    group: str = ""                     # the analysis it belongs to, in words: the Show menu lists graphs by it
     _built: list = field(default_factory=list, repr=False)
 
     def built(self):
@@ -174,47 +179,68 @@ def draw_heatmap(item, pal, hm, opts: dict, key: str = "") -> str:
 
 
 def _heat_views(run) -> list[View]:
-    return [View(key, title, "[heat map]", heatmap=build) for key, title, build in hmaps.catalogue(run)]
+    return [View(key, title, "[heat map]", heatmap=build, group="Heat maps") for key, title, build in
+            hmaps.catalogue(run)]
 
 
 def views(run) -> list[View]:
-    """Every graph the results of ``run`` can give."""
+    """Every graph the results of ``run`` can give, each named with the analysis it belongs to."""
+    from . import lightviews
+
     out: list[View] = []
     signal = run.recording.signal_units if getattr(run, "recording", None) is not None else ""
-    for akey in registry.load():
+    analyses = registry.load()
+    # first what a person looks at first: the traces around the stimulus, the test of a connection, the cell's
+    # health sweep by sweep, a cell's files side by side
+    out += lightviews.example(run)
+    purpose = {"connectivity": lightviews.connectivity, "sweep_health": lightviews.health,
+               "connectivity_cell": lightviews.cell}
+    for akey in analyses:
         res = run.results.get(akey)
         if res is None:
             continue
-        current = [d for d in res.drawables if getattr(d, "domain", "") == "current"]
-        for tname, rows in res.tables.items():
-            if not rows or (akey, tname) in OWN_VIEWS:
-                continue
-            cols = list(dict.fromkeys(k for r in rows for k in r))
-            if {"from", "to", "count"} <= set(cols):
-                out.append(_histogram(akey, tname, rows))
-                continue
-            x = next((c for c in X_COLUMNS if c in cols and _numeric(rows, c) is not None), None)
-            if x is None:                       # a list (checks, artifacts), not something against something
-                continue
-            ys = [c for c in cols if c != x and c not in INDEX | POSITIONS and _numeric(rows, c) is not None]
-            groups: dict[tuple[str, str], list[str]] = {}
-            for c in ys:
-                groups.setdefault((c.split("_")[0], units_of(akey, c, signal=signal)), []).append(c)
-            for (_, u), members in groups.items():
-                out.append(_scatter(res, akey, tname, rows, x, members, u, signal,
-                                    [d for d in current if x in ("current_pa", "v_mv")
-                                     and d.label.split(":")[0] in members]))
-        if akey == "intrinsic":
-            out += _first_spikes(run, res)
-        if akey == "events":
-            out += _overlay(run, res)
-        if akey in ("dsi", "dsi_cell"):
-            out += _dsi_course(res, akey)
-        for d in res.drawables:
-            # results kept before drawables said their domain: the averaged event by its name
-            if getattr(d, "domain", "") == "event" or (not getattr(d, "domain", "") and d.label == "averaged event"):
-                out.append(_event_view(res, akey, d, run))
+        start = len(out)
+        if akey in purpose:
+            out += purpose[akey](run, analyses[akey].label)
+        _table_views(out, run, res, akey, signal)
+        for v in out[start:]:
+            v.group = v.group or analyses[akey].label
+    out += lightviews.sweeps_view(run)
     return _distinct(out) + _heat_views(run)
+
+
+def _table_views(out: list, run, res, akey: str, signal: str) -> None:
+    """The graphs an analysis's tables give, nothing written per measure: each numeric column against the
+    table's x; histograms as bars; the analyses' own drawables."""
+    current = [d for d in res.drawables if getattr(d, "domain", "") == "current"]
+    for tname, rows in res.tables.items():
+        if not rows or (akey, tname) in OWN_VIEWS:
+            continue
+        cols = list(dict.fromkeys(k for r in rows for k in r))
+        if {"from", "to", "count"} <= set(cols):
+            out.append(_histogram(akey, tname, rows))
+            continue
+        x = next((c for c in X_COLUMNS if c in cols and _numeric(rows, c) is not None), None)
+        if x is None:                       # a list (checks, artifacts), not something against something
+            continue
+        ys = [c for c in cols if c != x and c not in INDEX | POSITIONS and _numeric(rows, c) is not None]
+        groups: dict[tuple[str, str], list[str]] = {}
+        for c in ys:
+            groups.setdefault((c.split("_")[0], units_of(akey, c, signal=signal)), []).append(c)
+        for (_, u), members in groups.items():
+            out.append(_scatter(res, akey, tname, rows, x, members, u, signal,
+                                [d for d in current if x in ("current_pa", "v_mv")
+                                 and d.label.split(":")[0] in members]))
+    if akey == "intrinsic":
+        out += _first_spikes(run, res)
+    if akey == "events":
+        out += _overlay(run, res)
+    if akey in ("dsi", "dsi_cell"):
+        out += _dsi_course(res, akey)
+    for d in res.drawables:
+        # results kept before drawables said their domain: the averaged event by its name
+        if getattr(d, "domain", "") == "event" or (not getattr(d, "domain", "") and d.label == "averaged event"):
+            out.append(_event_view(res, akey, d, run))
 
 
 # what one row of a result table is, for a graph's title when two tables give a graph of the same name
@@ -525,13 +551,16 @@ class Panel(QtWidgets.QFrame):
         self.palette, self.wanted = palette, wanted
         self._views: list[View] = []
         self._key = ""
+        self.peers: list["Panel"] = []          # the other graphs of the screen: no two show the same thing
         lay = box("v", "xs", "s")
         head = box("h", "s")
         self.title = label("")                  # the title in bold, then its units, on one line
         self.title.setTextFormat(QtCore.Qt.RichText)
-        self.readout = label("", "muted")
+        self.readout = label("", "muted", wrap=True)      # two lines at most; the whole of it in its tooltip
         for w in (self.title, self.readout):    # a long line is cut, never widens the grid
             w.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.readout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.readout.setFixedHeight(2 * self.readout.fontMetrics().lineSpacing() + 4)
         self.menu_button = QtWidgets.QToolButton()
         self.menu_button.setText("Show")
         self.menu_button.setToolTip("What this graph shows")
@@ -566,20 +595,53 @@ class Panel(QtWidgets.QFrame):
         """Offer ``all_views``; show the one shown before, else the first wanted,
         else the first not ``taken`` by another panel. Returns the key shown."""
         self._views = all_views
-        self.menu.clear()
-        self._actions = {}
-        for v in all_views:
-            a = self.menu.addAction(f"{v.title} {v.units}", lambda k=v.key: self.show_view(k))
-            a.setCheckable(True)
-            self._actions[v.key] = a
+        self._fill_menu()
         keys = [v.key for v in all_views]
         if self._key not in keys or self._key in taken:
             # the first graph asked for that no other panel shows, else the first left; none left: nothing (a
-            # panel never repeats another's graph)
-            self._key = next((k for w in self.wanted for k in keys if k.startswith(w) and k not in taken), "") or \
+            # panel never repeats another's graph); a panel asked to stay empty ("!none") does
+            self._key = "" if self.wanted == ("!none",) else next(
+                (k for w in self.wanted for k in keys if k.startswith(w) and k not in taken), "") or \
                 next((k for k in keys if k not in taken), "")
         self.show_view(self._key)
         return self._key
+
+    MENU_FLAT = 10            # this many graphs or fewer are listed in one menu; more, by analysis
+
+    def _fill_menu(self) -> None:
+        """Show's menu: the graphs this type of recording opens on first, then every graph by the analysis it
+        belongs to (a submenu each when there are many). The one shown is ticked."""
+        m = self.menu
+        m.clear()
+        m.setToolTipsVisible(True)
+        self._actions: dict[str, list] = {}
+
+        def add(menu, v) -> None:
+            a = menu.addAction(f"{v.title} {v.units}", lambda k=v.key: self.choose(k))
+            a.setCheckable(True)
+            self._actions.setdefault(v.key, []).append(a)
+
+        groups: dict[str, list[View]] = {}
+        for v in self._views:
+            groups.setdefault(v.group or "Other graphs", []).append(v)
+        if len(self._views) <= self.MENU_FLAT:
+            for v in self._views:
+                add(m, v)
+            return
+        for name, mine in groups.items():
+            sub = m.addMenu(f"{name} ({len(mine)})")
+            sub.setToolTipsVisible(True)
+            for v in mine:
+                add(sub, v)
+
+    def choose(self, key: str) -> None:
+        """Show ``key`` here (picked in the Show menu). A graph another panel shows changes places with this
+        one's, so no two panels show the same graph."""
+        other = next((p for p in self.peers if p is not self and p._key == key and p.isVisibleTo(p.parentWidget())),
+                     None)
+        if other is not None and self._key and self._key != key:
+            other.show_view(self._key)
+        self.show_view(key)
 
     def show_view(self, key: str) -> None:
         self._key = key
@@ -591,12 +653,14 @@ class Panel(QtWidgets.QFrame):
         self.title.setText(f"<b>{html.escape(view.title)}</b> {html.escape(view.units)}" if view else
                            "Nothing more to show")
         self.title.setToolTip(f"{view.title} {view.units}" if view else "")
-        for k, a in getattr(self, "_actions", {}).items():
-            a.setChecked(k == key)
+        for k, acts in getattr(self, "_actions", {}).items():
+            for a in acts:
+                a.setChecked(k == key)
         self.menu_button.setEnabled(bool(self._views))
         self.menu_button.setToolTip("What this graph shows (the one shown is ticked)" if self._views else
                                     "This recording's results give no graph to choose from.")
         legend = item.addLegend(offset=(10, 10))
+        legend.anchor(itemPos=(0, 0), parentPos=(0, 0), offset=(10, 10))      # where it starts (a graph may move it)
         legend.clear()
         clear_heatmap(item)
         heat = view is not None and view.heatmap is not None
@@ -648,6 +712,10 @@ class Panel(QtWidgets.QFrame):
             hm = view.built()
             return editable.from_heatmap(shown_heatmap(hm, self.heat) if hm is not None else None, view.title,
                                          source)
+        if view.figure is not None:              # a figure made for this graph (traces with the light's bars, a
+            spec = view.figure(source)           # proportion with its interval), not the screen's picture read back
+            if spec is not None:
+                return spec
         return editable.from_plot(self.plot.getPlotItem(), view.title, source)
 
     def copy(self) -> "Panel":

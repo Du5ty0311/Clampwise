@@ -2,6 +2,103 @@
 
 ## 1.8.1 — not released yet
 
+- **The Workbench works the way Clampfit is used.**
+  - **Cursors.** Tick Cursors for two lines to drag over the trace; the line above the trace reads each one's
+    time and value, Δt, the difference, the slope and the mean between them, on the sweep stepped to (else the
+    average, else the first sweep). **Region to the cursors** sets the selected region to span them.
+  - **One sweep at a time.** Sweep ▶ and ◀ (Page Down, Page Up) step through the chosen sweeps: the one stepped
+    to is drawn in bold and named, its row is selected in the table, and Alone draws it without the others. A
+    click on a row of the table steps to its sweep.
+  - **The arrow keys move the selected region**, 0.1 ms a press (with Shift, 1 ms; with Alt, its end alone),
+    once the trace has been clicked. Each press is undone by Ctrl+Z.
+  - **Decay tau** is a new measure: one exponential fitted from the peak to the region's end, for every sweep
+    and every pulse (the Fit tab fits one trace).
+  - **Send to a figure** puts what is on the screen into the figure builder as a new panel: the traces in view
+    (with the light's bars and scale bars) or the measurement's table (the first measure against the sweep).
+  - **A downward response was measured wrongly**: its Peak came out positive, and its rise time, half-width and
+    decay time were left blank. The peak is now signed as recorded (as Clampfit gives it) and the kinetics are
+    found whichever way the response goes.
+  - `docs/development/CLAMPFIT_PARITY.md` lists Clampfit's Statistics, Fit, Arithmetic, cursors and sweep
+    navigation against the Workbench: done, partly (a second pair of cursors, more than two exponential terms,
+    a fit on every trace) or missing (typed arithmetic over traces, a concatenated view).
+  - Checked on a copy of a real light recording, by the screen's own controls: peak, onset latency and decay
+    time for both pulses of every sweep, a sweep left out with its reason, the decay fitted on the average, the
+    amplitude plotted against the sweep, kept, saved as a template and run on a second file of the same
+    protocol; then every step taken back by Undo.
+
+- **The figure builder is rebuilt: the figure itself is what you work on.** It opens on an empty page with one
+  button, **Add panel...**, which asks two things: what the panel shows (traces of a recording, a graph of the
+  Figures screen, a measurement kept in the Workbench, a table of the project, a spreadsheet, a digitized plot,
+  another saved figure) and how it is drawn (every plot as a small picture). Then:
+  - **Click anything to select it** (a panel, an axis, a title, a group's points, the legend, a bracket, the
+    scale bars, a stimulus bar, a text, a letter): its settings, and only its, show beside the figure. **Drag** to
+    move it (or the arrow keys, half a millimetre a press), **double-click** text to rewrite it in place,
+    **Delete** removes it, **right-click** lists what else can be done. Every step is undone by Ctrl+Z.
+  - **The data are beside the graph.** The tab *Data and statistics* shows the table the selected panel is drawn
+    from, with the columns it uses named (Y, Groups, Cell). Rows can be left out by hand (they stay in the table,
+    greyed, and the legend says how many); the table can be copied or saved.
+  - **The statistics are yours to choose and to overwrite.** The test is a choice (Welch's or Student's t,
+    Mann-Whitney, paired t, Wilcoxon), with each group against the first or every pair; the result is drawn as
+    brackets when asked. A bracket can be dragged, hidden, and its text double-clicked and replaced with the
+    result of a test done elsewhere ("t(22) = 5.1, p < 0.001").
+  - **A proportion has its own plot**: the share of each group in one category (connected, a success) as a bar
+    with Wilson's 95% interval and "k/n" over it, groups compared by Fisher's exact test (Holm over the pairs),
+    the difference with Newcombe's interval. The caption warns when the trials are windows of one recording, not
+    cells.
+  - **Panels go where you put them.** Templates of common figures (wide on top with three below, traces on the
+    left with graphs on the right...), panels spanning columns and rows, insets, and free placement: every panel
+    dragged and resized by its handles, to the millimetre, with aligning, even spacing and a snap grid.
+  - **What a trace panel needs is drawn from the recording**: the stimulus as bars at its recorded time (light in
+    the light's colour, a shock as a tick), the potential each trace sat at (or was held at) written at its start,
+    scale bars with round sizes that can be dragged and set, the command under the traces when it steps, traces
+    stacked or overlaid, spikes cut at a level. Names and labels that would overlap are moved apart.
+  - **Text sizes are separate** (ticks, axis titles, panel titles, letters, annotations, legend), a group keeps
+    one colour in every panel of the figure and in the next figure of the project, and the palettes are
+    colour-blind safe.
+  - **No journal is needed.** The page is 85, 114 or 174 mm wide, or any width typed. Choosing a journal (J
+    Neurosci, eLife, Nature, Nat Neurosci, Neuron, J Physiol, Cereb Cortex) sets its column widths, font and text
+    sizes, and the export then checks the figure against its rules.
+  - **Export for Illustrator**: PDF, SVG and EPS keep text as text (Arial, editable) at the figure's exact size
+    in millimetres; TIFF and PNG at 600 dpi or what is typed; text as shapes only when asked. The dialog first
+    says what is too small to print (text under 5 pt, lines under 0.5 pt, a page wider than the journal's).
+    The exported file still opens in Clampwise as the editable figure.
+  - Fixed on the way: a pick list in the settings beside the figure could close the program by removing itself
+    while it was still in use (choosing "No legend"); the test now presses every one. Matching stimulus bars to
+    one of them lost the light's colour. The Add panel button filled the first panel again instead of adding one.
+- **The Figures screen opens a light recording on what the experiment asks.** For the lab's connectivity runs
+  (current clamp, light through the Polygon) the four graphs are now: **the sweeps around the light** (every
+  sweep against its own level before it, their average, the light shaded), **the response windows against the
+  sham windows** they are judged by (the sham windows as bars on a logarithmic axis, each response window a
+  circle, the threshold, and the verdict in words, e.g. on a simulated cell: "Connected: 16 of 20 response windows
+  beat the sham threshold (chance alone gives 1.0); p < 0.001; false-positive rate 5%"), **the patterns of the cell
+  side by side** (each
+  file's success rate with its 95% interval; one file alone: each pulse's) and **the cell's health sweep by
+  sweep** (the potential before each sweep against the -55 and -85 mV limits; the input resistance is the next
+  graph in the menu). Each pulse's success rate, latency and jitter are in the readout.
+  - **Show lists the graphs by analysis** (Example traces, Evoked responses, Connected or not, Health sweep by
+    sweep, ...) instead of one list of forty; choosing a graph that another panel shows makes the two change
+    places. A graph's readout takes two lines.
+  - **A recording whose kind could not be told shows its sweeps as recorded**, one graph, and a line with the
+    reason (for a file stopped after its first sweep: "one sweep with one command step of -100 pA for 0.50 s: a
+    step family needs at least two step sizes") and what to do.
+  - **Edit opens each of these as a figure made for it**: the sweeps as a trace panel with the light's bars,
+    scale bars and the potential; the sham test as two cumulative distributions with the threshold; the patterns
+    as proportions with Fisher's exact test, from a table of every window of the cell's files. Every graph of
+    every recording type is opened in the builder and drawn by a test.
+  - The connectivity analysis keeps what these graphs need: every sham window, each pulse's jitter, each window
+    as a multiple of the sham threshold, and, for a cell, one table of every window of its files (version 3:
+    recordings are analyzed again).
+- **Starters ("a whole figure in one step") rebuilt for the lab's recordings.**
+  - **Light or stimulus responses: connected or not** (new): example traces of each pattern stacked with the
+    light's bars, every response window over its file's sham threshold, the success rate with its interval and
+    Fisher's exact test, the successes' latency with its jitter, and the potential before every sweep of every
+    file, so a connection is never shown apart from the health of the cell it was read in.
+  - **Current-clamp step family**: a cell that fires on no step used to get one trace and an f-I curve drawn as a
+    flat line on an axis from -0.04 to +0.04 Hz. It now gets the whole family with the command under it, and a
+    rate axis from 0 to 10 Hz with "The cell fired on no step" in the legend. A cell that fires gets the most
+    hyperpolarizing step, rheobase and the step nearest twice rheobase.
+  - **Evoked PSC** is no longer offered for a step family played under the light (there is no one response to
+    average): it says so and names the starter to use.
 - **Buttons that were broken in the Workbench, Figures and the figure builder.** Every button, checkbox, pick
   list and menu action of the three screens (and of the trace picker and the digitizer) is now pressed by a test,
   on a simulated recording of every recording type and on copies of real light and step recordings; it fails on

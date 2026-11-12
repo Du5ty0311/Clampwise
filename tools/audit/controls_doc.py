@@ -67,6 +67,41 @@ CHECKED = {
     "Figures | Make a figure": "the builder opens, empty",
     "Trace picker | Add as a trace": "the selected sweeps become a named trace; the dialog opens on a recording "
                                      "with several sweeps (it raised on every such recording)",
+    "Workbench | Next sweep": "the next sweep is drawn in bold and named (\"sweep 1 (1 of n)\"), its row selected; "
+                              "Page Down does the same",
+    "Workbench | Previous sweep": "the sweep before; from the first, round to the last",
+    "Workbench | Show the sweep alone": "the other sweeps are not drawn",
+    "Workbench | All sweeps": "no sweep singled out; every sweep drawn again",
+    "Workbench | Cursors": "two lines on the trace; the readout gives each one's time and value (checked against "
+                           "the samples), their difference and the slope, and follows a cursor that is dragged",
+    "Workbench | Region to the cursors": "the selected region spans the cursors (from the pulse when it repeats "
+                                         "on each pulse); Undo puts it back",
+    "Workbench | Send to a figure > The traces shown, as a panel of example traces":
+        "the builder opens with a trace panel of the chosen sweeps over the time in view, the light's bars at "
+        "their recorded times",
+    "Workbench | Send to a figure > This measurement's table, as a graph":
+        "a second panel: the table of every row measured, the first measure against the sweep",
+    "Figure builder | Add panel...": "asks for the data, then for the plot; fills the empty panel, then adds a "
+                                     "panel beside it (it filled the first panel again)",
+    "Figure builder | Y axis title | double-click": "a box opens over it with its words; Enter keeps the new "
+                                                    "words, Esc leaves the old; Undo takes them back",
+    "Figure builder | Comparison bracket | drag": "the bracket stays at the height it was dragged to; its text can "
+                                                  "be replaced with a typed result",
+    "Figure builder | Scale bars | drag": "the corner where the two bars meet moves with the drag",
+    "Figure builder | Stimulus bar | drag": "it moves up and down only: its time is the recording's",
+    "Figure builder | Panel | drag": "in the grid, it changes places with the panel it is dropped on; placed "
+                                     "freely, it moves on the page (on the snap grid when one is set)",
+    "Figure builder | Panel's handle (se) | drag": "a freely placed panel (or an inset) is resized",
+    "Figure builder | Leave the selected rows out": "the rows are greyed in the table, out of the figure and of "
+                                                    "its n, and counted in the legend; Undo puts them back",
+    "Figure builder | Test": "the brackets and the legend carry the chosen test's p (Mann-Whitney); a paired test "
+                             "pairs the cells",
+    "Figure builder | Legend: Place": "the legend moves or goes (\"No legend\" closed the program: the pick list "
+                                      "was deleted while still in use)",
+    "Export | Format": "a pixel format turns the resolution on and the text-as-shapes box off, each saying why",
+    "Plot chooser | Plot: Box plot with every point": "the plot is named under the heading and Use it draws the "
+                                                      "panel that way",
+    "Data chooser | Use it": "the kind of data picked (a source that cannot be used now is greyed with its reason)",
 }
 
 HEAD = """# Every control, and what was checked
@@ -74,7 +109,12 @@ HEAD = """# Every control, and what was checked
 Written by `tools/audit/controls_doc.py` from the runs of `tests/test_every_control.py`; do not edit by hand.
 
 The test presses every button, checkbox, pick list and menu action of the Workbench, the Figures screen, the
-figure builder, the trace picker and the digitizer, each from the same starting state, on a simulated recording
+figure builder (with its choosers of data and plot and its export dialog), the trace picker and the digitizer,
+each from the same starting state. In the builder the figure itself is a control too: each kind of thing drawn on
+it (a panel, a letter, a title, an axis and its title, the legend, a group, the scale bars, a stimulus bar, the
+command, a text, a bracket, a reference line, a mark along x, a potential label, a text on the page) is clicked,
+dragged, moved with an arrow key, double-clicked (and rewritten), deleted and right-clicked (each entry of its
+menu chosen). All of it on a simulated recording
 of every recording type ({types}) and, when `E:\\Daniel` is on the machine, on copies of three of his files. It
 fails when a control raises, changes nothing, makes an edit that Undo does not put back, or is disabled without
 saying why. A control found on a screen and missing from this list fails the test too.
@@ -107,7 +147,8 @@ def write(records: list[dict], runs: str) -> str:
                               and not s.startswith("his ")}))
     lines = [HEAD.format(types=types, n=len(by), presses=sum(r["enabled"] for r in records), states=len(states),
                          runs=runs)]
-    order = ["Workbench", "Workbench details", "Figures", "Figure builder", "Trace picker", "Digitizer"]
+    order = ["Workbench", "Workbench details", "Figures", "Figure builder", "Data chooser", "Plot chooser", "Export",
+             "Trace picker", "Digitizer"]
     for screen in sorted(screens, key=lambda s: (order.index(s) if s in order else 99, s)):
         lines += [f"\n## {screen}\n", "| Screen | Control | Kind | What changed | Checked by name | Undo | Off when |",
                   "|---|---|---|---|---|---|---|"]
@@ -121,8 +162,10 @@ def write(records: list[dict], runs: str) -> str:
             undo = {r["undo"] for r in pressed if r["undo"]}
             undo_word = "NOT RESTORED" if "NOT restored" in undo else "restored" if undo else "–"
             off = sorted({r["tooltip"].strip() for r in rs if not r["enabled"] and r["tooltip"].strip()})
-            checked = next((v for k, v in CHECKED.items() if name.startswith(k + " | ") or
-                            (k.split(" | ")[0] == screen.split(" / ")[0] and k.split(" | ")[1] == label)), "")
+            checked = CHECKED.get(name) or next(
+                (v for k, v in CHECKED.items() if k.count(" | ") == 1 and (
+                    name.startswith(k + " | ") or (k.split(" | ")[0] == screen.split(" / ")[0]
+                                                   and k.split(" | ")[1] == label))), "")
             cell = lambda s: s.replace("|", "/").replace("\n", " ")       # noqa: E731
             lines.append(f"| {screen} | {cell(label)} | {kind} | {cell('; '.join(effects)) or 'never enabled'} | "
                          f"{cell(checked)} | {undo_word} | {cell(' / '.join(off))} |")

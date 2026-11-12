@@ -52,6 +52,10 @@ class Panel:
     mean_line: bool = False  # a reference line at the mean of y
     note: str = ""           # the caption's sentence, filled from the analysis's values ({p1_jitter:.2f})
     look: dict = field(default_factory=dict)      # any other Recipe field
+    least: tuple = ()        # (low, high, words): when every y is one value, the axis shows this range and the
+    #                          caption says the words (a rate of 0 Hz on every step: 0 to 10 Hz)
+    span: tuple = ()         # the panel's columns and rows in the figure's grid ((1, 1) unless given)
+    letter: str = ""         # its letter when not the next of A, B, C ("-": none: it belongs to the panel before)
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,9 @@ class PresetDef:
     panels: tuple
     columns: int = 2
     size: str = "double"
+    unless: tuple = ()       # (analysis, value key, the value, why): the selection it is not for, and why
+    height_mm: float = 0.0   # the page's height (0: as high as the rows need)
+    row_ratios: tuple = ()   # the rows' shares of the height
 
 
 @dataclass
@@ -74,12 +81,14 @@ class Selection:
     path: str = ""                                   # the selected recording, written into trace picks
     name: str = ""                                   # its name, in the panels' sources
     files: dict = field(default_factory=dict)        # file name -> path: a cell's other recordings
+    results_of: Callable[[str], dict] = lambda _f: {}  # a file name -> that recording's results (a cell's files)
     table: pd.DataFrame | None = None                # across cells: the table of cells
     source: dict = field(default_factory=dict)       # where that table came from
     y: str = ""                                      # the measure compared (blank: the first headline measure)
 
 
 NEEDS_WORDS = {"intrinsic": "a current-step recording analyzed for intrinsic properties",
+               "connectivity": "a recording with a stimulus, tested for a connection (Connected or not)",
                "evoked": "an evoked-response recording", "events": "detected spontaneous or miniature events",
                "dsi": "a DSI recording", "dsi_cell": "a DSI cell", "cells": "a table of cells with groups"}
 
@@ -87,12 +96,42 @@ PRESETS = {p.key: p for p in (
     PresetDef("cc_steps", "Current-clamp step family", SINGLE,
               "Example steps, the f-I curve, V-I at the peak and steady state, and sag per step.", ("intrinsic",), (
                   Panel("Example traces", "traces:steps", "example", "trace"),
-                  Panel("f-I curve", "intrinsic.fi", x="current_pa", y="rate_hz"),
+                  Panel("f-I curve", "intrinsic.fi", x="current_pa", y="rate_hz",
+                        least=(0.0, 10.0, "The cell fired on no step: 0 Hz throughout."),
+                        look={"y_from_zero": True},
+                        note="Spikes on the rebound after hyperpolarizing steps ({rebound_spikes:g}) are not part "
+                             "of the rate."),
                   Panel("V-I", "intrinsic.steps", x="current_pa", y="Membrane potential (mV)", group="Measure",
                         long=(("v_peak", "peak"), ("v_steady", "steady state")), keep=(("spikes", "==", 0),),
                         note="Steps without spikes."),
                   Panel("Sag per step", "intrinsic.steps", x="current_pa", y="sag_pct", keep=(("current_pa", "<", 0),),
                         note="Hyperpolarizing steps only."))),
+    PresetDef("connectivity", "Light or stimulus responses: connected or not", SINGLE,
+              "Example traces of each pattern lit with the light's bars, every response window against its sham "
+              "threshold, the success rate with its 95% interval, the successes' latency and jitter, and the "
+              "cell's health sweep by sweep.", ("connectivity",), (
+                  Panel("", "traces:patterns", "example", "trace", look={"stack": True}, span=(2, 2)),
+                  Panel("", "derive:windows", "compare", "points", y="Response / sham threshold", group="Pattern",
+                        look={"summary": "median_iqr", "y_log": True, "x_label": " ", "x_rotate": 30,
+                              "y_label": "Response / threshold", "row_unit": "response window",
+                              "ref_lines": [{"axis": "y", "at": 1.0, "label": ""}]},
+                        note="Each point: one response window, its largest departure from its own baseline over "
+                             "its file's sham threshold (the 95% quantile of sham windows in the same sweeps; "
+                             "dotted line); over 1 it is a success."),
+                  Panel("", "derive:windows", "counts", "proportion", x="Outcome", group="Pattern",
+                        look={"event": "success", "stats": True, "pairs": "all", "x_label": " ", "x_rotate": 30,
+                              "y_label": "Successes (%)", "row_unit": "response window"}),
+                  Panel("", "derive:latencies", "compare", "points", y="Latency (ms)", group="Pattern",
+                        look={"summary": "mean_sd", "x_label": " ", "x_rotate": 30, "row_unit": "success"},
+                        letter="-",
+                        note="Latency of each success (its onset after the pulse); bars: mean ± SD, the SD being "
+                             "the jitter."),
+                  Panel("", "derive:health", plot="line", x="Sweep", y="Vm before the protocol (mV)", group="Pattern",
+                        look={"ref_lines": [{"axis": "y", "at": -55.0, "label": "-55 mV"}], "legend": "none",
+                              "y_label": "Vm before (mV)", "row_unit": "sweep"}, span=(3, 1),
+                        note="The membrane potential before each sweep's protocol, in the colours of the traces; "
+                             "a healthy cell rests below the dotted line.")),
+              columns=5, height_mm=92.0, row_ratios=(1.25, 1.0)),
     PresetDef("evoked", "Evoked PSC", SINGLE,
               "The averaged response with its rise and decay, its amplitude over the run, and its latency.",
               ("evoked",), (
@@ -102,7 +141,10 @@ PRESETS = {p.key: p for p in (
                         note="Pulse 1 of every sweep; the line is the run's mean."),
                   Panel("Latency", "evoked.sweeps", "distribution", "histogram", y="latency_ms",
                         keep=(("pulse", "==", 1),), note="Jitter (SD of the latency): {p1_jitter:.2f} ms.")),
-              columns=3),
+              columns=3,
+              unless=(("evoked", "condition", "the command under the stimulus",
+                       "Its sweeps are a step family played under the stimulus, each at another level: there is "
+                       "no one response to average. Use “Light or stimulus responses: connected or not”."),)),
     PresetDef("paired_pulses", "Paired pulses and trains", SINGLE,
               "Example traces at each interval, the paired-pulse ratio against interval, and Pn/P1 by pulse.",
               ("evoked",), (
@@ -168,7 +210,72 @@ def _dsi_course(sel: Selection) -> tuple[pd.DataFrame | None, list[str]]:
         ["Each response at its position's mean time from the step."]
 
 
-DERIVED = {"ppr": _ppr, "dsi_course": _dsi_course}
+def _p_words(p: float) -> str:
+    return "p n/a" if not np.isfinite(p) else "p < 0.001" if p < 0.001 else f"p = {p:.3f}" if p < 0.1 else f"p = {p:.2f}"
+
+
+def _windows(sel: Selection) -> tuple[pd.DataFrame | None, list[str]]:
+    """Every response window of the cell's stimulus files (of the one file, without a cell), named by the
+    pattern lit; and each file's verdict in words."""
+    cell, one = sel.results.get("connectivity_cell"), sel.results.get("connectivity")
+    rows = (cell.tables.get("windows") if cell is not None else None) or []
+    files = (cell.tables.get("files") if cell is not None else None) or []
+    if not rows and one is not None:
+        name = str(one.values.get("pattern") or sel.name or "this recording")
+        rows = [{"file": sel.name, "pattern": name, "sweep": w["sweep"], "pulse": w["pulse"],
+                 "outcome": "success" if w["success"] else "failure", "over_threshold": w.get("over_threshold", np.nan),
+                 "latency_ms": w["latency_ms"], "amplitude": w["amplitude"]} for w in one.tables.get("windows", [])]
+        files = [{"pattern": name, **{k: one.values.get(k, np.nan) for k in ("connected", "p", "successes",
+                                                                             "n_windows")}}]
+    if not rows:
+        return None, []
+    units = next((f.get("units") for f in files if f.get("units")), "") or (one.values.get("units", "") if one else "")
+    f = pd.DataFrame([{"Pattern": w["pattern"], "File": w["file"], "Sweep": int(w["sweep"]) + 1,
+                       "Pulse": int(w["pulse"]), "Outcome": w["outcome"],
+                       "Response / sham threshold": w["over_threshold"], "Latency (ms)": w["latency_ms"],
+                       f"Amplitude ({units})" if units else "Amplitude": w["amplitude"]} for w in rows])
+    words = {"yes": "connected", "no": "not connected"}
+    said = "; ".join(f"{x['pattern'] or x.get('file', '')}: {words.get(str(x['connected']), str(x['connected']))}"
+                     + (f" ({int(x['successes'])} of {int(x['n_windows'])} windows, {_p_words(float(x['p']))})"
+                        if isinstance(x.get("p"), float) and np.isfinite(x["p"]) else "") for x in files)
+    return f, [f"The windows pooled against sham windows in the same sweeps: {said}."]
+
+
+def _latencies(sel: Selection) -> tuple[pd.DataFrame | None, list[str]]:
+    f, _notes = _windows(sel)
+    if f is None:
+        return None, []
+    f = f[(f["Outcome"] == "success") & np.isfinite(pd.to_numeric(f["Latency (ms)"], errors="coerce"))]
+    return (f.reset_index(drop=True) if len(f) else None), []
+
+
+def _health(sel: Selection) -> tuple[pd.DataFrame | None, list[str]]:
+    """The potential before each sweep's protocol and each sweep's input resistance, for every stimulus file of
+    the cell (the selected one alone, without a cell)."""
+    cell = sel.results.get("connectivity_cell")
+    files = (cell.tables.get("files") if cell is not None else None) or []
+    todo = [(str(x["pattern"] or x["file"]), x["file"]) for x in files] or [(sel.name or "this recording", "")]
+    rows, said = [], []
+    for pattern, name in todo:
+        results = sel.results if (not name or name == sel.name) else sel.results_of(name)
+        h = results.get("sweep_health") if results else None
+        if h is None:
+            continue
+        for s in h.tables.get("sweeps", []):
+            rows.append({"Pattern": pattern, "Sweep": int(s["sweep"]) + 1,
+                         "Vm before the protocol (mV)": s.get("v_before", np.nan),
+                         "Input resistance (MOhm)": s.get("rin_mohm", np.nan),
+                         "Healthy": "yes" if s.get("healthy") is not False else "no"})
+        n, bad = h.values.get("n_sweeps"), h.values.get("unhealthy_sweeps")
+        if isinstance(n, (int, float)) and isinstance(bad, (int, float)) and n:
+            said.append(f"{pattern}: {int(bad)} of {int(n)} sweeps unhealthy"
+                        + (f" ({h.values['words']})" if bad and h.values.get("words") else ""))
+    return (pd.DataFrame(rows) if rows else None), ([f"{'; '.join(said)}."] if said else [])
+
+
+DERIVED_WORDS = {"windows": "every response window", "latencies": "the latency of each success",
+                 "health": "the cell's health sweep by sweep"}
+DERIVED = {"ppr": _ppr, "dsi_course": _dsi_course, "windows": _windows, "latencies": _latencies, "health": _health}
 
 
 # ---------------------------------------------------------------- filling a preset
@@ -180,6 +287,9 @@ def needs(preset: PresetDef, sel: Selection) -> str:
         ok = t is not None and fdata.guess(t)["group"] and fdata.numeric_columns(t)
         return "" if ok else "Needs " + NEEDS_WORDS["cells"] + "."
     if any(k in sel.results for k in preset.needs):
+        for key, value, wrong, why in preset.unless:
+            if key in sel.results and sel.results[key].values.get(value) == wrong:
+                return why
         return ""
     return "Needs " + " or ".join(NEEDS_WORDS.get(k, k) for k in preset.needs) + "."
 
@@ -233,11 +343,14 @@ def _traces(p: Panel, sel: Selection) -> Recipe:
     sets, w, overlay, notes = made
     for s in sets:                                   # "" (the selection's own file) and file names made paths
         s.items = [[sel.files.get(f, f) if f else sel.path, *rest] for f, *rest in s.items] if sel.path else s.items
-    r = layouts.example_recipe(sets, w, sel.load, f"{sel.name or 'Recording'}: {p.title.lower()}", p.title, overlay)
+    r = layouts.example_recipe(sets, w, sel.load, f"{sel.name or 'Recording'}: {(p.title or 'example traces').lower()}",
+                               p.title, overlay)
     if r.frame() is None or r.frame().empty:
         return _empty(p, "None of its sweeps could be cut around the chosen point.")
     r.notes = notes + r.notes
     r.series = {k: v for k, v in OVERLAY_LOOK.items() if k in set(r.frame()["Trace"])}
+    for k, v in p.look.items():
+        setattr(r, k, v)
     return r
 
 
@@ -273,7 +386,8 @@ def panel(p: Panel, sel: Selection) -> Recipe:
         if p.source.startswith("derive:"):
             f, notes = DERIVED[p.source.split(":", 1)[1]](sel)
             key, names = "", {}
-            src = {"kind": "project", "table": f"{sel.name or 'Recording'}: {p.title.lower()}"}
+            what = p.title or DERIVED_WORDS.get(p.source.split(":", 1)[1], "a derived table")
+            src = {"kind": "project", "table": f"{sel.name or 'Recording'}: {what.lower()}"}
         else:
             f, src, key, names = _run_table(p, sel)
             notes = []
@@ -297,16 +411,26 @@ def panel(p: Panel, sel: Selection) -> Recipe:
     groups = list(dict.fromkeys(frame[r.group].dropna().astype(str))) if r.group and frame is not None else []
     if len(groups) == 2:
         r.series = {**{g: {"colour": c} for g, c in zip(groups, PAIR)}, **r.series}
+    if len(p.least) == 3 and frame is not None and r.y in frame:
+        v = pd.to_numeric(frame[r.y], errors="coerce").to_numpy(float)
+        v = v[np.isfinite(v)]
+        if not v.size or (v.min() >= p.least[0] and v.max() < p.least[1] and v.max() - v.min() == 0):
+            r.y_range = [float(p.least[0]), float(p.least[1])]      # nothing to scale the axis by: a plain one
+            r.notes = list(r.notes) + [p.least[2]]
     return r
 
 
 def fill(preset: PresetDef, sel: Selection) -> Spec:
     """``preset`` filled from ``sel``: an ordinary figure, every panel editable."""
     panels = [panel(p, sel) for p in preset.panels]
+    for p, r in zip(preset.panels, panels):
+        r.span = list(p.span) if p.span else r.span
+        r.letter = p.letter or r.letter
     for r in panels:                                 # trace panels with two sets: black and grey
         f = r.frame()
         if r.question == "example" and f is not None:
             sets = [t for t in dict.fromkeys(f["Trace"]) if t not in OVERLAY_LOOK]
             if len(sets) == 2:
                 r.series = {**{g: {"colour": c} for g, c in zip(sets, PAIR)}, **r.series}
-    return Spec(panels, columns=min(preset.columns, len(panels)), size=preset.size)
+    return Spec(panels, columns=min(preset.columns, len(panels)), size=preset.size,
+                height_mm=float(preset.height_mm), row_ratios=list(preset.row_ratios))

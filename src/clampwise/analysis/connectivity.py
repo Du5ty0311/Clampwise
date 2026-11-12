@@ -153,7 +153,7 @@ def _windows(st, sweeps: list[int], n_pulses: int) -> np.ndarray:
     return np.vstack([np.asarray(st.times_s[i][:n_pulses], float) for i in sweeps])
 
 
-@register("connectivity", "Connected or not", version=2, types={"cc_evoked", "vc_evoked"}, settings=SETTINGS,
+@register("connectivity", "Connected or not", version=3, types={"cc_evoked", "vc_evoked"}, settings=SETTINGS,
           outputs=OUTPUTS, requires=("evoked",),
           description="Whether the recorded cell answers the stimulus more often than chance: every response "
                       "window against matched sham windows in the same sweeps, with the false-positive rate "
@@ -393,8 +393,9 @@ def run(recording: Recording, context, s) -> Result | None:
         pattern, source = pattern_from_name(recording.source.stem), "the file's name"
     out.values.update({"pattern": pattern, "pattern_source": source})
     for j, row in enumerate(pulse_rows):
-        row["latency_median_ms"] = float(np.median([v for (k, jj), v in lat.items() if jj == row["pulse"] - 1])) * 1e3 \
-            if any(jj == row["pulse"] - 1 for (_, jj) in lat) else NAN
+        mine = [v for (k, jj), v in lat.items() if jj == row["pulse"] - 1]
+        row["latency_median_ms"] = float(np.median(mine)) * 1e3 if mine else NAN
+        row["jitter_ms"] = float(np.std(mine, ddof=1)) * 1e3 if len(mine) > 1 else NAN
         row["efficacy"] = float(np.mean([amp[key] for key in all_keys if key[1] == row["pulse"] - 1 and not spiked[key]])) \
             if any(key[1] == row["pulse"] - 1 and not spiked[key] for key in all_keys) else NAN
         row["potency"] = float(np.mean([amp[key] for key in succ_keys if key[1] == row["pulse"] - 1])) \
@@ -404,11 +405,15 @@ def run(recording: Recording, context, s) -> Result | None:
     if in_blank:
         out.notes.append(f"{in_blank} success(es) already under way where the light's blank ends ({blank * 1e3:.1f} "
                          "ms): their onsets lie inside the blank and are not known")
-    out.tables["windows"] = [{"sweep": sweeps[k], "pulse": j + 1, "z": rows_z[k, j], "success": bool(success[k, j]),
+    out.tables["windows"] = [{"sweep": sweeps[k], "pulse": j + 1, "z": rows_z[k, j],
+                              "over_threshold": float(rows_z[k, j] / threshold) if threshold > 0 else NAN,
+                              "success": bool(success[k, j]),
                               "spiked": bool(spiked[k, j]), "spike_latency_ms": spike_lat[k, j] * 1e3,
                               "latency_ms": lat.get((k, j), NAN) * 1e3,
                               "amplitude": amp.get((k, j), NAN), "early": (k, j) in early_keys}
                              for k in range(len(sweeps)) for j in range(n_pulses) if have[k, j]]
+    # the sham windows themselves: what the response windows are judged against, to draw beside them
+    out.tables["shams"] = [{"sweep": sweeps[k], "z": float(z)} for k in range(len(sweeps)) for z in shams[k]]
     what = {"yes": f"connected: the {int(have.sum())} response windows beat the sham windows (p = {p:.3f})",
             "no": f"not connected: the {int(have.sum())} response windows do no better than sham windows in the same "
                   f"sweeps (p = {p:.2f})",
@@ -458,6 +463,10 @@ CELL_OUTPUTS = (
 )
 
 
+def _p_words(p: float) -> str:
+    return "p < 0.001" if p < 0.001 else f"p = {p:.3f}"
+
+
 def holm(p: list[float]) -> list[float]:
     """Holm's step-down correction of ``p`` over its own length, in the order given."""
     order = np.argsort(p)
@@ -468,7 +477,7 @@ def holm(p: list[float]) -> list[float]:
     return out
 
 
-@register("connectivity_cell", "Connected or not, over a cell's files", version=2, types={"cc_evoked", "vc_evoked"},
+@register("connectivity_cell", "Connected or not, over a cell's files", version=3, types={"cc_evoked", "vc_evoked"},
           outputs=CELL_OUTPUTS, level="cell",
           description="A cell's recordings with a stimulus side by side (the targeted cell alone, each region, "
                       "the full field): connected or not, success rate, latency and jitter, amplitude with and "
@@ -499,13 +508,26 @@ def run_cell(cell, s) -> Result | None:
                      "efficacy": v.get("efficacy", NAN), "potency": v.get("potency", NAN),
                      "direct_photocurrent": v.get("direct_photocurrent", ""), "units": v.get("units", "")})
     out.tables["files"] = rows
+    # every response window of every file, named by its pattern: one table to draw the patterns side by side from
+    # (successes over windows, latencies, amplitudes); each response as a multiple of its own file's sham threshold,
+    # so files recorded at different noise share one axis
+    every = []
+    for m in sorted(members, key=when):
+        c = m.result("connectivity")
+        pattern = c.values.get("pattern", "") or m.name
+        for w in c.tables.get("windows", []):
+            every.append({"file": m.name, "pattern": pattern, "sweep": w["sweep"], "pulse": w["pulse"],
+                          "outcome": "success" if w["success"] else "failure", "z": w["z"],
+                          "over_threshold": w.get("over_threshold", NAN), "latency_ms": w["latency_ms"],
+                          "amplitude": w["amplitude"], "spiked": w["spiked"]})
+    out.tables["windows"] = every
     yes = [r for r in rows if r["connected"] == "yes"]
     no = [r for r in rows if r["connected"] == "no"]
     out.values.update({"n_files": len(rows), "n_connected": len(yes),
                        "patterns_connected": ", ".join(r["pattern"] or r["file"] for r in yes),
                        "patterns_not": ", ".join(r["pattern"] or r["file"] for r in no),
                        "summary": "; ".join(f"{r['pattern'] or r['file']}: {r['connected']}"
-                                            + (f" (p = {r['p']:.3f}, {r['success_rate']:.0%} successes"
+                                            + (f" ({_p_words(r['p'])}, {r['success_rate']:.0%} successes"
                                                + (f", {r['latency_median_ms']:.1f} ms)" if np.isfinite(r['latency_median_ms'])
                                                   else ")") if np.isfinite(r["p"]) else "")
                                             for r in rows)})

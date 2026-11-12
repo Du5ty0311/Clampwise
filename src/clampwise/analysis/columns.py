@@ -205,6 +205,10 @@ TABLES = {
         _o("spikes", "Windows in which the cell fired.", "count", label="Spikes"),
         _o("latency_median_ms", "Median onset of this pulse's successes (the lab's onset).", "ms",
            "Ahmed, Headley & Pare 2021", label="Latency (median)"),
+        _o("jitter_ms", "SD of the onsets of this pulse's successes (blank under two).", "ms", label="Jitter"),
+        _o("over_threshold", "The window's departure over the sham threshold: 1 is the threshold, more is a "
+           "success. Files recorded at different noise share this scale.", "ratio",
+           label="Response / sham threshold"),
         _o("efficacy", "Amplitude with failures: the mean over every window at the fixed peak time.", "signal units",
            "Geracitano et al. 2007", label="Amplitude with failures"),
         _o("potency", "Amplitude of the successes alone.", "signal units", "Geracitano et al. 2007",
@@ -235,6 +239,18 @@ TABLES = {
            label="Success rate, to"),
         _o("smallest_detectable", "The smallest response a window could have held and counted as a success in "
            "this file (the sham threshold times the noise).", "signal units", label="Smallest detectable"),
+        _o("sweep", "The sweep the window is in.", label="Sweep"),
+        _o("pulse", "Which pulse of the sweep the window follows.", label="Pulse"),
+        _o("outcome", "The window's outcome: success (it beats its file's sham threshold, or holds a spike) or "
+           "failure.", label="Outcome"),
+        _o("z", "The window's largest departure from its own baseline, over the sweep's baseline noise SD.",
+           "ratio", label="Departure (z)"),
+        _o("over_threshold", "The window's departure over its own file's sham threshold: 1 is the threshold, more "
+           "is a success.", "ratio", label="Response / sham threshold"),
+        _o("latency_ms", "The window's onset after the stimulus (successes only).", "ms", label="Latency"),
+        _o("amplitude", "The window's departure at its file's fixed peak time, signed as the response.",
+           "signal units", label="Amplitude"),
+        _o("spiked", "Whether the cell fired in the window.", label="Spiked"),
         _o("pattern_a", "The first pattern of the pair.", label="Pattern"),
         _o("pattern_b", "The second pattern of the pair.", label="Against"),
         _o("successes_a", "The first pattern's successes.", "count", label="Successes"),

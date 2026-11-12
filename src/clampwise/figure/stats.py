@@ -14,6 +14,11 @@ cell (the prepared points), never on pooled events or sweeps:
 
 Each comparison is said in one plain sentence, and ``methods`` writes the
 paragraph for a paper.
+
+Proportions (connected or not, a success or a failure) are another kind of number: each is given with
+Wilson's 95% score interval (sound for few trials and for shares near 0 or 1, where the usual plus-or-minus is
+not; Wilson 1927; Brown, Cai & DasGupta 2001), two are compared by Fisher's exact test, and their difference
+has Newcombe's hybrid score interval (Newcombe 1998).
 """
 
 from __future__ import annotations
@@ -25,6 +30,16 @@ import pandas as pd
 from scipy import stats as sps
 
 RESAMPLES = 5000
+
+# the tests a person can ask for by name: key -> (its name, what it assumes, whether it pairs the cells)
+TESTS = {
+    "": ("Automatic", "Welch's t test for separate groups; the paired t test when the same cells are in both", None),
+    "welch": ("Welch's t test", "cell means roughly normal, variances may differ", False),
+    "student": ("Student's t test", "cell means roughly normal, equal variances", False),
+    "mann_whitney": ("Mann-Whitney U", "no normality assumed", False),
+    "paired_t": ("Paired t test", "the same cells in both groups; their differences roughly normal", True),
+    "wilcoxon": ("Wilcoxon signed-rank", "the same cells in both groups; no normality assumed", True),
+}
 
 
 @dataclass
@@ -43,8 +58,19 @@ class Comparison:
     n: str
     resampled: str              # what the bootstrap resampled
     mixed: str = ""             # the mixed model's line, when there is one
+    kind: str = "means"         # "proportions": k of n in each group, Fisher's exact test
+    counts: tuple = ()          # proportions: (k of the first group, its n, k of the other, its n)
+    of: str = ""                # proportions: what is counted ("rows", "cells") and the category
 
     def sentence(self, units: str = "") -> str:
+        if self.kind == "proportions":
+            k1, n1, k2, n2 = self.counts
+            p = f"{self.test} {fmt_p(self.p)}" + (" (Holm-corrected)" if self.p != self.p_raw else "")
+            return (f"{self.other} vs. {self.reference}: {k2} of {n2} against {k1} of {n1} {self.of} "
+                    f"({100 * k2 / n2 if n2 else float('nan'):.0f}% against "
+                    f"{100 * k1 / n1 if n1 else float('nan'):.0f}%; difference {100 * self.difference:+.0f} "
+                    f"percentage points, 95% CI {100 * self.ci[0]:.0f} to {100 * self.ci[1]:.0f}, Newcombe's "
+                    f"interval); {p}.")
         u = f" {units}" if units else ""
         p = f"{self.test} {fmt_p(self.p)}" + (" (Holm-corrected)" if self.p != self.p_raw else "")
         return (f"{self.other} vs. {self.reference}: {'mean paired difference' if self.paired else 'difference'} "
@@ -102,6 +128,52 @@ def bootstrap_difference(a, b, animals_a=None, animals_b=None, paired: bool = Fa
     return float(lo), float(hi)
 
 
+def wilson(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+    """Wilson's score interval (95% unless ``z`` is given) of the proportion k / n; (nan, nan) when n is 0."""
+    if n <= 0:
+        return np.nan, np.nan
+    p = k / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return float(max(0.0, centre - half)), float(min(1.0, centre + half))
+
+
+def newcombe(k1: int, n1: int, k2: int, n2: int) -> tuple[float, float]:
+    """The 95% interval of the difference of two independent proportions, k2/n2 - k1/n1, by Newcombe's hybrid
+    score method (his method 10: each proportion's Wilson limits combined)."""
+    if n1 <= 0 or n2 <= 0:
+        return np.nan, np.nan
+    p1, p2 = k1 / n1, k2 / n2
+    l1, u1 = wilson(k1, n1)
+    l2, u2 = wilson(k2, n2)
+    d = p2 - p1
+    return (float(d - np.sqrt((p2 - l2) ** 2 + (u1 - p1) ** 2)), float(d + np.sqrt((u2 - p2) ** 2 + (p1 - l1) ** 2)))
+
+
+def compare_proportions(counts: dict, pairs: str = "first", of: str = "rows") -> list[Comparison]:
+    """Groups compared on a proportion. ``counts``: {group: (k, n)} in the figure's order; each group with the
+    first, or every pair (``pairs`` "all"); Fisher's exact test, Holm-corrected over the comparisons made."""
+    groups = list(counts)
+    if len(groups) < 2:
+        return []
+    todo = [(a, b) for i, a in enumerate(groups) for b in groups[i + 1:]] if pairs == "all" else \
+        [(groups[0], b) for b in groups[1:]]
+    out = []
+    for ref, other in todo:
+        (k1, n1), (k2, n2) = counts[ref], counts[other]
+        k1, n1, k2, n2 = int(k1), int(n1), int(k2), int(n2)
+        if n1 <= 0 or n2 <= 0:
+            continue
+        p = float(sps.fisher_exact([[k1, n1 - k1], [k2, n2 - k2]])[1])
+        out.append(Comparison(ref, other, k2 / n2 - k1 / n1, newcombe(k1, n1, k2, n2), np.nan, "Fisher's exact test",
+                              p, p, "", np.nan, False, f"n = {n1} and {n2} {of.split(' ')[0]}", "", "",
+                              "proportions", (k1, n1, k2, n2), of))
+    if len(out) > 1:
+        for c, adj in zip(out, holm([c.p_raw for c in out])):
+            c.p = adj
+    return out
+
+
 def holm(p: list[float]) -> list[float]:
     p = np.asarray(p, float)
     order = np.argsort(p)
@@ -135,17 +207,24 @@ def _mixed(points: pd.DataFrame, ref: str, other: str) -> str:
         return "The mixed model could not be fitted (too few animals or no variance between them)."
 
 
-def compare(points: pd.DataFrame, paired: bool = False, panel: str | None = None) -> list[Comparison]:
-    """Each group against the first, on one value per cell (``points``: group, y,
-    cell, animal)."""
+def compare(points: pd.DataFrame, paired: bool = False, panel: str | None = None, test: str = "",
+            pairs: str = "first") -> list[Comparison]:
+    """Groups compared on one value per cell (``points``: group, y, cell, animal): each with the first, or
+    every pair (``pairs`` "all"). ``test`` names whose p is the comparison's own (``TESTS``; "": Welch's t, or the
+    paired t for a paired design); the other test of its kind is reported beside. A paired test pairs the cells
+    whether or not ``paired`` is set."""
     if panel is not None:
         points = points[points.panel == panel]
     groups = list(dict.fromkeys(points.group))
     if len(groups) < 2:
         return []
-    ref = groups[0]
+    wanted = TESTS.get(test, TESTS[""])[2]
+    if wanted is not None:
+        paired = wanted
+    todo = [(a, b) for i, a in enumerate(groups) for b in groups[i + 1:]] if pairs == "all" else \
+        [(groups[0], b) for b in groups[1:]]
     out = []
-    for other in groups[1:]:
+    for ref, other in todo:
         a_rows = points[points.group == ref]
         b_rows = points[points.group == other]
         named = (points.animal != "").any()
@@ -161,6 +240,8 @@ def compare(points: pd.DataFrame, paired: bool = False, panel: str | None = None
             p = sps.ttest_rel(b, a).pvalue if a.size > 1 else np.nan
             p2 = sps.wilcoxon(b, a).pvalue if a.size > 1 and np.any(b != a) else np.nan
             names = ("paired t test (differences roughly normal)", "Wilcoxon signed-rank (no normality assumed)")
+            if test == "wilcoxon":
+                p, p2, names = p2, p, names[::-1]
             n = f"n = {a.size} cells measured in both" + (f" from {len(set(animals))} animals" if named else "")
         else:
             a, b = a_rows["y"].to_numpy(float), b_rows["y"].to_numpy(float)
@@ -174,6 +255,11 @@ def compare(points: pd.DataFrame, paired: bool = False, panel: str | None = None
             p2 = sps.mannwhitneyu(b, a).pvalue if a.size and b.size else np.nan
             names = ("Welch's t test (cell means roughly normal, variances may differ)",
                      "Mann-Whitney U (no normality assumed)")
+            if test == "student":
+                p = sps.ttest_ind(b, a, equal_var=True).pvalue if a.size > 1 and b.size > 1 else np.nan
+                names = ("Student's t test (cell means roughly normal, equal variances)", names[1])
+            elif test == "mann_whitney":
+                p, p2, names = p2, p, names[::-1]
             n = f"n = {a.size} and {b.size} cells" + (
                 f" from {len(set(aa))} and {len(set(ab))} animals" if named else "")
         g = hedges_g(a, b)
@@ -191,6 +277,17 @@ def methods(comparisons: list[Comparison]) -> str:
     """The statistics paragraph for a paper."""
     if not comparisons:
         return ""
+    shares = [c for c in comparisons if c.kind == "proportions"]
+    comparisons = [c for c in comparisons if c.kind != "proportions"]
+    said = ""
+    if shares:
+        said = ("Proportions are given with Wilson's 95% score interval (Wilson 1927; Brown, Cai & DasGupta 2001) "
+                "and were compared with Fisher's exact test"
+                + (", Holm-corrected over the comparisons made" if len(shares) > 1 else "")
+                + "; the difference of two proportions is given with Newcombe's hybrid score interval (Newcombe "
+                "1998).")
+    if not comparisons:
+        return said
     c = comparisons[0]
     level = "animal and cell" if "animals" in c.resampled else "cell"
     text = (f"Comparisons were made on one value per cell (the mean of its measurements). Effects are given as the "
@@ -198,12 +295,13 @@ def methods(comparisons: list[Comparison]) -> str:
             f"{RESAMPLES} bootstrap resamples of {c.resampled} (percentile interval"
             + ("; hierarchical bootstrap, Saravanan et al. 2020" if level != "cell" else "") +
             ") and as Hedges' g. ")
-    text += (f"p values are from {'paired t tests and Wilcoxon signed-rank tests' if c.paired else 'Welch' + chr(39) + 's t tests and Mann-Whitney U tests'} "
-             "on the cell values" + (", Holm-corrected for the comparisons with the first group" if len(comparisons) > 1
-                                     else "") + ".")
+    every = len({x.reference for x in comparisons}) > 1
+    text += (f"p values are from {c.test}s (and, beside them, {c.other_test} tests) on the cell values"
+             + ((", Holm-corrected over every pair of groups" if every else
+                 ", Holm-corrected for the comparisons with the first group") if len(comparisons) > 1 else "") + ".")
     if any(x.mixed.startswith("Mixed model") for x in comparisons):
         text += " A linear mixed model with animal as a random intercept (statsmodels MixedLM, REML) is reported beside."
-    return text
+    return text + (" " + said if said else "")
 
 
 def nested_false_positives(n_sims: int = 400, animals: int = 4, cells: int = 4, events: int = 30,

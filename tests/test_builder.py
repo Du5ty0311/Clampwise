@@ -24,12 +24,19 @@ def builder(qapp):
     from clampwise.app import theme
     from clampwise.app.window import MainWindow
 
-    theme.apply(qapp, theme.LIGHT)
+    from pyqtgraph.Qt import QtCore
+
+    if not qapp.styleSheet():
+        theme.apply(qapp, theme.LIGHT)
     w = MainWindow(theme.LIGHT, persist=False)
     b = w.screens["figures"].open_builder()
     yield b
     b.close()
     w.close()
+    b.deleteLater()               # a closed window is still styled, each time the theme is set: gone, not kept
+    w.deleteLater()
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    qapp.processEvents()
 
 
 def _choose(b, key):
@@ -396,3 +403,377 @@ def test_a_preset_fills_the_builder_and_every_panel_stays_editable(builder, tmp_
             break
         b.undo()
     assert len(b.spec.panels) == 1                                  # undo goes back to before the preset
+
+
+# ---------------------------------------------------------------- the figure worked on directly
+
+def _centre(canvas, tag):
+    from pyqtgraph.Qt import QtCore
+
+    o = canvas.outline(tag)
+    assert o is not None, tag
+    p = canvas.to_widget((o[0] + o[2]) / 2, (o[1] + o[3]) / 2)
+    return QtCore.QPoint(int(p.x()), int(p.y()))
+
+
+def _on(canvas, tag, part=""):
+    """A point on one of the thing's own artists (an L of scale bars has an empty middle)."""
+    from pyqtgraph.Qt import QtCore
+
+    from clampwise.figure import render
+
+    a = next(a for t, a in render.things(canvas.figure) if (t.kind, t.panel, t.key) == (tag.kind, tag.panel, tag.key)
+             and (not part or t.part == part))
+    bb = a.get_window_extent(render._renderer(canvas.figure))
+    p = canvas.to_widget((bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2)
+    return QtCore.QPoint(int(p.x()), int(p.y()))
+
+
+def _light(b):
+    """The builder's first panel showing two traces of a simulated light recording."""
+    from clampwise import simulate
+    from clampwise.analysis.stimulus import find_stimulus
+    from clampwise.figure import traces
+
+    rec = simulate.photostim_steps(seed=3).recording
+    rec.stimulus = find_stimulus(rec)
+    b._load = lambda _f: rec
+    b.set_traces([traces.TraceSet("0 pA", "average", [["", 5, 1]]), traces.TraceSet("-80 pA", "average", [["", 3, 1]])],
+                 traces.Window(20, 160, True, 0.0), "light.abf")
+    b.redraw_now()
+    return rec
+
+
+def test_a_click_selects_a_drag_moves_and_a_double_click_rewrites(builder, tmp_path):
+    import controls_harness as ch
+    from pyqtgraph.Qt import QtCore
+
+    from clampwise.figure import render
+    from clampwise.figure.elements import Tag
+
+    b = builder
+    b.resize(1400, 900)
+    nested(effect=3.0).to_csv(tmp_path / "cells.csv", index=False)
+    b.open_file(str(tmp_path / "cells.csv"))
+    b.recipe.stats = True
+    b.touch()
+    b.redraw_now()
+    c = b.canvas
+    # a click on the y axis title selects it; the inspector shows it; the line above the figure says what can be done
+    ch.click(c, _centre(c, Tag("ylabel", 0)))
+    assert c.selection == Tag("ylabel", 0) and b.inspector.heading.text() == "Y axis title"
+    assert "double-click rewrites it" in b.how.text().lower() and b.side.currentIndex() == 0
+    # a double-click opens its words in place; Enter keeps them; Undo takes them back
+    ch.double_click(c, _centre(c, Tag("ylabel", 0)))
+    assert c._editor is not None and c._editor.text() == "Amplitude (pA)"
+    c._editor.setText("EPSC amplitude (pA)")
+    c._editor.returnPressed.emit()
+    assert b.recipe.y_label == "EPSC amplitude (pA)" and c._editor is None
+    b.undo()
+    assert b.recipe.y_label == ""
+    # Esc in the box leaves the words as they were
+    c.edit_text(Tag("xlabel", 0))
+    c._editor.setText("something else")
+    ch.QtWidgets.QApplication.sendEvent(c._editor, ch.QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Escape,
+                                                                      QtCore.Qt.NoModifier))
+    assert b.recipe.x_label == "" and c._editor is None
+    # the bracket dragged up stays there, and its text can be the person's own result
+    auto = next(a for t, a in render.things(b.fig) if (t.kind, t.part) == ("bracket", "line")).get_ydata()[1]
+    ch.drag(c, _on(c, Tag("bracket", 0, "control|drug"), "text"), 0, -30)
+    b.redraw_now()
+    assert b.recipe.brackets[0]["y"] > auto and b.recipe.brackets[0]["a"] == "control"
+    b.set_words(Tag("bracket", 0, "control|drug"), "t(22) = 5.1, p < 0.001")
+    b.redraw_now()
+    assert b.words_of(Tag("bracket", 0, "control|drug")) == "t(22) = 5.1, p < 0.001"
+    # Delete hides the selected bracket; a title is cleared; an axis cannot be removed and says so
+    c.select(Tag("bracket", 0, "control|drug"))
+    ch.QtWidgets.QApplication.sendEvent(c, ch.QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Delete,
+                                                              QtCore.Qt.NoModifier))
+    b.redraw_now()
+    assert b.recipe.brackets[0].get("hidden") and c.selection is None
+    b.remove_thing(Tag("yaxis", 0))
+    assert "cannot be removed" in b.statusBar().currentMessage()
+    # the points of a group: a click selects the group, whose colour then holds in every panel
+    dot = next(a for t, a in render.things(b.fig) if t == Tag("series", 0, "drug") and len(a.get_offsets()))
+    px = dot.get_offset_transform().transform(dot.get_offsets())[0]
+    p = c.to_widget(px[0], px[1])
+    ch.click(c, QtCore.QPoint(int(p.x()), int(p.y())))
+    assert c.selection == Tag("series", 0, "drug") and "drug" in b.inspector.hint.text()
+    b.set_group_colour("drug", "#AA3377")
+    b.touch()
+    b.redraw_now()
+    assert b.look_of(0, "drug").colour == "#AA3377" and b.spec.style.group_colours == {"drug": "#AA3377"}
+
+
+def test_traces_bars_and_text_are_dragged_where_they_go(builder):
+    import controls_harness as ch
+
+    from clampwise.figure.elements import Tag
+
+    b = builder
+    b.resize(1400, 900)
+    _light(b)
+    c = b.canvas
+    r = b.recipe
+    assert [bar["start"] for bar in r.stim_bars] == [0.0, 105.0] and r.vm_labels == {"0 pA": "-60 mV", "-80 pA": "-68 mV"}
+    assert r.scale_bars and r.y2 == "Command (pA)" and "Raw traces: 0 pA (1 sweep)" in b.source_words(0)
+    # the scale bars: dragged (by the corner they enclose too), then given a length and a label
+    ch.drag(c, _centre(c, Tag("scalebar", 0, "")), -50, -30)
+    b.redraw_now()
+    at = r.scale_bar["at"]
+    assert at[0] < 0.995 and at[1] > 0.02
+    c.select(Tag("scalebar", 0, ""))
+    assert b.inspector.heading.text() == "Scale bars"
+    edit = next(w for w in b.inspector.findChildren(ch.QtWidgets.QLineEdit) if w.accessibleName() == "Time bar (ms)")
+    edit.setText("20")
+    edit.editingFinished.emit()
+    b.redraw_now()
+    assert r.scale_bar["x"] == 20.0
+    # a stimulus bar: dragged up (never sideways: its time is the recording's), relabelled in place, removed
+    y0 = r.stim_bars[0].get("y", 1.02)
+    ch.drag(c, _centre(c, Tag("stimbar", 0, "0")), 40, -15)
+    b.redraw_now()
+    assert r.stim_bars[0]["y"] > y0 and r.stim_bars[0]["start"] == 0.0
+    b.set_words(Tag("stimbar", 0, "0"), "470 nm, 5 ms")
+    b.set_stim_light(r.stim_bars[1], "630")
+    b.match_stim_bars(0, 1)
+    assert all(bar["nm"] == 630.0 for bar in r.stim_bars) and r.stim_bars[0]["label"] == "470 nm, 5 ms"
+    b.add_stim_bar(0)
+    assert len(r.stim_bars) == 3 and c.selection == Tag("stimbar", 0, "2")
+    b.remove_thing(c.selection)
+    assert len(r.stim_bars) == 2
+    # text added in the middle, dragged, rewritten; an arrow's words are what moves
+    b.add_annotation(0, "text")
+    where = dict(r.annotations[0])
+    ch.drag(c, _centre(c, c.selection), 60, -25)
+    b.redraw_now()
+    assert r.annotations[0]["x"] > where["x"] and r.annotations[0]["y"] > where["y"]
+    b.set_words(Tag("annotation", 0, "0"), "EPSP")
+    b.add_annotation(0, "arrow")
+    tip = (r.annotations[1]["x"], r.annotations[1]["y"])
+    ch.drag(c, _centre(c, c.selection), -30, 10)
+    b.redraw_now()
+    assert (r.annotations[1]["x"], r.annotations[1]["y"]) == tip and r.annotations[0]["text"] == "EPSP"
+    # an arrow key nudges the selection half a millimetre; the letter is dragged from its corner and put back
+    c.select(Tag("annotation", 0, "0"))
+    x = r.annotations[0]["x"]
+    b._nudged(c.selection, 0.5, 0.0)
+    assert r.annotations[0]["x"] > x
+    b.set_panels(2)
+    b.redraw_now()
+    ch.drag(c, _centre(c, Tag("letter", 0)), 20, 10)
+    b.redraw_now()
+    assert r.letter_offset[0] > 0 and r.letter_offset[1] > 0
+    # the potential at a trace's start rewritten; the labels hidden
+    b.set_words(Tag("vmlabel", 0, "0 pA"), "rest")
+    assert r.vm_labels["0 pA"] == "rest"
+    b.remove_thing(Tag("vmlabel", 0, "0 pA"))
+    assert r.show_vm is False
+
+
+def test_panels_are_arranged_placed_freely_resized_and_inset(builder, tmp_path):
+    import controls_harness as ch
+
+    from clampwise.figure import page
+    from clampwise.figure.elements import Tag
+
+    b = builder
+    b.resize(1400, 900)
+    nested().to_csv(tmp_path / "cells.csv", index=False)
+    b.open_file(str(tmp_path / "cells.csv"))
+    b.use_template("wide_top_3")                                       # three places more: empty panels to fill
+    b.redraw_now()
+    assert len(b.spec.panels) == 4 and b.spec.columns == 3 and b.spec.size == "double"
+    assert [r.span for r in b.spec.panels] == [[3, 1], [1, 1], [1, 1], [1, 1]]
+    assert sum(r.frame() is None for r in b.spec.panels) == 3 and "two columns wide" in b.statusBar().currentMessage()
+    c = b.canvas
+    assert not b._can_resize(Tag("panel", 1))                          # in the grid: its cell sets its size
+    # a grid panel dropped on another changes places with it (what each shows, not the cells)
+    b.spec.panels[1].title = "second"
+    ch.drag(c, _centre(c, Tag("panel", 1)), int(c.width() * 0.33), 0)
+    b.redraw_now()
+    assert b.spec.panels[2].title == "second" and b.spec.panels[1].title == ""
+    assert [r.span for r in b.spec.panels] == [[3, 1], [1, 1], [1, 1], [1, 1]]
+    # placed freely: every panel keeps where it was, the page its height; then one is dragged and resized
+    w, h = b.spec.size_mm()
+    b.place_freely(2, True)
+    b.redraw_now()
+    assert all(len(r.rect) == 4 for r in b.spec.panels) and b.spec.size_mm() == (w, pytest.approx(h, abs=0.06))
+    before = list(b.spec.panels[2].rect)
+    c.select(Tag("panel", 2))
+    assert b._can_resize(Tag("panel", 2)) and len(c._handles()) == 8
+    ch.drag(c, _centre(c, Tag("panel", 2)), 0, -40)
+    b.redraw_now()
+    moved = list(b.spec.panels[2].rect)
+    assert moved[1] < before[1] and moved[0] == before[0] and moved[2:] == before[2:]
+    handle = c._handles()["se"].center().toPoint()
+    ch.drag(c, handle, -30, -20)
+    b.redraw_now()
+    assert b.spec.panels[2].rect[2] < moved[2] and b.spec.panels[2].rect[3] < moved[3]
+    b.spec.snap_mm = 5.0                                               # then a drag lands on the 5 mm grid
+    ch.drag(c, _centre(c, Tag("panel", 2)), 13, 7)
+    b.redraw_now()
+    assert all(abs(v / 5.0 - round(v / 5.0)) < 1e-6 for v in b.spec.panels[2].rect[:2])
+    b.canvas.select(Tag("panel", 3))
+    b.arrange("top")                                                   # the selected panel leads
+    assert b.spec.panels[1].rect[1] == b.spec.panels[3].rect[1] == b.spec.panels[2].rect[1]
+    b.all_grid()
+    assert all(r.rect == [] for r in b.spec.panels) and b.spec.height_mm == 0.0
+    # an inset in the first panel: empty, selected, resizable inside its panel; removing the panel frees it
+    b.add_inset(0)
+    assert len(b.spec.panels) == 5 and page.is_inset(b.spec.panels, 4) and c.selection == Tag("panel", 4)
+    assert b._can_resize(Tag("panel", 4)) and b.tabs.tabText(4).endswith("(inset)")
+    rect = list(b.spec.panels[4].inset_rect)
+    ch.drag(c, _centre(c, Tag("panel", 4)), -40, 0)
+    b.redraw_now()
+    assert b.spec.panels[4].inset_rect[0] < rect[0]
+    b.remove_panel(0)
+    assert len(b.spec.panels) == 4 and not any(page.is_inset(b.spec.panels, k) for k in range(4))
+    for _ in range(40):
+        if not b.undo_button.isEnabled():
+            break
+        b.undo()
+    assert len(b.spec.panels) == 1 and b.spec.panels[0].span == []     # every step taken back
+
+
+def test_add_panel_asks_for_the_data_then_the_plot(builder, tmp_path, monkeypatch):
+    import controls_harness as ch
+    from pyqtgraph.Qt import QtWidgets as W
+
+    from clampwise.app import addpanel
+
+    b = builder
+    nested().to_csv(tmp_path / "cells.csv", index=False)
+    asked = []
+
+    def answer(dlg):
+        asked.append(type(dlg).__name__)
+        if isinstance(dlg, addpanel.DataChooser):
+            row = next(i for i in range(dlg.list.count()) if dlg.list.item(i).data(ch.QtCore.Qt.UserRole) == "file")
+            dlg.list.setCurrentRow(row)
+            assert dlg.ok.isEnabled()
+            off = next(dlg.list.item(i) for i in range(dlg.list.count())
+                       if dlg.list.item(i).data(ch.QtCore.Qt.UserRole) == "project")
+            assert not off.flags() & ch.QtCore.Qt.ItemIsEnabled and "open a project" in off.toolTip()
+            dlg.accept()
+            return W.QDialog.Accepted
+        if isinstance(dlg, addpanel.PlotChooser):
+            assert len(dlg.buttons) >= 30 and not dlg.buttons["box"].icon().isNull()
+            dlg.buttons["box"].click()
+            assert "Box plot" in dlg.says.text() and dlg.ok.isEnabled()
+            dlg.accept()
+            return W.QDialog.Accepted
+        return W.QDialog.Rejected
+
+    monkeypatch.setattr(W.QDialog, "exec_", lambda dlg, *a: answer(dlg))
+    monkeypatch.setattr(W.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(tmp_path / "cells.csv"), "")))
+    monkeypatch.setattr(W.QInputDialog, "getItem", staticmethod(lambda *a, **k: ("", False)))
+    assert b.spec.panels[0].frame() is None and "The page is empty" in b.add_button.toolTip()
+    b.add_button.click()                                               # the empty page's one panel is filled
+    assert asked == ["DataChooser", "PlotChooser"] and len(b.spec.panels) == 1
+    r = b.spec.panels[0]
+    assert (r.plot, r.y, r.group, r.cell) == ("box", "Amplitude (pA)", "Condition", "Cell")
+    b.add_button.click()                                               # no empty panel left: a new one, beside it
+    assert len(b.spec.panels) == 2 and b.spec.columns == 2 and b.current == 1 and b.spec.size == "double"
+    assert b.canvas.selection.kind == "panel" and b.canvas.selection.panel == 1
+    # a double-click on a panel with data asks how it is drawn; the plot's question follows
+    asked.clear()
+    b._activated(b.canvas.selection)
+    assert asked == ["PlotChooser"]
+    b.set_plot("cumulative")
+    assert b.recipe.plot == "cumulative" and b.recipe.question == "distribution"
+    b.set_plot("time_course")                                          # a plot that needs an x takes the time column
+    assert b.recipe.question == "time" and b.recipe.x == ""            # (none in this table: left to be named)
+
+
+def test_the_data_behind_a_panel_its_rows_and_the_test(builder, tmp_path):
+    from pyqtgraph.Qt import QtCore
+    from pyqtgraph.Qt import QtWidgets as W
+
+    from clampwise.figure.elements import Tag
+
+    b = builder
+    nested(effect=3.0).to_csv(tmp_path / "cells.csv", index=False)
+    b.open_file(str(tmp_path / "cells.csv"))
+    b.redraw_now()
+    b.side.setCurrentIndex(1)
+    v = b.dataview
+    m = v.model
+    heads = [m.headerData(c, QtCore.Qt.Horizontal) for c in range(m.columnCount())]
+    assert heads == ["Condition\nGroups", "Animal\nAnimal", "Cell\nCell", "Amplitude (pA)\nY"]
+    assert m.rowCount() == 480 and "cells.csv: 480 rows" in v.where.text() and "480 rows, 4 columns" in v.count.text()
+    assert "Y</b>: Amplitude (pA)" in v.roles.text() and "each point is a cell" in v.roles.text()
+    assert not v.out_button.isEnabled() and "Select rows" in v.out_button.toolTip()
+    # rows left out by hand: greyed in the table, out of the figure and its n, said in the legend; and put back
+    n = b._drawn[0].prepared.counts["control"][2]
+    v.table.selectRow(0)
+    v.table.selectionModel().select(m.index(1, 0), QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+    assert v.out_button.isEnabled()
+    v.out_button.click()
+    b.redraw_now()
+    assert b.recipe.excluded == [0, 1] and b._drawn[0].prepared.counts["control"][2] == n - 2
+    assert "2 left out by hand" in v.count.text() and "2 rows of the table left out by hand" in b.caption_text()
+    assert m.data(m.index(0, 0), QtCore.Qt.FontRole).strikeOut() and not m.data(m.index(5, 0), QtCore.Qt.FontRole).strikeOut()
+    v.table.selectRow(0)
+    assert v.in_button.isEnabled()
+    v.in_button.click()
+    assert b.recipe.excluded == [1]
+    b.undo()
+    assert b.recipe.excluded == [0, 1]
+    # the test is a choice; drawing it on the graph puts the bracket there with that test's p
+    assert "Welch's t test" in v.result.toPlainText()
+    v.test.setCurrentIndex(v.test.findData("mann_whitney"))
+    v.on_graph.setChecked(True)
+    b.redraw_now()
+    assert b.recipe.test == "mann_whitney" and b.recipe.stats
+    assert "Mann-Whitney U p" in v.result.toPlainText().split("Welch")[0]
+    assert b._drawn[0].comparisons[0].test == "Mann-Whitney U"
+    assert b.canvas.outline(Tag("bracket", 0, "control|drug")) is not None
+    v.test.setCurrentIndex(v.test.findData("wilcoxon"))                # a paired test pairs the cells
+    assert b.recipe.paired and v.says.currentData() == "p"
+    v.copy()
+    assert W.QApplication.clipboard().text().startswith("Condition\tAnimal\tCell\tAmplitude (pA)")
+
+
+def test_a_journal_is_a_choice_and_the_export_is_checked_first(builder, tmp_path, monkeypatch):
+    from pyqtgraph.Qt import QtWidgets as W
+
+    from clampwise.app.builder import ExportDialog
+
+    b = builder
+    nested().to_csv(tmp_path / "cells.csv", index=False)
+    b.open_file(str(tmp_path / "cells.csv"))
+    assert b.spec.journal == "" and b.spec.style.font_size == 7.0 and b.spec.size_mm()[0] == 85.0
+    b.set_journal("nature")
+    b.touch()
+    b.redraw_now()
+    assert b.spec.size_mm()[0] == 89.0 and b.spec.style.label_style == "a" and "Nature" in b.size_note.text()
+    assert [b.size.itemText(i) for i in range(b.size.count())] == ["Single column (89 mm)",
+                                                                  "One and a half column (120 mm)",
+                                                                  "Double column (183 mm)"]
+    b.spec.style.tick_size = 3.0                                       # too small to print
+    b.redraw_now()
+    assert any("under 5 pt" in w.text() for w in b.warnings.findChildren(W.QLabel))
+    seen = {}
+
+    def accept(dlg, *a):
+        if isinstance(dlg, ExportDialog):
+            seen["found"] = [dlg.findings.item(i).text() for i in range(dlg.findings.count())]
+            seen["format"] = dlg.format.currentData()
+            assert not dlg.dpi.isEnabled() and "no resolution" in dlg.dpi.toolTip()
+            dlg.format.setCurrentIndex(dlg.format.findData("png"))
+            assert dlg.dpi.isEnabled() and dlg.dpi.value() == 600 and not dlg.outline.isEnabled()
+            dlg.format.setCurrentIndex(dlg.format.findData("pdf"))
+            return W.QDialog.Accepted
+        return W.QDialog.Rejected
+
+    monkeypatch.setattr(W.QDialog, "exec_", accept)
+    monkeypatch.setattr(W.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(tmp_path / "out"), "")))
+    out = b.export()
+    assert out == tmp_path / "out.pdf" and out.stat().st_size > 2000 and seen["format"] == "pdf"
+    assert any(t.startswith("Fix:") and "under 5 pt" in t for t in seen["found"])
+    assert "89.0 ×" in b.statusBar().currentMessage()
+    b.set_journal("")
+    b.set_width("custom")
+    b.set_page(120.0, 50.0)
+    assert b.spec.size == "120x50" and b.spec.size_mm() == (120.0, 50.0)

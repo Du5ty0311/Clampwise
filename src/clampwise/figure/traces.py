@@ -73,6 +73,26 @@ def cut(recording, sweep: int, at_s: float, w: Window) -> tuple[np.ndarray, np.n
     return t, seg
 
 
+def cut_command(recording, sweep: int, at_s: float, w: Window) -> np.ndarray | None:
+    """The command the sweep was recorded under over the same stretch as ``cut`` (as commanded: no baseline
+    taken off, nothing blanked); None when the recording has no command."""
+    cmd = getattr(recording, "command", None)
+    if cmd is None or sweep >= len(cmd):
+        return None
+    fs = recording.sample_rate_hz
+    c = np.asarray(cmd[sweep], float)
+    i = int(round(at_s * fs))
+    a, b = max(0, i - int(w.before_ms * 1e-3 * fs)), min(c.size, i + int(w.after_ms * 1e-3 * fs))
+    return c[a:b].copy()
+
+
+def command_units(recording) -> str:
+    from ..core.recording import Role
+
+    c = recording.channel(Role.COMMAND) if recording is not None else None
+    return c.units if c is not None else ""
+
+
 def closest_to_mean(traces: list[np.ndarray]) -> int:
     """The index of the trace nearest the mean of them all (NaN ignored)."""
     m = np.array(traces, float)
@@ -147,8 +167,9 @@ def build(sets: list[TraceSet], load: Callable[[str], object], w: Window,
     marker. A sweep that cannot be cut (no such pulse) is left out and said. ``overlay`` draws over the first
     set: "kinetics" its rise and decay fit, {"name", "at_ms"} points marked on it (detected events)."""
     rows, notes, units, missing, first = [], [], "", 0, None
+    cmd_units, with_command = "", True
     for s in sets:
-        cuts, names = [], []
+        cuts, names, cmds = [], [], []
         for file, sweep, pulse, *at_s in s.items:
             rec = load(file)
             at = (float(at_s[0]) if at_s else stimulus_s(rec, int(sweep), int(pulse))) if rec is not None else np.nan
@@ -157,6 +178,8 @@ def build(sets: list[TraceSet], load: Callable[[str], object], w: Window,
                 continue
             units = units or rec.signal_units
             cuts.append(cut(rec, int(sweep), at, w))
+            cmds.append(cut_command(rec, int(sweep), at, w))
+            cmd_units = cmd_units or command_units(rec)
             name = f"{(str(file).replace(chr(92), '/').rsplit('/', 1)[-1] + ' ') if file else ''}"                 f"sweep {int(sweep) + 1}" + (f", pulse {int(pulse)}" if int(pulse) > 1 else "") + \
                 (f" at {float(at_s[0]):.3f} s" if at_s else "")
             names.append(name if name not in names else f"{name} ({len(names) + 1})")     # each its own line
@@ -165,37 +188,54 @@ def build(sets: list[TraceSet], load: Callable[[str], object], w: Window,
         n = min(len(t) for t, _ in cuts)
         t = cuts[0][0][:n]
         stack = np.array([y[:n] for _, y in cuts])
+        have_cmd = all(c is not None and c.size >= n for c in cmds)
+        with_command = with_command and have_cmd
+        cstack = np.array([c[:n] for c in cmds]) if have_cmd else None
         unit = "events" if all(len(i) > 3 for i in s.items) else "sweeps"     # aligned on events' onsets
+
+        def table(y, c, who):
+            """One drawn trace: thinned for drawing, its command read at the same times."""
+            tt, yy = thin(t, y)
+            f = pd.DataFrame({"t": tt, "y": yy}).assign(Trace=s.name, Sweep=who)
+            f["c"] = np.interp(tt, t, c) if c is not None else np.nan
+            return f
+
         if s.mode == "each":
             for k, y in enumerate(stack):
-                rows.append(pd.DataFrame(dict(zip("ty", thin(t, y)))).assign(Trace=s.name, Sweep=names[k]))
+                rows.append(table(y, cstack[k] if have_cmd else None, names[k]))
             notes.append(f"{s.name}: {len(cuts)} {unit}, each drawn.")
             continue
         if s.mode == "typical":
             k = closest_to_mean(list(stack))
-            y, who = stack[k], names[k]
+            y, who, c = stack[k], names[k], (cstack[k] if have_cmd else None)
             notes.append(f"{s.name}: {names[k]}, the one of {len(cuts)} closest to their mean.")
         else:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 y = np.nanmean(stack, axis=0)
+            c = cstack.mean(axis=0) if have_cmd else None
             who = names[0] if len(cuts) == 1 else f"{len(cuts)} {unit} averaged"
             notes.append(f"{s.name}: " + (names[0] if len(cuts) == 1 else f"the average of {len(cuts)} {unit}") + ".")
         first = first or (t, y)
-        rows.append(pd.DataFrame(dict(zip("ty", thin(t, y)))).assign(Trace=s.name, Sweep=who))
+        rows.append(table(y, c, who))
     if first and overlay == "kinetics":
         extra, said = kinetics(*first, w.blank_ms)
-        rows += extra
+        rows += [e.assign(c=np.nan) for e in extra]
         notes += said
     elif first and isinstance(overlay, dict):
         at = np.asarray(overlay.get("at_ms", []), float)
         at = at[(at >= first[0][0]) & (at <= first[0][-1])]
         rows.append(pd.DataFrame({"t": at, "y": np.interp(at, *first), "Trace": overlay.get("name", "marked"),
-                                  "Sweep": "marks"}))
+                                  "Sweep": "marks", "c": np.nan}))
         notes.append(f"{overlay.get('name', 'marked').capitalize()}: {len(at)}, at {overlay.get('where', 'their times')}.")
     name = f"{'Current' if units.lower() in ('pa', 'na') else 'Voltage'} ({units or 'signal'})"
     frame = pd.concat(rows, ignore_index=True).rename(columns={"t": "Time (ms)", "y": name}) if rows else \
         pd.DataFrame(columns=["Time (ms)", name, "Trace", "Sweep"])
+    if rows and with_command and frame["c"].notna().any() and float(np.nanmax(frame["c"]) - np.nanmin(frame["c"])) > 0:
+        # the command the traces were recorded under (a step, a holding change): drawn under them when asked
+        frame = frame.rename(columns={"c": command_column(cmd_units)})
+    elif "c" in frame:
+        frame = frame.drop(columns="c")
     if w.baseline:
         notes.append("Each trace is less its own level before the alignment point.")
     markers = []
@@ -206,6 +246,71 @@ def build(sets: list[TraceSet], load: Callable[[str], object], w: Window,
         notes.append(f"{missing} picked sweep(s) could not be read (file not found, or no such stimulus pulse) "
                      "and are left out.")
     return frame, notes, markers
+
+
+def command_column(units: str) -> str:
+    return f"Command ({units})" if units else "Command"
+
+
+def command_of(frame: pd.DataFrame) -> str:
+    """The name of a trace table's command column ("" when it has none)."""
+    return next((str(c) for c in frame.columns if str(c).startswith("Command")), "")
+
+
+LIGHT_NM = 470.0        # the lab's LED (a 470 nm source into the pattern illuminator); a bar's colour can be changed
+
+
+def extras(sets: list[TraceSet], load: Callable[[str], object], w: Window) -> dict:
+    """What a trace panel shows besides its traces, read from the recordings: ``stim_bars``, each stimulus pulse
+    inside the window as a bar at its time (ms from the alignment point; light in the light's colour, a shock as
+    a tick), taken from the first picked sweep that has a stimulus; and ``vm_labels``, what to write at each
+    trace's start: the membrane potential its sweeps sat at before the alignment point (current clamp), or the
+    potential they were held at (voltage clamp)."""
+    bars: list[dict] = []
+    labels: dict[str, str] = {}
+    for s in sets:
+        levels, vc, holding = [], False, np.nan
+        for file, sweep, pulse, *at_s in s.items:
+            rec = load(file)
+            if rec is None or not 0 <= int(sweep) < rec.n_sweeps:
+                continue
+            at = float(at_s[0]) if at_s else stimulus_s(rec, int(sweep), int(pulse))
+            if not np.isfinite(at):
+                continue
+            fs = rec.sample_rate_hz
+            vc = rec.signal_units.lower() in ("pa", "na")
+            holding = float(getattr(rec, "holding", np.nan))
+            y = np.asarray(rec.sweep(int(sweep)), float)
+            i = int(round(at * fs))
+            a = max(0, i - int(w.before_ms * 1e-3 * fs))
+            before = y[a:i] if i - a >= 3 else y[i:i + max(3, int(0.01 * fs))]     # aligned on the sweep's start
+            if before.size:
+                levels.append(float(np.median(before)))
+            if not bars:                              # (aligned on a pulse or on any other time of the sweep)
+                st = rec.stimulus
+                if not st.times_s:
+                    from ..analysis.stimulus import find_stimulus
+
+                    rec.stimulus = st = find_stimulus(rec)
+                if int(sweep) < len(st.times_s):
+                    ons = np.asarray(st.times_s[int(sweep)], float)
+                    wid = np.asarray(st.widths_s[int(sweep)], float) if int(sweep) < len(st.widths_s) else \
+                        np.zeros(ons.size)
+                    for j, on in enumerate(ons):
+                        start = (on - at) * 1e3
+                        if -w.before_ms <= start <= w.after_ms:
+                            width = float(wid[j]) * 1e3 if j < wid.size and np.isfinite(wid[j]) else 0.0
+                            bar = {"start": round(float(start), 3), "end": round(float(start + width), 3)}
+                            if st.kind == "light":
+                                bar["nm"] = LIGHT_NM
+                            else:
+                                bar["kind"] = "electrical"
+                            bars.append(bar)
+        if vc and np.isfinite(holding):
+            labels[s.name] = f"{holding:.0f} mV"
+        elif not vc and levels and np.isfinite(np.nanmedian(levels)):
+            labels[s.name] = f"{np.nanmedian(levels):.0f} mV"
+    return {"stim_bars": bars, "vm_labels": labels}
 
 
 def source(sets: list[TraceSet], w: Window, table: str, overlay: str | dict | None = None) -> dict:

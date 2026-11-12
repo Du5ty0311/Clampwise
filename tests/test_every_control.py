@@ -1,8 +1,9 @@
 """Every button, checkbox, pick list and menu action of the Workbench, the Figures screen and the figure builder
-is pressed, on a simulated recording of every recording type and, when ``E:\\Daniel`` is there, on copies of his
-files (nothing is ever analyzed in place). A control that raises is broken; so is one that changes nothing, an
-edit that Undo does not put back, and a disabled control that does not say why. Then, control by control, that
-each does what its label says.
+is pressed, on a simulated recording of every recording type and, when the lab's own recordings are named on this
+machine (``tests/labdata.py``), on copies of them (nothing is ever analyzed in place). In the builder the figure itself is a control too: each kind of thing
+drawn on it is clicked, dragged, double-clicked, moved with an arrow key, deleted and right-clicked. A control
+that raises is broken; so is one that changes nothing, an edit that Undo does not put back, and a disabled control
+that does not say why. Then, control by control, that each does what its label says.
 
 ``docs/development/CONTROLS.md`` lists every control with the effect checked; it is written from these runs
 (``tools/audit/controls_doc.py``), and a control missing from it fails here.
@@ -25,12 +26,13 @@ from pyqtgraph.Qt import QtCore, QtWidgets  # noqa: E402
 
 import controls_harness as ch  # noqa: E402
 
-DANIEL = Path(r"E:\Daniel")
-HIS = {"full field": DANIEL / "lab-project/A8/Slice3/cell1/Full_Field_cell_response.abf",
-       "step family": DANIEL / "lab-project/A8/Slice3/cell1/IV_response.abf",
-       "unknown": DANIEL / "lab-project-2/A4/Slice1/cell2/26n01002.abf"}
-needs_daniel = pytest.mark.skipif(not all(p.is_file() for p in HIS.values()),
-                                  reason="Daniel's recordings (E:\\Daniel) are not on this machine")
+from labdata import lab_file, lab_files  # noqa: E402
+
+# the lab's own recordings, named on this machine only (tests/labdata.py): never in the repository
+HIS = {"full field": lab_file("light, whole field"), "step family": lab_file("step family"),
+       "unknown": lab_file("unknown kind")}
+needs_daniel = pytest.mark.skipif(not lab_files("light, whole field", "step family", "unknown kind"),
+                                  reason="the lab's own recordings are not named on this machine (tests/labdata.py)")
 DOC = Path(__file__).resolve().parents[1] / "docs" / "development" / "CONTROLS.md"
 TYPES = list(ch.simulated())
 
@@ -91,13 +93,15 @@ def documented(outs: list[ch.Outcome]) -> None:
     assert not missing, "not in CONTROLS.md (run tools/audit/controls_doc.py): " + "; ".join(missing)
 
 
-def table(folder: Path) -> Path:
-    """Cells in animals in two conditions over time: a table every question of the builder can draw."""
+def table(folder: Path, third: bool = False) -> Path:
+    """Cells in animals in two conditions (three with ``third``) over time: a table every question of the builder
+    can draw."""
     rng = np.random.default_rng(0)
+    groups = (("control", 0.0), ("drug", 3.0)) + ((("vehicle", 0.5),) if third else ())
     rows = [{"Condition": g, "Animal": f"{g}-A{a}", "Cell": f"{g}-A{a}-C{c}", "Time (min)": float(t),
              "Amplitude (pA)": -20 + shift + rng.normal(0, 2), "Rise (ms)": 1 + rng.random()}
-            for g, shift in (("control", 0.0), ("drug", 3.0)) for a in range(3) for c in range(3) for t in range(8)]
-    path = folder / "cells.csv"
+            for g, shift in groups for a in range(3) for c in range(3) for t in range(8)]
+    path = folder / ("cells3.csv" if third else "cells.csv")
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
 
@@ -153,6 +157,10 @@ def builder_in(state: str, w, paths, folder: Path, answers: ch.Answers):
     fig = w.screens["figures"]
     path = next(iter(paths.values()))
     w.select(path)
+    if fig.builder is not None:                # each state in a builder of its own (Figures keeps one open)
+        fig.builder.close()
+        fig.builder.deleteLater()
+        fig.builder = None
     if state == "a graph of Figures":
         w.go("figures")
         return fig.edit_graph(fig.panels[0])
@@ -173,18 +181,191 @@ def builder_in(state: str, w, paths, folder: Path, answers: ch.Answers):
     return b
 
 
+def whole_figure(b, paths, folder: Path) -> None:
+    """A figure with one of everything a person can select on it: traces of a light recording (the light's bars,
+    scale bars, the command under them, the potential at each trace's start), a comparison with its bracket and a
+    reference line, a time course with its legend, a mark along x and a text; a title, letters, a text on the
+    page."""
+    from clampwise.figure import traces
+
+    b.open_file(str(table(folder)))
+    r = b.recipe
+    r.stats, r.title = True, "Amplitude"
+    r.brackets = [{"a": "control", "b": "drug", "y": -14.6}]
+    r.excluded = [1] + list(range(4, 40))                # (rows of every cell stay: 8 a cell)
+    r.letter_offset = [1.0, 0.5]
+    r.ref_lines = [{"axis": "y", "at": -21.0, "label": "baseline"}]
+    b.current = b._target(None)
+    b._load_controls()
+    b.open_file(str(table(folder, third=True)))
+    b.set_plot("time_course")
+    r = b.recipe
+    r.markers = [{"at": 2.0, "end": 4.0, "label": "drug"}]
+    r.annotations = [{"kind": "text", "x": 5.0, "y": -19.0, "text": "washout"}]
+    r.series = {"drug": {"colour": "#AA3377"}, "vehicle": {"hidden": True}}
+    b.current = b._target(None)
+    b._load_controls()
+    b.set_traces([traces.TraceSet("0 pA", "average", [[str(paths["light.abf"]), 5, 1]]),
+                  traces.TraceSet("-80 pA", "average", [[str(paths["light.abf"]), 3, 1]])],
+                 traces.Window(20, 160, True, 0.0), "light.abf")
+    b.recipe.command = {**b.recipe.command, "show": True}
+    b.recipe.scale_bar = {"at": [0.9, 0.12]}
+    b.spec.texts = [{"x": 60.0, "y": 1.5, "text": "n = 18 cells"}]
+    b.spec.columns, b.spec.size = 3, "double"
+    b._fill_sizes()
+    b._changed()
+    b.redraw_now()
+
+
+EVERY_KIND = {"panel", "letter", "title", "xlabel", "ylabel", "xaxis", "yaxis", "legend", "scalebar", "stimbar",
+              "command", "annotation", "bracket", "series", "refline", "marker", "vmlabel", "figtext"}
+
+
+def busy_builder(b, group: int = 0) -> None:
+    """Something for every control to act on: the middle panel the one being changed (it can move either way), a
+    change to undo and one to redo, a row selected in each list (``group``: which group in the groups' list: the
+    first can go down and be hidden, the last, hidden in this figure, can go up and be shown)."""
+    b.current = 1
+    b._load_controls()
+    for title in ("one", "two"):
+        b.recipe.title = title
+        b._snapshot()
+    b.undo()
+    for name in ("series_table", "ref_lines", "marks", "notes", "filters"):
+        tbl = getattr(getattr(b, name, None), "table", None)
+        if tbl is not None and tbl.rowCount():
+            tbl.selectRow(min(group, tbl.rowCount() - 1) if name == "series_table" else tbl.rowCount() - 1)
+
+
 def test_every_builder_control_in_every_state(press, tmp_path):
+    from clampwise.figure.elements import Tag
+
     patched, open_ = press
-    w, paths = open_({"evoked.abf": ch.simulated()["vc_evoked"]()})
+    sims = ch.simulated()
+    w, paths = open_({"evoked.abf": sims["vc_evoked"](), "light.abf": sims["cc_evoked"](),
+                      "steps.abf": sims["cc_steps"](), "minis.abf": sims["vc_spontaneous"](), "dsi.abf": sims["dsi"]()})
     seen: set[str] = set()                     # a control pressed with an effect in an earlier state is not again
+
+    def new(c) -> bool:
+        return ch.doc_name(c) + c.choice not in seen
+
+    def note(outs) -> None:
+        fine(outs)
+        seen.update(ch.doc_name(o.control) + o.control.choice for o in outs if o.effects)
+
     for state in BUILDER_STATES:
         b = builder_in(state, w, paths, tmp_path, patched.answers)
-        s = ch.BuilderSession(patched, b)
-        outs = s.run(state, only=lambda c: ch.doc_name(c) + c.choice not in seen)
-        fine(outs)
-        seen |= {ch.doc_name(o.control) + o.control.choice for o in outs if o.effects}
+        note(ch.BuilderSession(patched, b, side=2).run(state, only=new))
         b.close()
-    assert len(seen) > 150
+    # the starters of the other kinds of recording, each with a recording of its kind selected
+    for name in ("steps.abf", "minis.abf", "dsi.abf"):
+        b = builder_in("empty", w, {name: paths[name]}, tmp_path, patched.answers)
+        note(ch.BuilderSession(patched, b).run(f"{name[:-4]} selected",
+                                               only=lambda c: c.label.startswith("Starters > ") and new(c)))
+        b.close()
+    # a figure with one of everything: each thing selected (its own settings beside the figure), then the
+    # figure itself worked on with the mouse and the keys
+    b = builder_in("empty", w, paths, tmp_path, patched.answers)
+    whole_figure(b, paths, tmp_path)
+    s = ch.BuilderSession(patched, b)
+    things = s.things()
+    assert set(things) >= EVERY_KIND, f"not on the figure: {sorted(EVERY_KIND - set(things))}"
+    note(ch.BuilderSession(patched, b, prepare=busy_builder, side=2).run(
+        "a whole figure, in use", only=lambda c: new(c) or c.kind == "right-click"))
+    # the panels' tabs, right-clicked on the second: it can move earlier
+    busy = ch.BuilderSession(patched, b, prepare=busy_builder, side=2)
+    busy.reset()
+    patched.answers.pick_action = None
+    b.tabs.customContextMenuRequested.emit(b.tabs.tabRect(1).center())
+    entry = next(i for i, e in enumerate(patched.log.menus[-1]) if e[0] == "Move it earlier")
+
+    def earlier() -> None:
+        patched.answers.pick_action = entry
+        b.tabs.customContextMenuRequested.emit(b.tabs.tabRect(1).center())
+        patched.answers.pick_action = None
+
+    where = "Figure builder / All settings"
+    note([busy.act(ch.Control(f"{where}|right-click action|tabs earlier", "right-click action",
+                              "The panel the controls below change > Move it earlier", where),
+                   "a whole figure, in use", earlier, ignore=("menus",))])
+    note(ch.BuilderSession(patched, b, prepare=lambda b: busy_builder(b, 2), side=2).run(
+        "a whole figure, its hidden group selected", only=lambda c: c.where.endswith(" / Groups") and new(c)))
+    for kind, tag in things.items():
+        note(ch.BuilderSession(patched, b, select=tag).run(
+            f"selected: the {kind}", only=lambda c: c.where.endswith(" / Selected") and new(c)))
+
+    def rows_picked(b) -> None:                # a row drawn and a row left out, both selected
+        m = b.dataview.table.selectionModel()
+        for row in (0, 1):
+            m.select(b.dataview.model.index(row, 0), QtCore.QItemSelectionModel.Select | QtCore.QItemSelectionModel.Rows)
+
+    note(ch.BuilderSession(patched, b, select=Tag("panel", 0), side=1, prepare=rows_picked).run(
+        "the data behind a panel", only=lambda c: c.where.endswith(" / Data and statistics")))
+    done: set[str] = set()
+    outs = s.gestures("a whole figure", done)
+    note(outs)
+    assert done >= EVERY_KIND
+    by = {(o.control.kind, o.control.label): o for o in outs}
+    for kind in ("letter", "legend", "scalebar", "stimbar", "annotation", "bracket", "figtext"):
+        words = ch.KIND_WORDS[kind]
+        assert "what is edited changed" in by[("drag", words)].effects, f"dragging the {kind} moved nothing"
+        assert "what is edited changed" in by[("arrow key", words)].effects, f"an arrow key did not move the {kind}"
+    for kind in ("letter", "title", "xlabel", "ylabel", "annotation", "bracket", "stimbar", "vmlabel", "figtext",
+                 "series", "refline", "marker"):
+        o = by[("double-click", ch.KIND_WORDS[kind])]
+        assert "what is edited changed" in o.effects and o.undo == "restored", f"the {kind} was not rewritten in place"
+    assert "asked in a dialog" in by[("double-click", "Panel")].effects          # how it is drawn
+    # the panels placed freely: dragged, moved by a key and resized by each handle; an inset the same
+    b.all_free()
+    for r, (dx, dy, dw, dh) in zip(b.spec.panels, ((0, 0, 0, -6), (4, 4, -7, -12), (-3, 9, -2, -16))):
+        x, y, wide, high = r.rect                  # no two alike, so aligning and spacing have something to do
+        r.rect = [x + dx, y + dy, wide + dw, high + dh]
+    b._changed()
+    b.redraw_now()
+    s = ch.BuilderSession(patched, b)
+    outs = s.gestures("panels placed freely", EVERY_KIND - {"panel"})
+    note(outs)
+    by = {(o.control.kind, o.control.label): o for o in outs}
+    assert "what is edited changed" in by[("drag", "Panel")].effects
+    assert "what is edited changed" in by[("arrow key", "Panel")].effects
+    outs = s.resize_handles("panels placed freely", things["panel"])
+    note(outs)
+    assert all("what is edited changed" in o.effects and o.undo == "restored" for o in outs)
+    note(s.run("panels placed freely", only=lambda c: c.label.startswith("Arrange > ") and new(c)))
+    b.all_grid()
+    b.add_inset(0)
+    inset = Tag("panel", len(b.spec.panels) - 1)
+    s = ch.BuilderSession(patched, b)
+    outs = s.resize_handles("an inset", inset)
+    note(outs)
+    assert all("what is edited changed" in o.effects for o in outs)
+    note(ch.BuilderSession(patched, b, select=inset).run(
+        "selected: an inset", only=lambda c: c.where.endswith(" / Selected") and new(c)))
+    b.close()
+    assert len(seen) > 300
+
+
+def test_every_control_of_the_builders_choosers(press, tmp_path):
+    """Add panel's two questions (what data, drawn how) and the export's dialog."""
+    from clampwise.app.addpanel import DataChooser, PlotChooser
+    from clampwise.app.builder import ExportDialog
+    from clampwise.figure import render
+
+    patched, open_ = press
+    w, paths = open_({"evoked.abf": ch.simulated()["vc_evoked"]()})
+    w.select(paths["evoked.abf"])
+    b = w.screens["figures"].open_builder()
+    b.open_file(str(table(tmp_path)))
+    b.redraw_now()
+
+    def file_picked(d) -> None:
+        d.list.setCurrentRow(next(i for i in range(d.list.count())
+                                  if d.list.item(i).data(QtCore.Qt.UserRole) == "file"))
+
+    fine(ch.DialogSession(patched, lambda: DataChooser(b, *b._sources()), file_picked).run("data chooser"))
+    fine(ch.DialogSession(patched, lambda: PlotChooser(b, "points")).run("plot chooser"))
+    fine(ch.DialogSession(patched, lambda: ExportDialog(b, b.spec, render.check(b.spec))).run("export dialog"))
+    b.close()
 
 
 def test_every_control_of_the_trace_picker(press, tmp_path):
@@ -195,6 +376,8 @@ def test_every_control_of_the_trace_picker(press, tmp_path):
     w.select(paths["evoked.abf"])
     b = w.screens["figures"].open_builder()
     fine(ch.DialogSession(patched, lambda: TracePicker(b, w, b._load), ch.picker_ready).run("trace picker"))
+    fine(ch.DialogSession(patched, lambda: TracePicker(b, w, b._load), ch.picker_first_trace).run(
+        "trace picker, its first trace selected", only=lambda c: c.label in ("Down", "Remove selected sweeps from it")))
     b.close()
 
 
@@ -214,7 +397,7 @@ def test_every_control_of_the_digitizer(press, tmp_path):
     b.close()
 
 
-# ---------------------------------------------------------------- on Daniel's files (copies)
+# ---------------------------------------------------------------- on the lab's own files (copies)
 
 @needs_daniel
 @pytest.mark.parametrize("which", list(HIS))
@@ -308,7 +491,8 @@ def test_no_graph_is_shown_twice_and_a_file_of_unknown_type_says_why(press):
         assert len({p._key for p in shown}) == len(shown) == 4
         titles = [p.title.toolTip() for p in shown]
         assert len(set(titles)) == 4, titles             # nor two graphs of one name
-        assert all(sum(a.isChecked() for a in p.menu.actions()) == 1 for p in shown)      # the one shown is ticked
+        assert all(sum(a.isChecked() for acts in p._actions.values() for a in acts) == 1
+                   for p in shown)                       # the one shown is ticked
     # one graph to give: one panel shows it, the others give it their room, and a line says why
     one = panels.View("only.one", "The only graph", "[mV vs. s]", lambda item, pal: (item.plot([0, 1], [0, 1]), "x")[1])
     taken: set = set()
@@ -503,6 +687,78 @@ def test_the_workbench_does_what_its_labels_say(press, tmp_path):
     s.delete_template_button.click()
     assert w.project.templates() == [] and not s.apply_template_button.isEnabled()
     assert "No template" in s.apply_template_button.toolTip()
+    # Sweep > and < step through the sweeps: the one stepped to is drawn in bold, named, its row selected
+    assert not s.alone.isEnabled() and "Step to a sweep first" in s.alone.toolTip()
+    s.next_button.click()
+    assert s._browse == 0 and s.browse_label.text() == f"sweep 1 (1 of {n})"
+    bold = [c for c in curves() if c.opts["pen"].widthF() == 2 and c.name()]      # (the fit's curve has no name)
+    assert len(bold) == 1 and np.allclose(bold[0].getData()[1], s._result["traces"][0][2], equal_nan=True)
+    assert {i.row() for i in s.table.selectedIndexes()} == {0}
+    s.next_button.click()
+    s.prev_button.click()
+    s.prev_button.click()                                # round to the last
+    assert s._browse == n - 1
+    drawn = len(curves())
+    s.alone.click()                                      # the others are not drawn
+    assert len(curves()) == drawn - (n - 1)
+    s.table.clicked.emit(s.rows_model.index(4, 0))       # a row clicked steps to its sweep
+    assert s._browse == rows()[4]["sweep"]
+    s.all_button.click()
+    assert s._browse is None and s.browse_label.text() == "" and not s.alone.isChecked() and len(curves()) == drawn
+    s.keys["PgDown"].activated.emit()                    # Page Down does what Sweep > does
+    assert s._browse == 0
+    # Cursors: two lines over the trace; the readout gives each one's time and value, their difference, the slope
+    assert not s.cursors_to_region.isEnabled() and "Tick Cursors" in s.cursors_to_region.toolTip()
+    s.cursors_box.click()
+    assert len(s._cursor_items) == 2 and "Δt" in s.cursor_label.text()
+    s.set_cursor(0, on - 0.010)
+    s.set_cursor(1, on + 0.012)
+    c = s.cursor_values()
+    y0 = wb.raw(rec, 0)
+    fs = rec.sample_rate_hz
+    assert c["dt_ms"] == pytest.approx(22.0, abs=0.1) and c["trace"] == s._result["traces"][0][0]
+    assert c["v1"] == pytest.approx(float(y0[int(round((on - 0.010) * fs))]), abs=1e-6)
+    assert c["dv"] == pytest.approx(float(y0[int(round((on + 0.012) * fs))] - y0[int(round((on - 0.010) * fs))]), abs=1e-6)
+    assert c["slope"] == pytest.approx(c["dv"] / c["dt_ms"]) and f"{c['dt_ms']:.2f} ms" in s.cursor_label.text()
+    s._cursor_items[1].setValue(on + 0.030)              # dragged: the readout follows
+    assert s.cursor_values()["dt_ms"] == pytest.approx(40.0, abs=0.1)
+    # Region to the cursors: the selected region spans them (kept from the pulse when it repeats on each pulse)
+    s.region_list.setCurrentRow(1)
+    was = (s._m.regions[1].start_s, s._m.regions[1].end_s)
+    s.cursors_to_region.click()
+    assert (s._m.regions[1].start_s, s._m.regions[1].end_s) == pytest.approx((-0.010, 0.030), abs=1e-4)
+    w.undo.undo()
+    assert (s._m.regions[1].start_s, s._m.regions[1].end_s) == pytest.approx(was)
+    # the arrow keys move the selected region 0.1 ms (Shift: 1 ms; Alt: its end alone); Undo takes each step back
+    s.keys["Right"].activated.emit()
+    assert (s._m.regions[1].start_s, s._m.regions[1].end_s) == pytest.approx((was[0] + 1e-4, was[1] + 1e-4))
+    s.keys["Shift+Left"].activated.emit()
+    assert s._m.regions[1].start_s == pytest.approx(was[0] - 9e-4)
+    s.keys["Alt+Right"].activated.emit()
+    assert s._m.regions[1].start_s == pytest.approx(was[0] - 9e-4) and s._m.regions[1].end_s == pytest.approx(was[1] - 8e-4)
+    for _ in range(3):
+        w.undo.undo()
+    assert (s._m.regions[1].start_s, s._m.regions[1].end_s) == pytest.approx(was)
+    # Send to a figure: the traces in view as example traces with the light's bars; the table as a graph
+    s.all_button.click()
+    s.plot.setXRange(on - 0.020, on + 0.150, padding=0)
+    app.processEvents()
+    s.send_traces_action.trigger()
+    b = w.screens["figures"].builder
+    assert b is not None and b.isVisible()
+    r = b.spec.panels[0]
+    assert (r.question, r.plot, r.source["kind"]) == ("example", "trace", "traces") and r.scale_bars
+    f = r.frame()
+    assert f["Sweep"].nunique() == n and f[r.x].min() == pytest.approx(0.0, abs=0.2) and \
+        f[r.x].max() == pytest.approx(170.0, abs=1.0)
+    assert [bar["start"] for bar in r.stim_bars] == pytest.approx([20.0, 125.0], abs=0.6)     # where the light came
+    assert "sent to the figure as panel" in b.statusBar().currentMessage() and b.canvas.selection.kind == "panel"
+    s.send_table_action.trigger()
+    assert len(b.spec.panels) == 2 and b.current == 1
+    r = b.spec.panels[1]
+    assert r.source["kind"] == "workbench" and r.x == "Sweep" and len(r.frame()) == len(rows())
+    assert r.y.startswith("Peak") and "Measured by hand in the Workbench on light.abf" in " ".join(r.notes)
+    b.close()
     w.undo.undo()
     assert len(w.project.templates()) == 1
     assert not patched.log.errors, patched.log.errors[-1]
@@ -517,8 +773,8 @@ def test_the_figures_screen_does_what_its_labels_say(press):
     p = fig.panels[1]
     # Show > a graph: that graph, its name in the title, ticked in the menu
     other = next(v for v in p._views if v.key not in {q._key for q in fig.panels})
-    p._actions[other.key].trigger()
-    assert p._key == other.key and other.title in p.title.text() and p._actions[other.key].isChecked()
+    p._actions[other.key][0].trigger()
+    assert p._key == other.key and other.title in p.title.text() and p._actions[other.key][0].isChecked()
     # Edit: the builder, on this graph
     p.edit_button.click()
     b = fig.builder
@@ -551,3 +807,88 @@ def test_the_figures_screen_does_what_its_labels_say(press):
     fig.builder.close()
     app.processEvents()
     assert not patched.log.errors, patched.log.errors[-1]
+
+
+@pytest.mark.skipif(not lab_files("light, region 1", "light, region 2"),
+                    reason="the lab's own recordings are not named on this machine (tests/labdata.py)")
+def test_a_real_light_file_measured_by_hand_as_in_clampfit(press, tmp_path):
+    """A real light file (a copy) worked through as Daniel would in Clampfit, by the screen's own controls: the
+    amplitude, latency and decay of the response to every pulse, a sweep left out with its reason, the decay
+    fitted, the amplitude plotted against the sweep, the measurement kept, saved as a template and run on the
+    cell's other files of the protocol; every step taken back by Undo."""
+    from clampwise.analysis import workbench as wb
+
+    patched, open_ = press
+    folder = tmp_path / "A1" / "Slice1" / "cell1"
+    folder.mkdir(parents=True)
+    originals = (lab_file("light, region 1"), lab_file("light, region 2"))
+    names = tuple(p.name for p in originals)
+    for p in originals:
+        shutil.copy2(p, folder / p.name)
+    w, paths = ch.open_window(folder, {name: folder / name for name in names}, analyze=False)
+    try:
+        path = paths[names[0]]
+        s = ch.WorkbenchSession(patched, w, path).s
+        rec = s._recording
+        n = rec.n_sweeps
+        assert n >= 4 and [r.name for r in s._m.regions] == ["baseline", "response"]      # set from the light
+
+        def tick(key: str) -> None:
+            item = next(s.measure_list.item(k) for k in range(s.measure_list.count())
+                        if s.measure_list.item(k).data(QtCore.Qt.UserRole) == key)
+            item.setCheckState(QtCore.Qt.Checked)
+
+        for key in ("peak", "onset_latency", "decay_time"):
+            tick(key)
+        rows = s._result["rows"]
+        assert len(rows) == 2 * n and {r["pulse"] for r in rows} == {1, 2}                # every pulse of every sweep
+        assert all(np.isfinite(r["peak"]) for r in rows)
+        m = s.table.model()
+        heads = [m.headerData(c, QtCore.Qt.Horizontal) for c in range(m.columnCount())]
+        assert {"Peak (mV)", "Onset latency (ms)", "Decay time (ms)"} <= set(heads)
+        # a sweep left out, with why
+        on = float(rec.stimulus.times_s[3][0])
+        s.click_buttons["exclude"][0].click()
+        patched.answers.text = "spontaneous event on the pulse"
+        y = float(wb.raw(rec, 3)[int((on + 0.01) * rec.sample_rate_hz)])
+        vb = s.plot.getPlotItem().getViewBox()
+        s._clicked(type("Click", (), {"scenePos": lambda self: vb.mapViewToScene(QtCore.QPointF(on + 0.01, y))})())
+        patched.answers.text = None
+        s.click_buttons["exclude"][0].click()
+        assert [(e.sweep, e.reason) for e in s._m.exclusions] == [(3, "spontaneous event on the pulse")]
+        assert len(s._result["rows"]) == 2 * (n - 1)
+        # the decay fitted on the average: the mode, a fit region added over the response, the model chosen
+        s.mode.setCurrentIndex(s.mode.findData("average"))
+        s.region_list.setCurrentRow(1)
+        s.fit_region.setCurrentIndex(s.fit_region.findData("response"))
+        s.fit_model.setCurrentIndex(s.fit_model.findData("exp1"))
+        assert s._result["fit"] is not None and s.fit_words.text() and "No fit yet" not in s.fit_words.text()
+        s.mode.setCurrentIndex(s.mode.findData("each"))
+        # the amplitude against the sweep
+        s.tabs.setCurrentIndex(1)
+        s.plot_y.setCurrentIndex(s.plot_y.findData("peak"))
+        s.plot_x.setCurrentIndex(s.plot_x.findData("sweep"))
+        x, yv = s.series.getPlotItem().items[0].getData()
+        assert len(x) == 2 * (n - 1) and 4 not in set(x)                  # sweep 4 (from 1) is the one left out
+        # kept, saved as a template, run on the protocol's other file
+        s.name_box.setText("ROI responses")
+        s.keep_button.click()
+        assert [h["name"] for h in w.project.hands(path)] == ["ROI responses"]
+        s.template_button.click()
+        assert [t_.name for t_ in w.project.templates()] == ["ROI responses"]
+        s.run_template_button.click()
+        QtWidgets.QApplication.instance().processEvents()
+        other = w.project.hands(paths[names[1]])
+        assert [h["name"] for h in other] == ["ROI responses"] and other[0]["summary"]
+        # every step comes back off, last first
+        steps = 0
+        while w.undo.canUndo() and steps < 60:
+            w.undo.undo()
+            steps += 1
+        assert steps >= 8 and w.project.hands(path) == [] and w.project.hands(paths[names[1]]) == []
+        assert w.project.templates() == [] and s._m.exclusions == [] and s._m.fit_model == ""
+        assert all((folder / p.name).read_bytes() == p.read_bytes() for p in originals)
+    finally:
+        w.close()
+        w.deleteLater()
+        ch.flush(QtWidgets.QApplication.instance())

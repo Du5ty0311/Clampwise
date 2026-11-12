@@ -56,10 +56,14 @@ def paragraph(drawn: list, project=None) -> str:
     if any(d.recipe.source.get("kind") == "digitized" for d in drawn):
         parts.append("Some values were digitized from a published figure; they are estimates limited by the "
                      "picture's resolution.")
+    last = ""
     for k, d in enumerate(drawn):
+        letter = getattr(d, "letter", "")
+        last = letter or last
         if d.prepared is None:
             continue
-        label = f"({chr(ord('A') + k)}) " if len(drawn) > 1 else ""
+        label = (f"({letter}) " if letter else f"({last}, continued) " if last else f"({chr(ord('A') + k)}) ") \
+            if len(drawn) > 1 else ""
         parts.append(label + d.prepared.caption)
     comps = [c for d in drawn for c in d.comparisons]
     if comps:

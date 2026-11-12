@@ -83,25 +83,77 @@ def _accepted(ev: pd.DataFrame) -> pd.DataFrame:
 
 
 def step_examples(results: dict, recording) -> Made | str:
-    """The most hyperpolarizing step, the rheobase step and the step two above it, each drawn whole."""
+    """The steps a paper shows of a family, each drawn whole with the command under it: the most hyperpolarizing
+    step (the sag and the rebound), rheobase (the first full spike) and the step nearest twice rheobase (the
+    firing pattern). A cell that fires on no step has no rheobase to show: its whole family is drawn."""
     steps = _rows(results, "intrinsic", "steps")
     if steps.empty or recording is None:
         return "Needs the intrinsic properties of a current-step recording."
     steps = steps.sort_values("current_pa").reset_index(drop=True)
     spikes = steps["full_spikes"] if "full_spikes" in steps else steps["spikes"]
-    fired = list(steps.index[spikes.fillna(0) > 0])
-    picks = {0: "the most hyperpolarizing step"}
-    if fired:
-        picks[fired[0]] = "rheobase (the smallest step with a full spike)"
-        picks.setdefault(min(fired[0] + 2, len(steps) - 1), "the step two above rheobase")
+    fired = list(steps.index[(spikes.fillna(0) > 0) & (steps["current_pa"] > 0)])
+    long_ms = 1e3 * recording.sweep(0).size / recording.sample_rate_hz
+    w = traces.Window(0.0, long_ms, False, 0.0)
+    if not fired:
+        items = [["", int(row.sweep), 0] for row in steps.itertuples()]
+        lo, hi = float(steps["current_pa"].min()), float(steps["current_pa"].max())
+        return [traces.TraceSet(f"{lo:+g} to {hi:+g} pA", "each", items)], w, None, \
+            [f"The cell fired on no depolarizing step: all {len(items)} steps are drawn ({lo:+g} to {hi:+g} pA), "
+             "each sweep as recorded."]
+    rheo = fired[0]
+    twice = int((steps["current_pa"] - 2 * steps["current_pa"].iloc[rheo]).abs().idxmin())
+    if twice <= rheo:
+        twice = min(rheo + 1, len(steps) - 1)
+    picks = {0: "the most hyperpolarizing step", rheo: "rheobase (the smallest step with a full spike)"}
+    picks.setdefault(twice, "the step nearest twice rheobase")
     sets = []
     for i, why in picks.items():
         row = steps.iloc[i]
         sets.append(traces.TraceSet(f"{row.current_pa:+g} pA" + (" (rheobase)" if why.startswith("rheobase") else ""),
                                     "average", [["", int(row.sweep), 0]]))
-    long_ms = 1e3 * recording.sweep(0).size / recording.sample_rate_hz
-    return sets, traces.Window(0.0, long_ms, False, 0.0), None, \
-        [f"Steps drawn: {'; '.join(picks.values())}; each sweep as recorded."]
+    return sets, w, None, [f"Steps drawn: {'; '.join(picks.values())}; each sweep as recorded."]
+
+
+def stimulus_window(recording) -> tuple[list[int], traces.Window, int] | None:
+    """The sweeps that hold the usual number of stimulus pulses, and the stretch around the first pulse that
+    holds them all (20 ms before it to 80 ms after the last, 800 ms at most); None without a stimulus."""
+    if recording is None or recording.n_sweeps == 0:
+        return None
+    counts = [int(np.isfinite(traces.stimulus_s(recording, k, 1))) and len(recording.stimulus.times_s[k])
+              for k in range(recording.n_sweeps)]
+    if not any(counts):
+        return None
+    n_pulses = int(np.bincount([c for c in counts if c]).argmax())
+    sweeps = [k for k, c in enumerate(counts) if c == n_pulses]
+    ons = np.asarray(recording.stimulus.times_s[sweeps[0]][:n_pulses], float)
+    return sweeps, traces.Window(20.0, float(min((ons[-1] - ons[0]) * 1e3 + 80.0, 800.0)), True, 0.0), n_pulses
+
+
+def pattern_examples(results: dict, recording) -> Made | str:
+    """A cell's light (or stimulus) files side by side: each file's sweeps averaged around the first pulse, one
+    trace per pattern lit (the targeted cell, each region, the whole field), in the files' order. One file alone:
+    its sweeps and their average."""
+    found = stimulus_window(recording)
+    if found is None:
+        return "Needs a recording with a stimulus."
+    sweeps, w, _n = found
+    cell = results.get("connectivity_cell")
+    files = (cell.tables.get("files") if cell is not None else None) or []
+    wins = (cell.tables.get("windows") if cell is not None else None) or []
+    if len(files) >= 2 and wins:
+        sets = []
+        for f in files:
+            mine = sorted({int(x["sweep"]) for x in wins if x["file"] == f["file"]})
+            if mine:
+                sets.append(traces.TraceSet(str(f["pattern"] or f["file"]), "average", [[f["file"], k, 1] for k in mine]))
+        if sets:
+            return sets, w, None, ["Each trace: the average of that file's sweeps around the first pulse, each sweep "
+                                   "against its own level before it."]
+    items = [["", int(k), 1] for k in sweeps]
+    sets = ([traces.TraceSet("sweeps", "each", items)] if len(items) > 1 else []) + [
+        traces.TraceSet("average" if len(items) > 1 else "sweep", "average", items)]
+    return sets, w, None, ["Every sweep around the first pulse, each against its own level before it, and their "
+                           "average."]
 
 
 def evoked_average(results: dict, recording) -> Made | str:
@@ -185,7 +237,39 @@ def dsi_examples(results: dict, recording) -> Made | str:
 
 
 RULES = {"steps": step_examples, "evoked": evoked_average, "intervals": interval_examples,
-         "event_stretch": event_stretch, "event_average": event_average, "dsi": dsi_examples}
+         "event_stretch": event_stretch, "event_average": event_average, "dsi": dsi_examples,
+         "patterns": pattern_examples}
+
+
+def dress(r: Recipe, frame: pd.DataFrame, extras: dict, fresh: bool = True) -> Recipe:
+    """A trace panel given what the field draws with example traces, read from the recordings: the stimulus as
+    bars over the traces at its time, the potential each trace sat at (or was held at) written at its start, and
+    the command under the traces when it changes within them (a step). ``fresh`` False keeps the bars and labels
+    a person has already changed, and only follows the traces."""
+    cmd = traces.command_of(frame)
+    r.y2 = cmd
+    steps = False
+    if cmd:                                          # a command that moves within a trace is worth drawing
+        for _, part in frame.groupby(["Trace", "Sweep"], sort=False):
+            v = part[cmd].to_numpy(float)
+            v = v[np.isfinite(v)]
+            if v.size and float(v.max() - v.min()) > 0:
+                steps = True
+                break
+    if fresh:
+        r.stim_bars = [dict(bar) for bar in extras.get("stim_bars", [])]
+        r.vm_labels = dict(extras.get("vm_labels", {}))
+        r.command = {"show": steps}
+    else:
+        r.vm_labels = {**extras.get("vm_labels", {}), **{k: v for k, v in r.vm_labels.items()
+                                                       if k in extras.get("vm_labels", {})}}
+        if not cmd:
+            r.command = {**r.command, "show": False}
+    if r.stim_bars and not any("stimul" in n.lower() or "light" in n.lower() for n in r.notes):
+        light = any(bar.get("nm") for bar in r.stim_bars)
+        r.notes = list(r.notes) + [("Bars over the traces: the light." if light else
+                                    "Ticks over the traces: the stimulus.")]
+    return r
 
 
 def example_recipe(sets, w, load, table: str, title: str = "Example responses", overlay=None) -> Recipe:
@@ -193,10 +277,11 @@ def example_recipe(sets, w, load, table: str, title: str = "Example responses", 
     can be changed."""
     frame, notes, markers = traces.build(sets, load, w, overlay)
     yname = frame.columns[1]
-    return Recipe(source=traces.source(sets, w, table, overlay), data=pack(frame), question="example",
-                  plot="trace",
-                  x="Time (ms)", y=yname, group="Trace", cell="Sweep", level="row", scale_bars=True, title=title,
-                  notes=notes, markers=markers)
+    r = Recipe(source=traces.source(sets, w, table, overlay), data=pack(frame), question="example",
+               plot="trace",
+               x="Time (ms)", y=yname, group="Trace", cell="Sweep", level="row", scale_bars=True, title=title,
+               notes=notes, markers=markers)
+    return dress(r, frame, traces.extras(sets, load, w))
 
 
 def dsi_figure(result, load: Callable[[str], object], key: str = "dsi") -> Spec | None:

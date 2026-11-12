@@ -80,17 +80,53 @@ def _counts(rows: pd.DataFrame, r: Recipe, has_cells: bool, said: list, warn: li
     counts = {g: (int(sub["cell"].nunique()) if has_cells else 0,
                   int(sub["animal"][sub["animal"] != ""].nunique()) if r.animal else 0, len(sub))
               for g, sub in rows.groupby("group", sort=False)}
-    what = "cells" if level == "cell" else "rows"
+    what = "cells" if level == "cell" else rows_word(r)
     if level == "row" and has_cells and rows.groupby(["group", "cell"]).size().max() > 1:
         warn.append("Counting rows, but cells give several rows: the counts are of rows (events, sweeps), not "
                     "cells. Choose 'Each point is: a cell' to count each cell once.")
     totals_said = "; ".join(f"{'' if g == ALL else g + ': '}{int(t)} {what}"
                             for g, t in points.groupby("group", sort=False)["count"].sum().items())
-    caption = (f"{PLOTS.get(r.plot, ('', ''))[0]}. "
-               + (f"Each {what[:-1]}'s share of its group (%) " if r.percent else f"How many {what} ")
-               + f"in each category of {r.x}. Totals: {totals_said}. " + " ".join(said))
+    if r.plot == "proportion":
+        event = proportion_event(points, r)
+        each = "; ".join(f"{'' if g == ALL else g + ': '}{k} of {n}" for g, (k, n) in
+                         proportion_counts(points, r).items())
+        caption = (f"The share of {what} that are “{event}” ({r.x}) in each group, with Wilson's 95% score "
+                   f"interval; over each bar, how many of how many. {each}. " + " ".join(said))
+        if level == "row" and not has_cells:
+            warn.append(f"Each {what[:-1]} counts as one independent trial. Windows or sweeps of one recording "
+                        "are trials of that recording: a difference between groups is then a difference between "
+                        "those recordings, not between populations of cells.")
+    else:
+        caption = (f"{PLOTS.get(r.plot, ('', ''))[0]}. "
+                   + (f"Each {what[:-1]}'s share of its group (%) " if r.percent else f"How many {what} ")
+                   + f"in each category of {r.x}. Totals: {totals_said}. " + " ".join(said))
     return Prepared(points, pd.DataFrame(columns=["panel", "group", "centre", "lo", "hi", "n"]), rows, level,
                     caption.strip(), warn, counts)
+
+
+def rows_word(r: Recipe) -> str:
+    """What the table's rows are called, in the plural ("rows" unless the panel says: "response windows")."""
+    u = (r.row_unit or "").strip()
+    return "rows" if not u else u if u.endswith("s") and not u.endswith("ss") else (
+        u + "es" if u.endswith(("ss", "x", "ch", "sh")) else u + "s")
+
+
+def proportion_event(points: pd.DataFrame, r: Recipe) -> str:
+    """The category a proportion plot counts: the one named, else the first in the table's order."""
+    cats = list(dict.fromkeys(points.xcat))
+    return r.event if r.event in cats else (cats[0] if cats else "")
+
+
+def proportion_counts(points: pd.DataFrame, r: Recipe, panel: str | None = None) -> dict:
+    """{group: (how many in the counted category, how many in all)} from a counts panel's points, in the
+    groups' order."""
+    pts = points if panel is None else points[points.panel == panel]
+    event = proportion_event(points, r)
+    out = {}
+    for g in dict.fromkeys(pts.group):
+        mine = pts[pts.group == g]
+        out[g] = (int(mine[mine.xcat == event]["count"].sum()), int(mine["count"].sum()))
+    return out
 
 
 def centre_spread(values, summary: str) -> tuple[float, float, float, int]:
@@ -125,6 +161,10 @@ def _summarize(points: pd.DataFrame, by: list[str], summary: str, col: str = "y"
 def prepare(frame: pd.DataFrame, r: Recipe) -> Prepared:
     said: list[str] = []
     warn: list[str] = []
+    out_by_hand = [i for i in (r.excluded or []) if i in frame.index]
+    if out_by_hand:                                 # rows left out by hand in the data table
+        frame = frame.drop(index=out_by_hand)
+        said.append(f"{len(out_by_hand)} row{'s' if len(out_by_hand) != 1 else ''} of the table left out by hand.")
     frame, kept = _filter(frame, r.filters)
     if kept:
         said.append("Rows kept where " + " and ".join(kept) + ".")
@@ -290,4 +330,7 @@ def _caption(r: Recipe, points, summary, counts, level, has_cells, said, by_x) -
     text = " ".join(parts)
     if r.unit and r.unit != "cell":                 # one cell's episodes, sweeps...: named as they are
         text = re.sub(r"\bcell(s?)\b", lambda m: r.unit + m.group(1), text)
+    if (r.row_unit or "").strip():                  # the table's rows named as what they are
+        one, many = r.row_unit.strip(), rows_word(r)
+        text = text.replace("one row of the table", f"one {one}").replace("across rows", f"across {many}")
     return text

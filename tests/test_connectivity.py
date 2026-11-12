@@ -156,6 +156,15 @@ def test_a_cell_s_files_are_put_side_by_side():
     assert "ROI1 against ROI2" in cc.values["comparison"]
     lo, hi = rows["ROI2.abf"]["success_rate_low"], rows["ROI2.abf"]["success_rate_high"]
     assert 0 <= lo < rows["ROI2.abf"]["success_rate"] <= hi <= 1 and rows["ROI2.abf"]["smallest_detectable"] > 0
+    # every window of every file in one table, named by its pattern: what the patterns' figure is drawn from
+    every = cc.tables["windows"]
+    assert len(every) == sum(r["n_windows"] for r in rows.values())
+    for name, pattern in (("ROI1.abf", "ROI1"), ("ROI2.abf", "ROI2"), ("Full_Field.abf", "Full field")):
+        mine = [w for w in every if w["pattern"] == pattern]
+        assert {w["file"] for w in mine} == {name} and len(mine) == rows[name]["n_windows"]
+        assert sum(w["outcome"] == "success" for w in mine) == rows[name]["successes"]
+        # each response as a multiple of its own file's sham threshold: over 1 is a success
+        assert all((w["over_threshold"] > 1 or w["spiked"]) == (w["outcome"] == "success") for w in mine)
 
 
 def test_holm_s_correction():

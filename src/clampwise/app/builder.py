@@ -1,18 +1,17 @@
-"""The figure builder's window (B12): start from the question, and every control
-says what it does.
+"""The figure builder's window: the figure itself to work on, with what it is drawn from beside it.
 
-Above, in groups: where the data come from, undo and redo, the panels and the
-figure's size, styles, layouts, the Methods text, and the one primary action
-(Export). A graph of the Figures screen opens here through its Edit button
-(``editable``), so the automatic graphs are edited like any other figure.
-Left: "What do you want to show?", then tabs: Data (which table -> which rows
--> which time window -> bins -> baseline), Plot (every chart type; any can be
-tried), Groups (each group's colour, marker, line, name and order), Axes,
-Theme (a whole look in one click, then every part of it) and Marks; only what
-the question needs is open. Right, the largest: the figure as it will export
-(matplotlib), and under it "What this figure shows", the warnings and the
-statistics. Everything a control sets lives in the figure's ``Spec``
-(``clampwise.figure``), so undo, saving and reopening are the same thing.
+In the middle, the largest, the figure as it will export (matplotlib), on a desk at its printed proportions.
+Anything on it is selected by a click, moved by a drag, rewritten by a double-click, and has its own actions on
+a right-click (``figcanvas``). Beside it, three tabs: **Selected**, the few properties of whatever is selected
+(``inspector``: a panel, an axis, a group, the legend, the scale bars, a stimulus bar, a text, a bracket); **Data
+and statistics**, the table the current panel is drawn from, rows that can be left out by hand, the test and its
+result (``dataview``); and **All settings**, every control of the current panel and of the look in full, for
+what the first two do not reach. Under the figure, its legend's draft and what a reader should be warned of.
+
+A figure starts as an empty page: **Add panel** asks what it shows (traces, a graph of the Figures screen, a
+kept Workbench measurement, a table, a file) and then how it is drawn, from pictures (``addpanel``). The old
+"what do you want to show?" questions remain as starters under All settings. Everything a control sets lives
+in the figure's ``Spec`` (``clampwise.figure``), so undo, saving and reopening are the same thing.
 """
 
 from __future__ import annotations
@@ -22,12 +21,13 @@ import html
 import json
 from pathlib import Path
 
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+import numpy as np
 from matplotlib.figure import Figure
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from ..figure import data as fdata
-from ..figure import layouts, methods, presets, render, traces
+from ..figure import elements, journals, layouts, methods, page, presets, render, traces
+from ..figure.elements import Tag
 from ..figure.prepare import OPERATORS
 from ..figure.recipe import (CONTROLS, ERROR_STYLES, FITS, LINES, MARKERS, PALETTES, PLOT_QUESTION, PLOTS,
                              QUESTION, QUESTIONS, SIZES, SUMMARIES, THEMES, Recipe, Spec, Style, pack)
@@ -35,7 +35,11 @@ from . import theme, widgets
 from .widgets import box, label
 
 SCREEN_DPI = 110
+MOST_PANELS = 12
 LEGENDS = ("best", "upper left", "upper right", "lower left", "lower right", "outside", "none")
+# what a person may drag on the figure, and whose words they may rewrite in place
+MOVABLE = ("letter", "legend", "scalebar", "stimbar", "annotation", "bracket", "figtext", "panel")
+PLACE_FIELDS = ("span", "rect", "inset_of", "inset_rect", "letter", "letter_offset")
 BARS = ("bar", "hbar", "grouped_bar", "count_bar", "stacked_bar")
 UNITS = ("cell", "episode", "slice", "animal", "recording", "sweep")
 EVERY = {q[0] for q in QUESTIONS}
@@ -711,13 +715,93 @@ class DigitizeDialog(QtWidgets.QDialog):
         return self.dz.table(self.calibration(), cols, rows, names[0] or "x", names[1] or "y")
 
 
+class ExportDialog(QtWidgets.QDialog):
+    """How the figure is written: the format (PDF for Illustrator, with its text kept as text), the resolution
+    of a pixel format, text as shapes for a journal that asks for it; and, first, what the journal's rules (or
+    plain legibility) say about the figure as it stands."""
+
+    FORMATS = (("pdf", "PDF: vector, text stays editable (Illustrator, Inkscape)"),
+               ("svg", "SVG: vector, text stays editable (Inkscape, the web)"),
+               ("eps", "EPS: vector, for journals that ask for it"),
+               ("tiff", "TIFF: pixels, for journals that ask for it"),
+               ("png", "PNG: pixels, for slides and messages"))
+
+    def __init__(self, parent, spec: Spec, findings: list) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Export the figure")
+        self.controls_name = "Export"
+        lay = box("v", "s", "m")
+        w, h = spec.size_mm()
+        j = journals.JOURNALS.get(spec.journal)
+        lay.addWidget(label(f"{w:.1f} × {h:.1f} mm" + (f", {j.name}'s sizes" if j else ""), "heading"))
+        lay.addWidget(label("The file is written at exactly this size, the figure itself inside it: it opens "
+                            "here again, editable.", "muted", wrap=True))
+        self.findings = QtWidgets.QListWidget()
+        self.findings.setAccessibleName("What the check found")
+        self.findings.setMaximumHeight(120)
+        for f in findings:
+            item = QtWidgets.QListWidgetItem(("Fix: " if f.serious else "Note: ") + (f"panel {f.where}: " if f.where
+                                                                                     else "") + f.text)
+            self.findings.addItem(item)
+        if not findings:
+            self.findings.addItem("Nothing to fix: the sizes, text and lines are fine" +
+                                  (f" for {j.name}." if j else " for print."))
+        lay.addWidget(self.findings)
+        for n in (j.notes if j else ()):
+            lay.addWidget(label(f"{j.name}: {n}", "hint", wrap=True))
+        self.format = QtWidgets.QComboBox()
+        self.format.setAccessibleName("Format")
+        for key, words in self.FORMATS:
+            self.format.addItem(words, key)
+        prefer = next((f for f in (j.formats if j else ()) if f in ("pdf", "eps", "tiff")), "pdf")
+        self.format.setCurrentIndex(max(0, self.format.findData("pdf" if j is None else prefer)))
+        self.dpi = QtWidgets.QSpinBox()
+        self.dpi.setAccessibleName("Resolution")
+        self.dpi.setRange(72, 2400)
+        self.dpi.setSingleStep(100)
+        self.dpi.setSuffix(" dpi")
+        self.dpi.setValue(render.export_dpi(spec))
+        self.outline = QtWidgets.QCheckBox("Turn the text into shapes")
+        self.outline.setChecked(False)
+        self.outline.setToolTip("The letters become drawn shapes: no font is needed to print them, and they can no "
+                                "longer be edited as text. Only for a journal that asks for outlined fonts"
+                                + (f" ({j.name} does, in EPS files)." if j is not None and j.outline_text else "."))
+        self._outline_tip = self.outline.toolTip()
+        lay.addWidget(widgets.field("Format", self.format))
+        self.dpi_field = widgets.field("Resolution", self.dpi, "For TIFF and PNG: 600 to 1200 dpi keeps text and "
+                                       "lines sharp in print")
+        lay.addWidget(self.dpi_field)
+        lay.addWidget(self.outline)
+        row = box("h", "s")
+        row.addStretch(1)
+        row.addWidget(widgets.button("Cancel", self.reject, "Do not export"))
+        row.addWidget(widgets.primary("Choose where to save...", self.accept, "Then the file is written"))
+        lay.addLayout(row)
+        self.format.currentIndexChanged.connect(lambda _i: self._follow())
+        self._follow()
+        widgets.resizable(self, lay, "export_figure", (560, 420))
+
+    def _follow(self) -> None:
+        pixels = self.format.currentData() in ("tiff", "png")
+        self.dpi.setEnabled(pixels)
+        self.dpi.setToolTip("Dots per inch at the figure's printed size" if pixels else
+                            "A vector format has no resolution: it is sharp at any size.")
+        self.outline.setEnabled(not pixels)
+        self.outline.setToolTip("A pixel format holds no text to turn into shapes." if pixels else self._outline_tip)
+
+
 class Builder(QtWidgets.QMainWindow):
+    MOST = MOST_PANELS
+
     def __init__(self, window, spec: Spec | None = None) -> None:
         super().__init__(window)
         self.setWindowFlag(QtCore.Qt.Window, True)
         self.setWindowTitle("Figure builder – Clampwise")
         self.window_ = window
-        self.spec = spec or Spec()
+        if not isinstance(spec, Spec):       # a new figure: an empty page, Arial 7 pt, no journal chosen
+            spec = Spec()
+            spec.style.font_size = 7.0
+        self.spec = spec
         self.current = 0
         self._loading = True                 # no edits fire while the controls are made
         self._history: list[str] = []
@@ -737,6 +821,7 @@ class Builder(QtWidgets.QMainWindow):
         self._load_controls()
         self._snapshot()
         self.redraw()
+        self.dataview.refresh()              # its buttons say from the start what they need
         self.resize(1400, 900)
 
     # ---------------------------------------------------------------- the layout
@@ -766,10 +851,13 @@ class Builder(QtWidgets.QMainWindow):
 
     def _data_menu(self, m: QtWidgets.QMenu) -> None:
         m.clear()
+        m.setToolTipsVisible(True)
+        m.addAction("A saved figure, to work on it again...", self.open_figure)
+        m.addSeparator()
+        m.addAction("Data for the selected panel...", lambda: self.choose_data(self.current))
         for text, slot in (("Raw traces from the recordings (pick sweeps, average them)...", self.choose_traces),
                            ("A table of this project...", self.open_project_table),
                            ("A CSV or Excel file...", self.open_file),
-                           ("A saved figure (to edit it again)...", self.open_figure),
                            ("A picture of a plot (digitize it)...", self.open_picture)):
             m.addAction(text, slot)
         m.addSeparator()
@@ -778,7 +866,231 @@ class Builder(QtWidgets.QMainWindow):
         a.setEnabled(has)
         a.setToolTip("This panel without its table, its look kept (Undo brings the table back)" if has else
                      "This panel has no data to remove.")
-        m.setToolTipsVisible(True)
+
+    # ---------------------------------------------------------------- what a panel shows: one chooser
+    def _sources(self) -> tuple[dict, dict]:
+        """What the data chooser offers now: ({source: why it cannot be used}, {source: [(words, what to use)]})."""
+        from . import panels as figpanels
+
+        w = self.window_
+        project, path = getattr(w, "project", None), getattr(w, "selected", None)
+        no_project = "open a project in Files first"
+        no_rec = "select a recording in Files first"
+        cannot: dict[str, str] = {}
+        extra: dict[str, list] = {}
+        if project is None:
+            for key in ("traces", "typical", "graph", "workbench", "project"):
+                cannot[key] = no_project
+            return cannot, extra
+        run = None
+        if path is None:
+            cannot["typical"] = cannot["graph"] = no_rec
+        else:
+            try:
+                run = project.last_run(path, w.recording(path))
+            except Exception:
+                run = None
+            if run is None or not run.results:
+                cannot["graph"] = "analyze the selected recording first"
+            else:
+                found = [v for v in figpanels.views(run) if v.heatmap is None]
+                extra["graph"] = [(f"{v.title} {v.units}", v) for v in found]
+                if not found:
+                    cannot["graph"] = "its results give no graph"
+            try:
+                rec = w.recording(path)
+                if not any(np.isfinite(traces.stimulus_s(rec, k, 1)) for k in range(min(rec.n_sweeps, 5))):
+                    cannot["typical"] = "the selected recording has no stimulus to align on"
+            except Exception:
+                cannot["typical"] = "the selected recording could not be read"
+        hands = fdata.project_hands(project)
+        if hands:
+            extra["workbench"] = [(words, use) for words, use in hands]
+        else:
+            cannot["workbench"] = "nothing is kept yet: Workbench, Keep this measurement"
+        tables = fdata.project_tables(project)
+        if tables:
+            extra["project"] = [(name, make) for name, make in tables.items()]
+        else:
+            cannot["project"] = "analyze the recordings first"
+        return cannot, extra
+
+    def add_panel_dialog(self, k: int | None = None) -> None:
+        """Add panel: ask what it shows, put it in the first empty panel (else a new one), then ask how it is
+        drawn when that is a choice. With ``k``: the same for panel ``k``'s data."""
+        from .addpanel import DataChooser
+
+        cannot, extra = self._sources()
+        dlg = DataChooser(self, cannot, extra, "Add a panel" if k is None else "Choose the panel's data")
+        if dlg.exec_() != QtWidgets.QDialog.Accepted or dlg.choice is None:
+            return
+        self.use_source(*dlg.choice, k=k)
+
+    def choose_data(self, k: int) -> None:
+        self.add_panel_dialog(k)
+
+    def _target(self, k: int | None) -> int:
+        """The panel new data go into: ``k``, else the first empty one, else a new one (None when full)."""
+        if k is not None:
+            return k
+        empty = next((i for i, r in enumerate(self.spec.panels) if r.frame() is None), None)
+        if empty is not None:
+            return empty
+        if len(self.spec.panels) >= self.MOST:
+            QtWidgets.QMessageBox.information(self, "The figure is full", f"A figure holds {self.MOST} panels at "
+                                              "most: remove one, or change a panel's data.")
+            return -1
+        self.spec.panels.append(Recipe())
+        if self.spec.columns == 1 and len(self.spec.panels) == 2:
+            self.spec.columns = 2                     # the second panel goes beside the first
+            self._widen()
+        return len(self.spec.panels) - 1
+
+    def _widen(self) -> None:
+        """A one-column page that now holds panels side by side becomes a two-column one (said, and undone with
+        the step that caused it)."""
+        if self.spec.size == "single" and self.spec.columns > 1:
+            self.spec.size = "double"
+            self._fill_sizes()
+            self.statusBar().showMessage(f"The page is now two columns wide ({self.spec.width_mm():g} mm) to hold "
+                                         "panels side by side; the width is in the toolbar.", 7000)
+
+    def use_source(self, key: str, use=None, k: int | None = None) -> None:
+        """Panel ``k`` (or the next free one) shows the source ``key`` (``addpanel.SOURCES``)."""
+        if key == "figure":
+            return self.open_figure(append=True)
+        target = self._target(k)
+        if target < 0:
+            return
+        before = len(self.spec.panels)
+        self.current = target
+        self._load_controls()
+        had = self.recipe.data
+        if key == "traces":
+            self.choose_traces()
+        elif key == "typical":
+            self.use_example()
+        elif key == "graph":
+            self.use_graph(use)
+        elif key == "workbench":
+            self.use_hand(*use)
+        elif key == "project":
+            name = next((n for n, make in fdata.project_tables(self.window_.project).items() if make is use), "table")
+            self._table_then_plot(use(), {"kind": "project", "table": name})
+        elif key == "file":
+            self.open_file()
+            if self.recipe.data and self.recipe.data != had:
+                self.choose_plot(self.current)
+        elif key == "picture":
+            self.open_picture()
+        if not self.recipe.data and k is None and len(self.spec.panels) == before and before > 1 and target == before - 1 \
+                and not had:
+            pass                                      # nothing was chosen: the empty panel stays to be filled
+        self._changed()
+        self.redraw_now()
+        self.canvas.select(Tag("panel", self.current))
+
+    def _table_then_plot(self, frame, source: dict) -> None:
+        r = self.recipe
+        if r.question == "example":                   # a table is not a trace: the usual start for one
+            r.question, r.plot, r.level, r.scale_bars = "compare", "points", "cell", False
+        self.set_table(frame, source)
+        self.choose_plot(self.current)
+
+    def choose_plot(self, k: int) -> None:
+        """How panel ``k`` is drawn, picked from pictures of every kind of plot."""
+        from .addpanel import PlotChooser
+
+        if not 0 <= k < len(self.spec.panels):
+            return
+        self.current = k
+        self._load_controls()
+        dlg = PlotChooser(self, self.recipe.plot)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted and dlg.plot and dlg.plot != self.recipe.plot:
+            self.set_plot(dlg.plot)
+
+    def set_plot(self, plot: str) -> None:
+        """The current panel drawn as ``plot`` (its question follows, with the columns that plot needs)."""
+        r = self.recipe
+        self.side.blockSignals(True)
+        i = self.plot.findData(plot)
+        if i >= 0:
+            self.plot.setCurrentIndex(i)              # the same path as the Plot pick list: its question follows
+        self.side.blockSignals(False)
+        f = r.frame()
+        if f is not None:                             # the columns the new plot needs, when not yet named
+            g = fdata.guess(f)
+            nums = [c for c in map(str, fdata.numeric_columns(f))]
+            if r.question in ("time", "pulses", "relationship") and not r.x:
+                r.x = g["x"] or next((c for c in nums if c != r.y), "")
+            if r.question == "counts" and not r.x:
+                r.x = next((c for c in map(str, fdata.category_columns(f)) if c not in (r.group, r.cell, r.animal)),
+                           r.group)
+            if plot == "raster":
+                r.level = "row"
+                r.x = r.x or (nums[0] if nums else "")
+            self._load_controls()
+            self._changed()
+
+    def add_recipe(self, recipe: Recipe, k: int | None = None) -> int:
+        """A ready panel (from the Workbench, from a Figures graph) added to the figure: into the first empty
+        panel, else as a new one. Returns where it went (-1: the figure is full)."""
+        target = self._target(k)
+        if target < 0:
+            return -1
+        old = self.spec.panels[target]
+        for f in PLACE_FIELDS:                        # it takes the place of the panel it fills
+            setattr(recipe, f, copy.deepcopy(getattr(old, f)))
+        self.spec.panels[target] = recipe
+        self.current = target
+        self._load_controls()
+        self._changed()
+        self.redraw_now()
+        self.canvas.select(Tag("panel", target))
+        return target
+
+    def use_graph(self, view) -> None:
+        """A graph of the Figures screen as the current panel: drawn out of sight, read back, its look kept."""
+        import pyqtgraph as pg
+
+        from . import editable
+
+        w = self.window_
+        item = pg.PlotItem()
+        pal = getattr(w, "palette", None) or theme.LIGHT
+        view.draw(item, pal)
+        name = Path(w.selected).name if getattr(w, "selected", None) is not None else ""
+        spec = editable.from_plot(item, view.title, name)
+        if spec is None:
+            QtWidgets.QMessageBox.information(self, "Nothing drawn", f"“{view.title}” draws nothing for this "
+                                              "recording, so there is nothing to put in the panel.")
+            return
+        self.add_recipe(spec.panels[0], self.current)
+
+    def use_hand(self, path, hand: dict) -> None:
+        """A measurement kept in the Workbench as the current panel: its table (every measure, sweep by sweep),
+        the first measure against the sweep to start with."""
+        try:
+            frame = fdata.hand_table(self.window_.recording(Path(path)), hand)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Could not measure it again", f"{hand.get('name', '')}: {exc}")
+            return
+        if frame.empty:
+            QtWidgets.QMessageBox.information(self, "Nothing measured", "This kept measurement has no rows.")
+            return
+        r = self.recipe
+        r.question, r.plot, r.level, r.scale_bars = "relationship", "scatter", "row", False
+        self.set_table(frame, {"kind": "workbench", "table": hand.get("name", "by hand"),
+                               "recording": Path(path).name})
+        measures = [c for c in frame.columns if not str(c).startswith(fdata.HAND_KEYS)]
+        r = self.recipe
+        r.x, r.y = "Sweep", (measures[0] if measures else "")
+        r.group = "Region" if frame["Region"].nunique() > 1 else ("Pulse" if "Pulse" in frame and
+                                                                  frame["Pulse"].nunique() > 1 else "")
+        r.cell = r.animal = ""
+        r.notes = [f"Measured by hand in the Workbench on {Path(path).name}."]
+        self._load_controls()
+        self._changed()
 
     def _build(self) -> None:
         central = QtWidgets.QWidget()
@@ -787,39 +1099,44 @@ class Builder(QtWidgets.QMainWindow):
         bar = QtWidgets.QWidget()
         bar.setObjectName("toolbar")
         top = box("h", "xs", "s")
-        top.addWidget(self._tool("Open data", "Where the numbers come from", self._data_menu))
+        self.add_button = widgets.primary("Add panel...", lambda *_a: self.add_panel_dialog())
+        top.addWidget(self.add_button)
+        top.addWidget(self._tool("Open", "A saved figure to work on again, or data for the selected panel",
+                                 self._data_menu))
         top.addWidget(_vline())
         self.undo_button = self._tool("Undo", "Undo the last change (Ctrl+Z)", slot=self.undo)
         self.redo_button = self._tool("Redo", "Redo it (Ctrl+Y)", slot=self.redo)
         top.addWidget(self.undo_button)
         top.addWidget(self.redo_button)
         top.addWidget(_vline())
-        top.addWidget(self._tool("Panels", "How many panels, and in how many columns", self._panels_menu))
+        top.addWidget(self._tool("Arrange", "Where the panels sit: a template, the grid's columns, free placement, "
+                                 "aligning", self._arrange_menu))
         self.size = QtWidgets.QComboBox()
-        self.size.setToolTip(CONTROLS["size"][1])
+        self.size.setToolTip("The figure's width on the page (a journal's column widths when a journal is chosen: "
+                             "click the page's background and see Journal)")
         self.size.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        for k, (w, h) in SIZES.items():
-            self.size.addItem(f"{k[:1].upper() + k[1:]} column ({w:g} mm)", k)
-        self.size.currentIndexChanged.connect(self._edited)
+        self.size.currentIndexChanged.connect(self._size_chosen)
         self.size.setAccessibleName("Figure size")
         top.addWidget(self.size)
         top.addWidget(_vline())
         top.addWidget(self._tool("Styles", "Save this look, or use a saved one", self._styles_menu))
-        self.layouts_button = self._tool("Presets", "A whole paper figure from the selected recording or cells", self._layouts_menu)
+        self.layouts_button = self._tool("Starters", "A whole figure in one step from the selected recording or "
+                                         "cells; every panel stays editable", self._layouts_menu)
         top.addWidget(self.layouts_button)
         self.methods_button = self._tool("Methods text", "A Methods paragraph for this figure", slot=self.show_methods)
         top.addWidget(self.methods_button)
         top.addStretch(1)
         top.addWidget(widgets.button("Save figure...", self.save_figure, "Keep it to edit again (.cwfig)"))
-        top.addWidget(widgets.primary("Export...", self.export, "PDF, SVG, EPS, PNG or TIFF, at a journal's size"))
+        top.addWidget(widgets.button("Export...", self.export, "PDF (text editable in Illustrator), SVG, EPS, TIFF "
+                                     "or PNG, at the figure's exact size, checked first"))
         bar.setLayout(top)
         outer.addWidget(bar)
         split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         split.setChildrenCollapsible(False)
-        split.addWidget(self._controls())
         split.addWidget(self._preview())
-        split.setStretchFactor(1, 3)
-        split.setSizes([520, 1000])
+        split.addWidget(self._side())
+        split.setStretchFactor(0, 3)
+        split.setSizes([940, 480])
         body = box("h", "s")
         body.setContentsMargins(theme.SPACE["m"], 0, theme.SPACE["m"], 0)
         body.addWidget(split)
@@ -830,20 +1147,70 @@ class Builder(QtWidgets.QMainWindow):
                            ("Ctrl+S", self.save_figure), ("Ctrl+E", self.export), ("Ctrl+Return", self.apply)):
             QtWidgets.QShortcut(QtGui.QKeySequence(keys), self, slot)
 
+    def _side(self) -> QtWidgets.QWidget:
+        """Beside the figure: what is selected, the current panel's data and statistics, and every setting."""
+        from .dataview import DataView
+        from .inspector import Inspector
+
+        self.side = QtWidgets.QTabWidget()
+        self.side.setDocumentMode(True)
+        self.side.setMinimumWidth(430)
+        self.inspector = Inspector(self)
+        self.dataview = DataView(self)
+        for w, name, tip in ((self.inspector, "Selected", "The properties of what is selected on the figure (the "
+                              "figure's own when nothing is)"),
+                             (self.dataview, "Data and statistics", "The table the current panel is drawn from, and "
+                              "the statistics on it")):
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+            holder = QtWidgets.QWidget()
+            hl = box("v", "s", "m")
+            hl.addWidget(w)
+            holder.setLayout(hl)
+            scroll.setWidget(holder)
+            self.side.addTab(scroll, name)
+            self.side.setTabToolTip(self.side.count() - 1, tip)
+        self.side.addTab(self._controls(), "All settings")
+        self.side.setTabToolTip(2, "Every control of the current panel and of the figure's look, in full")
+        self.side.currentChanged.connect(self._side_shown)
+        return self.side
+
+    def _side_shown(self, index: int) -> None:
+        if self._loading:
+            return
+        if index == 1:
+            self.dataview.refresh()
+        elif index == 2:
+            self._load_controls()
+
+    def show_all_settings(self, tab: str = "") -> None:
+        """The All settings tab, on one of its own tabs (Data, Plot, Groups, Axes, Theme, Marks)."""
+        self.side.setCurrentIndex(2)
+        for i in range(self.sections.count()):
+            if self.sections.tabText(i) == tab:
+                self.sections.setCurrentIndex(i)
+
     def _preview(self) -> QtWidgets.QWidget:
-        """The figure as it will export, on a desk, with its size and a zoom; under it, the caption and warnings."""
+        """The figure as it will export, on a desk, with its size and a zoom; under it, its legend and warnings."""
+        from .figcanvas import FigureCanvas
+
         right = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         right.setChildrenCollapsible(False)
         top = QtWidgets.QWidget()
         tl = box("v", "xs")
         head = box("h", "s")
-        head.addWidget(label("Preview", "heading"))
+        head.addWidget(label("Figure", "heading"))
         self.size_note = label("", "muted")
         head.addWidget(self.size_note)
         head.addStretch(1)
+        self.how = label("Click to select · drag to move · double-click text to rewrite · right-click for more",
+                         "hint")
+        self.how.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
         head.addWidget(label("Zoom", "muted"))
         self.zoom = QtWidgets.QComboBox()
-        for text, f in (("Fit to window", 0.0), ("Print size", 1.0), ("150%", 1.5), ("200%", 2.0)):
+        for text, f in (("Fit to window", 0.0), ("Print size", 1.0), ("150%", 1.5), ("200%", 2.0), ("300%", 3.0)):
             self.zoom.addItem(text, f)
         self.zoom.setToolTip("Fit the figure to the window, or show it at its printed size (and larger) to judge "
                              "the font sizes and line widths")
@@ -851,9 +1218,23 @@ class Builder(QtWidgets.QMainWindow):
         self.zoom.setAccessibleName("Zoom")
         head.addWidget(self.zoom)
         tl.addLayout(head)
+        tl.addWidget(self.how)                # what the mouse does with the thing selected, on a line of its own
         self.fig = Figure(dpi=SCREEN_DPI)
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        context_menu(self.canvas, self._canvas_menu)
+        self.canvas = FigureCanvas(self.fig)
+        pal = getattr(self.window_, "palette", None)
+        if pal is not None:
+            self.canvas.accent = QtGui.QColor(pal.accent)
+        self.canvas.can_move = self._can_move
+        self.canvas.can_resize = self._can_resize
+        self.canvas.words_of = self.words_of
+        self.canvas.selected.connect(self._on_selected)
+        self.canvas.moved.connect(self._moved)
+        self.canvas.resized.connect(self._resized)
+        self.canvas.text_edited.connect(self.set_words)
+        self.canvas.menu_requested.connect(self._thing_menu)
+        self.canvas.activated.connect(self._activated)
+        self.canvas.removed.connect(self.remove_thing)
+        self.canvas.nudged.connect(self._nudged)
         self.holder = QtWidgets.QScrollArea()
         self.holder.setObjectName("desk")
         self.holder.setAlignment(QtCore.Qt.AlignCenter)
@@ -865,10 +1246,10 @@ class Builder(QtWidgets.QMainWindow):
         bottom = QtWidgets.QWidget()
         bl = box("v", "xs")
         cap_head = box("h", "s")
-        cap_head.addWidget(label("What this figure shows", "heading"))
+        cap_head.addWidget(label("Figure legend (draft)", "heading"))
         cap_head.addStretch(1)
-        cap_head.addWidget(widgets.button("Copy caption", self.copy_caption, "Copy the caption for a figure legend",
-                                          quiet=True))
+        cap_head.addWidget(widgets.button("Copy legend", self.copy_caption, "Copy the legend's draft: what each panel "
+                                          "shows, its n, its statistics", quiet=True))
         bl.addLayout(cap_head)
         self.caption = QtWidgets.QTextBrowser()
         self.caption.setMinimumHeight(60)
@@ -960,7 +1341,7 @@ class Builder(QtWidgets.QMainWindow):
         holder = QtWidgets.QWidget()
         outer = box("v", "s")
         outer.setContentsMargins(0, theme.SPACE["s"], theme.SPACE["s"], 0)
-        outer.addWidget(label("What do you want to show?", "heading"))
+        outer.addWidget(label("Start from a question (optional)", "heading"))
         self.question_box = QtWidgets.QComboBox()
         for key, title, why, *_rest in QUESTIONS:
             self.question_box.addItem(title, key)
@@ -984,7 +1365,7 @@ class Builder(QtWidgets.QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.remove_panel)
         context_menu(self.tabs, self._tab_menu)
-        self.add_panel = widgets.button("+ Add panel", lambda: self.set_panels(len(self.spec.panels) + 1),
+        self.add_panel = widgets.button("+ Copy as a new panel", lambda: self.set_panels(len(self.spec.panels) + 1),
                                         "Add a panel, starting as a copy of this one", quiet=True)
         strip.addWidget(self.add_panel)
         self.remove_panel_button = widgets.button("Remove panel", lambda: self.remove_panel(self.current),
@@ -1002,7 +1383,7 @@ class Builder(QtWidgets.QMainWindow):
                                        "(Ctrl+Enter)"))
         outer.addLayout(foot)
         holder.setLayout(outer)
-        holder.setMinimumWidth(480)            # the tabs and the Groups table whole
+        holder.setMinimumWidth(420)            # the tabs and the Groups table whole
 
         # Data: which table -> which rows -> which time window -> bins -> baseline
         lay = self._tab("Data")
@@ -1244,12 +1625,14 @@ class Builder(QtWidgets.QMainWindow):
             self.tabs.blockSignals(True)
             while self.tabs.count():
                 self.tabs.removeTab(0)
+            names = render.letters(self.spec)
             for k in range(len(self.spec.panels)):
-                self.tabs.addTab(f"Panel {chr(ord('A') + k)}")
+                self.tabs.addTab(f"Panel {names[k] or chr(ord('A') + k)}" + (" (inset)" if page.is_inset(
+                    self.spec.panels, k) else ""))
             self.tabs.setCurrentIndex(self.current)
-            self.add_panel.setEnabled(len(self.spec.panels) < 6)
-            self.add_panel.setToolTip("Add a panel, starting as a copy of this one" if len(self.spec.panels) < 6
-                                      else "A figure holds six panels at most.")
+            self.add_panel.setEnabled(len(self.spec.panels) < self.MOST)
+            self.add_panel.setToolTip("Add a panel, starting as a copy of this one" if len(self.spec.panels) <
+                                      self.MOST else f"A figure holds {self.MOST} panels at most.")
             self.remove_panel_button.setEnabled(len(self.spec.panels) > 1)
             self.remove_panel_button.setToolTip("Remove the panel being edited (its × does the same; Undo brings it "
                                                 "back)" if len(self.spec.panels) > 1 else
@@ -1303,7 +1686,7 @@ class Builder(QtWidgets.QMainWindow):
             self.ref_lines.set_value(r.ref_lines)
             self.marks.set_value(r.markers)
             self.notes.set_value(r.annotations)
-            self.size.setCurrentIndex(max(0, self.size.findData(self.spec.size)))
+            self._fill_sizes()
             self.theme_box.setCurrentText(s.theme)
             self.palette_box.setCurrentText(s.palette)
             self.font.setCurrentFont(QtGui.QFont(s.font))
@@ -1407,7 +1790,6 @@ class Builder(QtWidgets.QMainWindow):
         r.ref_lines = self.ref_lines.value()
         r.markers = self.marks.value()
         r.annotations = [{k: v for k, v in a.items() if v is not None} for a in self.notes.value()]
-        self.spec.size = self.size.currentData() or "single"
         s.palette = self.palette_box.currentText()
         s.font = self.font.currentFont().family()
         for key, spin in self.spins.items():
@@ -1526,10 +1908,16 @@ class Builder(QtWidgets.QMainWindow):
 
     def set_panels(self, n: int, columns: int | None = None) -> None:
         panels = self.spec.panels
-        while len(panels) < n:              # a new panel starts as a copy of the current one
-            panels.append(copy.deepcopy(self.recipe))
+        while len(panels) < n:              # a new panel starts as a copy of the current one, in a cell of its own
+            new = copy.deepcopy(self.recipe)
+            new.span, new.rect, new.inset_of, new.inset_rect, new.letter, new.letter_offset = [], [], -1, [], "", []
+            panels.append(new)
         del panels[n:]
-        self.spec.columns = columns or min(n, 3)
+        for r in panels:                    # an inset whose panel is gone is a panel again
+            if r.inset_of >= len(panels):
+                r.inset_of = -1
+        self.spec.columns = columns or (self.spec.columns if self.spec.columns > 1 and n > self.spec.columns
+                                        else min(n, 3))
         self.current = min(self.current, n - 1)
         self._load_controls()
         self._changed()
@@ -1541,7 +1929,7 @@ class Builder(QtWidgets.QMainWindow):
             a.setCheckable(True)
             a.setChecked(len(self.spec.panels) == n)
         m.addSeparator()
-        for c in (1, 2, 3):
+        for c in (1, 2, 3, 4):
             a = m.addAction(f"In {c} column{'s' if c > 1 else ''}", lambda c=c: self.set_panels(len(self.spec.panels), c))
             a.setCheckable(True)
             a.setChecked(self.spec.columns == c)
@@ -1554,17 +1942,26 @@ class Builder(QtWidgets.QMainWindow):
         if len(self.spec.panels) < 2 or not 0 <= k < len(self.spec.panels):
             return
         del self.spec.panels[k]
+        for r in self.spec.panels:          # its insets become panels; the others' parents keep their numbers
+            r.inset_of = -1 if r.inset_of == k else r.inset_of - 1 if r.inset_of > k else r.inset_of
         self.spec.columns = max(1, min(self.spec.columns, len(self.spec.panels)))
+        self.canvas.select(None)
         self.current = min(self.current if self.current < k else max(0, self.current - 1), len(self.spec.panels) - 1)
         self._load_controls()
         self._changed()
         self.statusBar().showMessage(f"Panel {chr(ord('A') + k)} removed (Undo, Ctrl+Z, brings it back).", 5000)
 
     def duplicate_panel(self, k: int) -> None:
-        if len(self.spec.panels) >= 6:
+        if len(self.spec.panels) >= self.MOST:
             return
-        self.spec.panels.insert(k + 1, copy.deepcopy(self.spec.panels[k]))
-        self.spec.columns = min(max(self.spec.columns, 1), 3)
+        new = copy.deepcopy(self.spec.panels[k])
+        new.letter, new.letter_offset = "", []
+        if len(new.rect) == 4:              # a freely placed copy sits a little down and right of its original
+            new.rect = [new.rect[0] + 4.0, new.rect[1] + 4.0, new.rect[2], new.rect[3]]
+        for r in self.spec.panels:
+            if r.inset_of > k:
+                r.inset_of += 1
+        self.spec.panels.insert(k + 1, new)
         self.current = k + 1
         self._load_controls()
         self._changed()
@@ -1580,7 +1977,9 @@ class Builder(QtWidgets.QMainWindow):
 
     def _panel_actions(self, m: QtWidgets.QMenu, k: int) -> None:
         n = len(self.spec.panels)
-        letter = chr(ord("A") + k)
+        letter = self.letter_of(k) or chr(ord("A") + k)
+        r = self.spec.panels[k]
+
         def add(text, slot, on=True, why=""):
             a = m.addAction(text, slot)
             a.setEnabled(bool(on))
@@ -1588,44 +1987,769 @@ class Builder(QtWidgets.QMainWindow):
                 a.setToolTip(why)
             return a
 
-        full = "A figure holds six panels at most."
-        if k != self.current:
-            add(f"Edit panel {letter}", lambda: self.tabs.setCurrentIndex(k))
-        add(f"Duplicate panel {letter}", lambda: self.duplicate_panel(k), n < 6, full)
-        add(f"Remove panel {letter}", lambda: self.remove_panel(k), n > 1, "A figure keeps at least one panel.")
-        add("Move it left", lambda: self.move_panel(k, -1), k > 0, "It is the first panel already.")
-        add("Move it right", lambda: self.move_panel(k, 1), k < n - 1, "It is the last panel already.")
+        full = f"A figure holds {self.MOST} panels at most."
+        has = r.frame() is not None
+        add("Choose its data..." if not has else "Change its data...", lambda: self.choose_data(k))
+        add("Choose how it is drawn...", lambda: self.choose_plot(k), has, "This panel has no data yet.")
+        add("See its data and statistics", lambda: (self._select_panel(k), self.side.setCurrentIndex(1)), has,
+            "This panel has no data yet.")
         m.addSeparator()
-        add("Add a new panel", lambda: self.set_panels(n + 1), n < 6, full)
+        add("Add text", lambda: self.add_annotation(k, "text"), has, "This panel has no data yet.")
+        add("Add an arrow with text", lambda: self.add_annotation(k, "arrow"), has, "This panel has no data yet.")
+        add("Add a stimulus bar", lambda: self.add_stim_bar(k), has, "This panel has no data yet.")
+        if not page.is_inset(self.spec.panels, k):
+            add("Add an inset", lambda: self.add_inset(k), n < self.MOST, full)
+            add("Place the panels freely (drag and resize)" if len(r.rect) != 4 else "Put the panels back in the grid",
+                lambda: self.place_freely(k, len(r.rect) != 4))
+        m.addSeparator()
+        add(f"Duplicate panel {letter}", lambda: self.duplicate_panel(k), n < self.MOST, full)
+        add(f"Remove panel {letter}", lambda: self.remove_panel(k), n > 1, "A figure keeps at least one panel.")
+        add("Move it earlier", lambda: self.move_panel(k, -1), k > 0, "It is the first panel already.")
+        add("Move it later", lambda: self.move_panel(k, 1), k < n - 1, "It is the last panel already.")
         m.setToolTipsVisible(True)
 
     def _tab_menu(self, m: QtWidgets.QMenu, pos) -> None:
         k = self.tabs.tabAt(pos)
         self._panel_actions(m, k if k >= 0 else self.current)
 
-    def _canvas_menu(self, m: QtWidgets.QMenu, pos) -> None:
-        """Right-click on the preview: the panel under the pointer, and the figure's own actions."""
-        x, y = self.canvas.mouseEventCoords(pos)
-        k = None
-        cols = max(1, self.spec.columns)
-        for ax in self.fig.axes:
-            ss = ax.get_subplotspec()
-            if ss is not None and ax.bbox.contains(x, y):
-                top = ss.get_topmost_subplotspec()
-                k = top.rowspan.start * cols + top.colspan.start
-                break
-        if k is not None and k < len(self.spec.panels):
-            self._panel_actions(m, k)
+    def _arrange_menu(self, m: QtWidgets.QMenu) -> None:
+        """Where the panels sit: a template, the grid's columns, free placement, aligning the free ones."""
+        m.clear()
+        m.setToolTipsVisible(True)
+        t = m.addMenu("A template")
+        for key, tpl in page.TEMPLATES.items():
+            a = t.addAction(f"{tpl.name} ({tpl.n} panel{'s' if tpl.n != 1 else ''})", lambda k=key: self.use_template(k))
+            a.setToolTip(tpl.line)
+        t.setToolTipsVisible(True)
+        cols = m.addMenu("Columns of the grid")
+        for c in (1, 2, 3, 4, 5, 6):
+            a = cols.addAction(f"{c} column{'s' if c > 1 else ''}", lambda c=c: self.set_columns(c, True))
+            a.setCheckable(True)
+            a.setChecked(self.spec.columns == c)
+        m.addSeparator()
+        free = [k for k, r in enumerate(self.spec.panels) if len(r.rect) == 4]
+        a = m.addAction("Place every panel freely", self.all_free)
+        a.setEnabled(len(free) < len([k for k in range(len(self.spec.panels))
+                                      if not page.is_inset(self.spec.panels, k)]))
+        a.setToolTip("Each panel keeps where the grid has it, and can then be dragged and resized" if a.isEnabled()
+                     else "Every panel is placed freely already.")
+        a = m.addAction("Put every panel back in the grid", self.all_grid)
+        a.setEnabled(bool(free))
+        a.setToolTip("The panels flow into the grid's cells again" if free else "No panel is placed freely.")
+        al = m.addMenu("Align and space the freely placed panels")
+        for key, words in page.ALIGN.items():
+            need = 3 if key.startswith("spread") else 2
+            a = al.addAction(words, lambda k=key: self.arrange(k))
+            a.setEnabled(len(free) >= need)
+            a.setToolTip("The selected panel is the one the others follow" if len(free) >= need else
+                         f"Needs {need} freely placed panels (Place every panel freely).")
+        al.setToolTipsVisible(True)
+        m.addSeparator()
+        lab = m.addAction("Letter the panels A, B, C", self._toggle_labels)
+        lab.setCheckable(True)
+        lab.setChecked(self.spec.labels)
+
+    # ---------------------------------------------------------------- the figure worked on directly
+    def touch(self, what: str = "") -> None:
+        """Something of the figure was changed (by the inspector, the data view, the canvas): kept for Undo and
+        drawn again."""
+        self._changed()
+
+    def select(self, tag) -> None:
+        self.canvas.select(tag)
+
+    def select_panel_on_figure(self, k: int) -> None:
+        """Panel ``k`` selected on the figure (what was just added, shown as the thing to work on)."""
+        if 0 <= k < len(self.spec.panels):
+            self.canvas.select(Tag("panel", k))
+
+    def letter_of(self, k: int) -> str:
+        names = render.letters(self.spec)
+        return names[k] if 0 <= k < len(names) else ""
+
+    def drawn_of(self, k: int):
+        return self.canvas.panel_drawn(k)
+
+    def look_of(self, k: int, group: str):
+        d = self.drawn_of(k)
+        if d is None or d.prepared is None:
+            return None
+        groups = render.ordered(list(dict.fromkeys(d.prepared.points.group if len(d.prepared.points) else
+                                                   d.prepared.rows.group)), d.recipe)
+        return render.looks(d.recipe, self.spec.style, groups).get(group)
+
+    def source_words(self, k: int) -> str:
+        r = self.spec.panels[k]
+        f = r.frame()
+        if f is None:
+            return "No data yet: choose what this panel shows."
+        kind = r.source.get("kind", "")
+        where = {"project": f"This project's table “{r.source.get('table', '')}”",
+                 "file": f"{Path(r.source.get('path', '')).name}" + (f", sheet {r.source.get('sheet')}"
+                                                                      if r.source.get("sheet") else ""),
+                 "digitized": f"Digitized from {Path(r.source.get('path', '')).name}: an estimate",
+                 "example": r.source.get("table", ""),
+                 "graph": f"The graph “{r.source.get('table', '')}”" + (f" of {r.source['recording']}"
+                                                                     if r.source.get("recording") else ""),
+                 "workbench": f"The Workbench measurement “{r.source.get('table', '')}”" + (
+                     f" of {r.source['recording']}" if r.source.get("recording") else ""),
+                 "traces": "Raw traces: " + "; ".join(
+                     f"{s['name']} ({len(s.get('items', []))} sweep{'s' if len(s.get('items', [])) != 1 else ''})"
+                     for s in r.source.get("sets", []))}.get(kind, r.source.get("table", "") or "A table")
+        return f"{where}: {len(f)} rows, {f.shape[1]} columns."
+
+    @staticmethod
+    def pair(text: str) -> list:
+        return _pair(text)
+
+    @staticmethod
+    def pair_text(v: list) -> str:
+        return _pair_text(v)
+
+    @staticmethod
+    def set_dict(d: dict, key: str, value) -> None:
+        """``d[key]`` set, or taken out when the value is blank (then it is automatic again)."""
+        if value in (None, ""):
+            d.pop(key, None)
         else:
-            a = m.addAction("Add a new panel", lambda: self.set_panels(len(self.spec.panels) + 1))
-            a.setEnabled(len(self.spec.panels) < 6)
+            d[key] = value
+
+    def units_of(self, r: Recipe, which: str) -> str:
+        return render._units(getattr(r, which, "") or "")
+
+    def default_label(self, r: Recipe, which: str) -> str:
+        return (r.x if which == "x" else render._y_name(r)) or ""
+
+    # -- what may be dragged, and whose words may be rewritten
+    def _can_move(self, tag) -> bool:
+        if tag is None or tag.kind not in MOVABLE:
+            return False
+        return not (tag.kind == "scalebar" and tag.key == "command")
+
+    def _can_resize(self, tag) -> bool:
+        if tag is None or tag.kind != "panel" or not 0 <= tag.panel < len(self.spec.panels):
+            return False
+        r = self.spec.panels[tag.panel]
+        return len(r.rect) == 4 or page.is_inset(self.spec.panels, tag.panel)
+
+    def bracket(self, k: int, key: str) -> dict:
+        """The bracket between two groups as set by hand ({} when it is still automatic)."""
+        a, _, c = str(key).partition("|")
+        return next((x for x in self.spec.panels[k].brackets if (str(x.get("a")), str(x.get("b"))) == (a, c)), {})
+
+    def set_bracket(self, tag, field_: str, value) -> None:
+        r = self.spec.panels[tag.panel]
+        a, _, c = str(tag.key).partition("|")
+        own = dict(self.bracket(tag.panel, tag.key)) or {"a": a, "b": c}
+        self.set_dict(own, field_, value)
+        r.brackets = [x for x in r.brackets if (str(x.get("a")), str(x.get("b"))) != (a, c)]
+        if set(own) - {"a", "b"}:
+            r.brackets.append(own)
+
+    def words_of(self, tag):
+        """The words of a thing that can be rewritten in place (None: it has none)."""
+        if tag is None:
+            return None
+        if tag.kind == "figtext":
+            i = int(tag.key)
+            return self.spec.texts[i].get("text", "") if 0 <= i < len(self.spec.texts) else None
+        if not 0 <= tag.panel < len(self.spec.panels):
+            return None
+        r, kind = self.spec.panels[tag.panel], tag.kind
+        try:
+            if kind == "title":
+                return r.title
+            if kind == "letter":
+                return r.letter or self.letter_of(tag.panel)
+            if kind == "xlabel":
+                return r.x_label or self.default_label(r, "x")
+            if kind == "ylabel":
+                return r.y_label or self.default_label(r, "y")
+            if kind == "annotation":
+                return r.annotations[int(tag.key)].get("text", "")
+            if kind == "stimbar":
+                return r.stim_bars[int(tag.key)].get("label", "")
+            if kind == "bracket":
+                own = self.bracket(tag.panel, tag.key).get("text")
+                return own if own else self._bracket_text(tag)
+            if kind == "series":
+                return r.series.get(tag.key, {}).get("label") or tag.key
+            if kind == "vmlabel":
+                return r.vm_labels.get(tag.key, "")
+            if kind == "refline":
+                return r.ref_lines[int(tag.key)].get("label", "")
+            if kind == "marker":
+                return r.markers[int(tag.key)].get("label", "")
+        except (IndexError, ValueError):
+            return None
+        return None
+
+    def _bracket_text(self, tag) -> str:
+        for t, a in render.things(self.fig):
+            if (t.kind, t.panel, t.key, t.part) == ("bracket", tag.panel, tag.key, "text"):
+                return a.get_text()
+        return ""
+
+    def set_words(self, tag, text: str) -> None:
+        """A thing's words rewritten (in place on the figure, or from the inspector)."""
+        if tag.kind == "figtext":
+            self.spec.texts[int(tag.key)]["text"] = text
+            return self.touch("text")
+        r, kind = self.spec.panels[tag.panel], tag.kind
+        if kind == "title":
+            r.title = text
+        elif kind == "letter":
+            r.letter = text.strip()
+        elif kind == "xlabel":
+            r.x_label = text
+        elif kind == "ylabel":
+            r.y_label = text
+        elif kind == "annotation":
+            r.annotations[int(tag.key)]["text"] = text
+        elif kind == "stimbar":
+            r.stim_bars[int(tag.key)]["label"] = text.strip()
+        elif kind == "bracket":
+            self.set_bracket(tag, "text", text.strip())
+        elif kind == "series":
+            mine = dict(r.series.get(tag.key, {}))
+            self.set_dict(mine, "label", text.strip() if text.strip() != tag.key else "")
+            r.series = {**r.series, tag.key: mine}
+        elif kind == "vmlabel":
+            r.vm_labels = {**r.vm_labels, tag.key: text.strip()}
+        elif kind == "refline":
+            r.ref_lines[int(tag.key)]["label"] = text.strip()
+        elif kind == "marker":
+            r.markers[int(tag.key)]["label"] = text.strip()
+        self.touch("text")
+
+    # -- the canvas's reports
+    def _on_selected(self, tag) -> None:
+        if tag is not None and 0 <= tag.panel < len(self.spec.panels) and tag.panel != self.current:
+            self.current = tag.panel
+            if self.side.currentIndex() == 2:
+                self._load_controls()
+            else:
+                self.tabs.blockSignals(True)
+                self.tabs.setCurrentIndex(self.current)
+                self.tabs.blockSignals(False)
+        self.inspector.show_for(tag)
+        if self.side.currentIndex() == 2 or (self.side.currentIndex() == 1 and tag is not None
+                                            and tag.kind != "panel"):
+            self.side.setCurrentIndex(0)
+        if self.side.currentIndex() == 1:
+            self.dataview.refresh()
+        self.how.setText(self._how_words(tag))
+
+    def _how_words(self, tag) -> str:
+        if tag is None:
+            return "Click to select · drag to move · double-click text to rewrite · right-click for more"
+        words = elements.KIND_WORDS.get(tag.kind, tag.kind).lower()
+        can = []
+        if self._can_move(tag):
+            can.append("drag or the arrow keys move it")
+        if self.words_of(tag) is not None:
+            can.append("double-click rewrites it")
+        can.append("Delete removes it" if tag.kind not in ("xaxis", "yaxis", "xlabel", "ylabel") else
+                   "its settings are on the right")
+        return f"Selected: the {words}. " + "; ".join(can).capitalize() + "."
+
+    def _activated(self, tag) -> None:
+        """A double-click on a thing with no words of its own: a panel's data or plot; else its settings."""
+        if tag.kind == "panel":
+            r = self.spec.panels[tag.panel]
+            self.choose_plot(tag.panel) if r.frame() is not None else self.choose_data(tag.panel)
+        else:
+            self.side.setCurrentIndex(0)
+
+    def _nudged(self, tag, dx_mm: float, dy_mm: float) -> None:
+        k = self.canvas.mm_per_pixel()
+        self._moved(tag, dx_mm / k, dy_mm / k)
+
+    def _moved(self, tag, dx: float, dy: float) -> None:
+        """A thing dragged by (dx, dy) figure pixels (y up): its place in the figure's Spec follows."""
+        kind = tag.kind
+        mm = self.canvas.mm_per_pixel()
+        if kind == "figtext":
+            t = self.spec.texts[int(tag.key)]
+            t["x"], t["y"] = round(float(t.get("x", 0)) + dx * mm, 2), round(float(t.get("y", 0)) - dy * mm, 2)
+            return self.touch("move")
+        if not 0 <= tag.panel < len(self.spec.panels):
+            return
+        r = self.spec.panels[tag.panel]
+        ax = self.canvas.axes_of(tag.panel)
+        if ax is None:
+            return
+        renderer = render._renderer(self.fig)
+        to_axes = ax.transAxes.inverted().transform
+
+        def shifted_axes(point):
+            px = ax.transAxes.transform(point)
+            return [round(float(v), 4) for v in to_axes((px[0] + dx, px[1] + dy))]
+
+        if kind == "letter":
+            off = (list(r.letter_offset) + [0.0, 0.0])[:2]
+            r.letter_offset = [round(off[0] + dx * mm, 2), round(off[1] - dy * mm, 2)]
+        elif kind == "legend" and ax.get_legend() is not None:
+            bb = ax.get_legend().get_window_extent(renderer)
+            r.legend_at = [round(float(v), 4) for v in to_axes((bb.x0 + dx, bb.y1 + dy))]
+        elif kind == "scalebar":
+            r.scale_bar = {**r.scale_bar, "at": shifted_axes(r.scale_bar.get("at") or (0.995, 0.02))}
+        elif kind == "stimbar":
+            bar = r.stim_bars[int(tag.key)]
+            bar["y"] = float(round(float(bar.get("y", 1.02)) + dy / max(float(ax.bbox.height), 1.0), 3))
+        elif kind == "annotation":
+            a = r.annotations[int(tag.key)]
+            kx, ky = ("x2", "y2") if a.get("kind") == "arrow" and a.get("x2") is not None else ("x", "y")
+            px = ax.transData.transform((float(a[kx]), float(a[ky])))
+            a[kx], a[ky] = (float(f"{v:.5g}") for v in ax.transData.inverted().transform((px[0] + dx, px[1] + dy)))
+        elif kind == "bracket":
+            line = next((a for t, a in render.things(self.fig)
+                         if (t.kind, t.panel, t.key, t.part) == ("bracket", tag.panel, tag.key, "line")), None)
+            if line is None:
+                return
+            px = ax.transData.transform((0.0, float(line.get_ydata()[1])))
+            self.set_bracket(tag, "y", float(f"{ax.transData.inverted().transform((px[0], px[1] + dy))[1]:.5g}"))
+        elif kind == "panel":
+            self._panel_moved(tag.panel, dx, dy)
+        else:
+            return
+        self.touch("move")
+
+    def _panel_moved(self, k: int, dx: float, dy: float) -> None:
+        """A panel dragged: an inset moves inside its panel, a freely placed one on the page (landing on the snap
+        grid), one of the grid changes places with the panel it is dropped on."""
+        spec, r, mm = self.spec, self.spec.panels[k], self.canvas.mm_per_pixel()
+        w_mm, h_mm = spec.size_mm()
+        if page.is_inset(spec.panels, k):
+            parent = self.canvas.axes_of(r.inset_of)
+            rect = list(r.inset_rect) if len(r.inset_rect) == 4 else page.inset_default()
+            if parent is not None:
+                rect[0] = round(rect[0] + dx / max(parent.bbox.width, 1.0), 3)
+                rect[1] = round(rect[1] + dy / max(parent.bbox.height, 1.0), 3)
+                r.inset_rect = rect
+        elif len(r.rect) == 4:
+            x, y, w, h = r.rect
+            r.rect = [round(v, 2) for v in page.clamp(page.snap([x + dx * mm, y - dy * mm, w, h], spec.snap_mm),
+                                                    w_mm, h_mm)]
+        else:
+            o = self.canvas.outline(Tag("panel", k))
+            if o is None:
+                return
+            cx, cy = (o[0] + o[2]) / 2 + dx, (o[1] + o[3]) / 2 + dy
+            for d in self.canvas.drawn:
+                j = getattr(d.axes[0], "_cw_panel", -1) if d.axes else -1
+                box_ = render.panel_outline(self.fig, d)
+                if j not in (-1, k) and d.box and box_ and box_[0] <= cx <= box_[2] and box_[1] <= cy <= box_[3]:
+                    self.swap_panels(k, j)
+                    self.canvas.select(Tag("panel", j), tell=False)
+                    self.current = j
+                    return
+            self.statusBar().showMessage("Dropped on no other panel: it stays in its cell. To put it anywhere, "
+                                         "right-click it and Place the panels freely.", 6000)
+
+    def swap_panels(self, i: int, j: int) -> None:
+        """Two panels change places: what each shows goes to the other's place (cell, span, letter)."""
+        p = self.spec.panels
+        place = {k: {f: copy.deepcopy(getattr(p[k], f)) for f in PLACE_FIELDS} for k in (i, j)}
+        p[i], p[j] = p[j], p[i]
+        for k in (i, j):
+            for f, v in place[k].items():
+                setattr(p[k], f, v)
+
+    def _resized(self, tag, handle: str, dx: float, dy: float) -> None:
+        k = tag.panel
+        spec, r, mm = self.spec, self.spec.panels[k], self.canvas.mm_per_pixel()
+        if page.is_inset(spec.panels, k):
+            parent = self.canvas.axes_of(r.inset_of)
+            if parent is None:
+                return
+            x, y, w, h = list(r.inset_rect) if len(r.inset_rect) == 4 else page.inset_default()
+            fx, fy = dx / max(parent.bbox.width, 1.0), dy / max(parent.bbox.height, 1.0)
+            if "w" in handle:
+                x, w = x + fx, w - fx
+            if "e" in handle:
+                w += fx
+            if "s" in handle:
+                y, h = y + fy, h - fy
+            if "n" in handle:
+                h += fy
+            r.inset_rect = [round(x, 3), round(y, 3), round(max(w, 0.08), 3), round(max(h, 0.08), 3)]
+        elif len(r.rect) == 4:
+            x, y, w, h = r.rect
+            ddx, ddy = dx * mm, -dy * mm                 # the page's y runs down
+            if "w" in handle:
+                x, w = x + ddx, w - ddx
+            if "e" in handle:
+                w += ddx
+            if "n" in handle:
+                y, h = y + ddy, h - ddy
+            if "s" in handle:
+                h += ddy
+            r.rect = [round(v, 2) for v in page.clamp(page.snap([x, y, w, h], spec.snap_mm), *spec.size_mm())]
+        else:
+            return
+        self.touch("resize")
+
+    def remove_thing(self, tag) -> None:
+        """What is selected taken off the figure (Delete, or its Remove): Undo brings it back."""
+        if tag is None:
+            return
+        kind = tag.kind
+        if kind == "figtext":
+            del self.spec.texts[int(tag.key)]
+        elif kind == "panel":
+            if len(self.spec.panels) < 2:
+                self.statusBar().showMessage("A figure keeps at least one panel; its data can be removed (Open).", 5000)
+                return
+            return self.remove_panel(tag.panel)
+        else:
+            r = self.spec.panels[tag.panel]
+            if kind == "annotation":
+                del r.annotations[int(tag.key)]
+            elif kind == "stimbar":
+                del r.stim_bars[int(tag.key)]
+            elif kind == "refline":
+                del r.ref_lines[int(tag.key)]
+            elif kind == "marker":
+                del r.markers[int(tag.key)]
+            elif kind == "legend":
+                r.legend, r.legend_at = "none", []
+            elif kind == "title":
+                r.title = ""
+            elif kind == "letter":
+                r.letter = "-"
+            elif kind == "bracket":
+                self.set_bracket(tag, "hidden", True)
+            elif kind == "scalebar":
+                if tag.key == "command":
+                    r.command = {**r.command, "show": False}
+                else:
+                    r.scale_bars = False
+            elif kind == "command":
+                r.command = {**r.command, "show": False}
+            elif kind == "vmlabel":
+                r.show_vm = False
+            elif kind == "series":
+                r.series = {**r.series, tag.key: {**r.series.get(tag.key, {}), "hidden": True}}
+            else:
+                self.statusBar().showMessage(f"The {elements.KIND_WORDS.get(kind, kind).lower()} cannot be removed; "
+                                             "its settings are on the right.", 5000)
+                return
+        self.canvas.select(None)
+        self.touch("remove")
+
+    def _thing_menu(self, tag, where) -> None:
+        """Right-click: what can be done with the thing under the mouse (or with the page)."""
+        m = QtWidgets.QMenu(self)
+        m.setToolTipsVisible(True)
+        if tag is None:
+            a = m.addAction("Add a panel...", self.add_panel_dialog)
+            a.setEnabled(len(self.spec.panels) < self.MOST or any(r.frame() is None for r in self.spec.panels))
+            m.addAction("Add text on the page", self.add_page_text)
+        elif tag.kind == "panel":
+            self._panel_actions(m, tag.panel)
+        else:
+            words = elements.KIND_WORDS.get(tag.kind, tag.kind).lower()
+            if self.words_of(tag) is not None:
+                m.addAction(f"Rewrite the {words}...", lambda: self.canvas.edit_text(tag))
+            if tag.kind not in ("xaxis", "yaxis", "xlabel", "ylabel"):
+                gone = "Hide" if tag.kind in ("bracket", "series", "vmlabel") else "Remove"
+                m.addAction(f"{gone} the {words}", lambda: self.remove_thing(tag))
+            if 0 <= tag.panel < len(self.spec.panels):
+                sub = m.addMenu(f"Panel {self.letter_of(tag.panel) or tag.panel + 1}")
+                self._panel_actions(sub, tag.panel)
+        m.addSeparator()
+        m.addAction("Copy the figure as a picture", self.copy_picture)
+        m.addAction("Export...", self.export)
+        m.exec_(where)
+
+    def _canvas_menu(self, m: QtWidgets.QMenu, pos) -> None:
+        """The right-click menu at a point of the canvas, filled into ``m`` (kept for callers that build it)."""
+        tag = self.canvas.hit(pos)
+        if tag is not None and 0 <= tag.panel < len(self.spec.panels):
+            self._panel_actions(m, tag.panel)
+        else:
+            a = m.addAction("Add a panel...", self.add_panel_dialog)
+            a.setEnabled(len(self.spec.panels) < self.MOST)
         m.addSeparator()
         m.addAction("Copy the figure as a picture", self.copy_picture)
         m.addAction("Export...", self.export)
 
     def copy_picture(self) -> None:
+        was = self.canvas.selection
+        self.canvas.select(None, tell=False)          # the picture without the selection's outline
+        self.canvas.repaint()
         QtWidgets.QApplication.clipboard().setPixmap(self.canvas.grab())
+        self.canvas.select(was, tell=False)
         self.statusBar().showMessage("The figure is on the clipboard.", 3000)
+
+    # -- things added
+    def add_annotation(self, k: int, kind: str = "text") -> None:
+        """Words (or an arrow with words) in the middle of panel ``k``, selected, ready to drag and rewrite."""
+        r = self.spec.panels[k]
+        ax = self.canvas.axes_of(k)
+        if ax is None:
+            return
+        (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
+        cx, cy = float(f"{(x0 + x1) / 2:.4g}"), float(f"{(y0 + y1) / 2:.4g}")
+        a = {"kind": kind, "x": cx, "y": cy, "text": "text"}
+        if kind == "arrow":
+            a.update(x2=float(f"{cx + 0.15 * (x1 - x0):.4g}"), y2=float(f"{cy + 0.15 * (y1 - y0):.4g}"))
+        r.annotations = list(r.annotations) + [a]
+        self.touch("add text")
+        self.redraw_now()
+        self.canvas.select(Tag("annotation", k, str(len(r.annotations) - 1)))
+
+    def add_page_text(self) -> None:
+        w, h = self.spec.size_mm()
+        self.spec.texts = list(self.spec.texts) + [{"x": round(w * 0.4, 1), "y": round(h * 0.03, 1), "text": "text"}]
+        self.touch("add text")
+        self.redraw_now()
+        self.canvas.select(Tag("figtext", -1, str(len(self.spec.texts) - 1)))
+
+    def add_stim_bar(self, k: int) -> None:
+        """A stimulus bar over panel ``k``: over the middle fifth of x to start with (blue light), selected."""
+        r = self.spec.panels[k]
+        ax = self.canvas.axes_of(k)
+        if ax is None:
+            return
+        x0, x1 = ax.get_xlim()
+        last = r.stim_bars[-1] if r.stim_bars else {}
+        bar = {"start": float(f"{x0 + 0.4 * (x1 - x0):.4g}"), "end": float(f"{x0 + 0.6 * (x1 - x0):.4g}"),
+               **{key: last[key] for key in ("nm", "colour", "kind", "y", "height") if key in last}}
+        if not last:
+            bar["nm"] = traces.LIGHT_NM
+        r.stim_bars = list(r.stim_bars) + [bar]
+        self.touch("add a stimulus bar")
+        self.redraw_now()
+        self.canvas.select(Tag("stimbar", k, str(len(r.stim_bars) - 1)))
+
+    @staticmethod
+    def set_stim_light(bar: dict, choice: str) -> None:
+        for key in ("nm", "colour", "kind"):
+            bar.pop(key, None)
+        if choice == "electrical":
+            bar["kind"] = "electrical"
+        elif choice:
+            bar["nm"] = float(choice)
+        else:
+            bar["colour"] = "#555555"
+
+    def match_stim_bars(self, k: int, i: int) -> None:
+        r = self.spec.panels[k]
+        keys = ("nm", "colour", "kind", "y", "height")
+        ref = {key: r.stim_bars[i][key] for key in keys if key in r.stim_bars[i]}
+        for bar in r.stim_bars:                       # (the one matched is among them: its values read first)
+            for key in keys:
+                bar.pop(key, None)
+            bar.update(ref)
+        self.touch("stimulus bars")
+
+    def add_inset(self, k: int) -> None:
+        """A small panel inside panel ``k``, empty, selected: choose its data next."""
+        if len(self.spec.panels) >= self.MOST:
+            return
+        self.spec.panels.append(Recipe(inset_of=k, inset_rect=page.inset_default(), legend="none"))
+        self.current = len(self.spec.panels) - 1
+        self._load_controls()
+        self.touch("add an inset")
+        self.redraw_now()
+        self.canvas.select(Tag("panel", self.current))
+
+    def set_inset(self, k: int, parent: int) -> None:
+        r = self.spec.panels[k]
+        r.inset_of, r.inset_rect = parent, (r.inset_rect if parent >= 0 else [])
+        self._load_controls()
+        self.touch("inset")
+
+    def set_inset_part(self, k: int, i: int, value: float) -> None:
+        r = self.spec.panels[k]
+        rect = list(r.inset_rect) if len(r.inset_rect) == 4 else page.inset_default()
+        rect[i] = round(float(value), 3)
+        r.inset_rect = rect
+
+    def set_rect_part(self, k: int, i: int, value: float) -> None:
+        r = self.spec.panels[k]
+        rect = list(r.rect)
+        rect[i] = float(value)
+        r.rect = [round(v, 2) for v in page.clamp(rect, *self.spec.size_mm())]
+
+    def set_span(self, k: int, columns: int | None, rows: int | None) -> None:
+        r = self.spec.panels[k]
+        c, rw = page.spans(self.spec.panels)[k]
+        r.span = [int(columns or c), int(rows or rw)]
+
+    def place_freely(self, k: int, on: bool) -> None:
+        """Free placement is the whole figure's: every panel keeps where it is and can then be dragged (were one
+        panel alone taken out of the grid, the others would flow into its cell)."""
+        self.all_free() if on else self.all_grid()
+        self.inspector.show_for(self.canvas.selection)
+
+    def all_free(self) -> None:
+        w, h = self.spec.size_mm()
+        page.to_free(self.spec)
+        if self.spec.size in SIZES:                   # the page keeps its height (no grid rows set it any more)
+            self.spec.height_mm = round(h, 1)
+        self.touch("placement")
+        self.statusBar().showMessage("Every panel can now be dragged and resized (pull a corner); Arrange puts "
+                                     "them back in the grid.", 7000)
+
+    def all_grid(self) -> None:
+        page.to_grid(self.spec)
+        self.spec.height_mm = 0.0
+        self.touch("placement")
+
+    def arrange(self, how: str) -> None:
+        """The freely placed panels aligned, sized or spaced; the selected one (else the first) leads."""
+        free = [k for k, r in enumerate(self.spec.panels) if len(r.rect) == 4]
+        sel = self.canvas.selection
+        if sel is not None and sel.kind == "panel" and sel.panel in free:
+            free.remove(sel.panel)
+            free.insert(0, sel.panel)
+        new = page.arrange([self.spec.panels[k].rect for k in free], how)
+        for k, rect in zip(free, new):
+            self.spec.panels[k].rect = [round(v, 2) for v in page.clamp(rect, *self.spec.size_mm())]
+        self.touch("arrange")
+
+    def use_template(self, key: str) -> None:
+        """The panels in a template's arrangement; panels are added (empty) when the template has more places."""
+        t = page.TEMPLATES[key]
+        own = [k for k in range(len(self.spec.panels)) if not page.is_inset(self.spec.panels, k)]
+        for _ in range(max(0, min(t.n, self.MOST) - len(own))):
+            self.spec.panels.append(Recipe())
+        page.apply_template(self.spec, key)
+        self._load_controls()
+        self.statusBar().showMessage(f"{t.name}: {t.line}", 6000)
+        self._widen()
+        self.touch("template")
+
+    def set_columns(self, n: int, touch: bool = False) -> None:
+        self.spec.columns = max(1, int(n))
+        for r in self.spec.panels:
+            if r.span and r.span[0] > self.spec.columns:
+                r.span = [self.spec.columns, r.span[1] if len(r.span) > 1 else 1]
+        if touch:
+            self.touch("columns")
+
+    # -- the page
+    def width_of(self, size: str) -> float | None:
+        if self.spec.journal:
+            return journals.width_mm(self.spec.journal, size)
+        return SIZES[size][0]
+
+    def _fill_sizes(self) -> None:
+        self.size.blockSignals(True)
+        self.size.clear()
+        for k in SIZES:
+            w = self.width_of(k)
+            if w:
+                self.size.addItem(f"{k[:1].upper() + k[1:]} column ({w:g} mm)", k)
+        if self.spec.size not in SIZES:
+            w, h = self.spec.size_mm()
+            self.size.addItem(f"{w:g} × {h:g} mm", self.spec.size)
+        i = self.size.findData(self.spec.size)
+        if i < 0:                                # the journal has no such column: its widest
+            self.spec.size = self.size.itemData(self.size.count() - 1)
+            i = self.size.count() - 1
+        self.size.setCurrentIndex(i)
+        self.size.blockSignals(False)
+
+    def _size_chosen(self, _index: int = 0) -> None:
+        if self._loading or not self.size.currentData():
+            return
+        self.spec.size = self.size.currentData()
+        self._changed()
+
+    def set_journal(self, key: str) -> None:
+        """The journal's widths, font and text sizes; '' leaves the sizes as they are and checks nothing."""
+        self.spec.journal = key or ""
+        if key:
+            self.spec.style.apply_journal(key)
+            if self.spec.size in SIZES and not journals.width_mm(key, self.spec.size):
+                self.spec.size = "double"
+        self._fill_sizes()
+        QtCore.QTimer.singleShot(0, lambda: self.inspector.show_for(self.inspector.tag))
+
+    def set_width(self, size: str) -> None:
+        if size == "custom":
+            w, h = self.spec.size_mm()
+            self.spec.size, self.spec.height_mm = f"{w:g}x{h:g}", 0.0
+        else:
+            self.spec.size = size
+        self._fill_sizes()
+        QtCore.QTimer.singleShot(0, lambda: self.inspector.show_for(self.inspector.tag))
+
+    def set_page(self, width: float | None, height: float | None) -> None:
+        w, h = self.spec.size_mm()
+        if self.spec.size in SIZES:
+            self.spec.height_mm = float(height or 0.0)
+        else:
+            self.spec.size = f"{float(width or w):g}x{float(height or h):g}"
+        self._fill_sizes()
+
+    def set_theme(self, name: str) -> None:
+        self.spec.style.apply_theme(name)
+        QtCore.QTimer.singleShot(0, lambda: self.inspector.show_for(self.inspector.tag))
+
+    def set_legend_place(self, k: int, place: str) -> None:
+        r = self.spec.panels[k]
+        if place != "dragged":
+            r.legend, r.legend_at = place, []
+        if place == "none":
+            self.canvas.select(None)
+
+    def set_group_colour(self, group: str, colour: str) -> None:
+        """A group's colour wherever it is drawn in this figure, and in the project's later figures."""
+        s = self.spec.style
+        s.group_colours = {**s.group_colours, group: colour}
+        for r in self.spec.panels:                   # no panel keeps another colour for it
+            if group in r.series and "colour" in r.series[group]:
+                mine = {key: v for key, v in r.series[group].items() if key != "colour"}
+                r.series = {**{g: v for g, v in r.series.items() if g != group}, **({group: mine} if mine else {})}
+        self._remember_colours()
+
+    def _remember_colours(self) -> None:
+        p = getattr(self.window_, "project", None)
+        if p is not None:
+            try:
+                known = json.loads(p.meta("figure_colours") or "{}")
+                p.set_meta("figure_colours", json.dumps({**known, **self.spec.style.group_colours}))
+            except Exception:
+                pass
+
+    def _known_colours(self) -> dict:
+        p = getattr(self.window_, "project", None)
+        try:
+            return json.loads(p.meta("figure_colours") or "{}") if p is not None else {}
+        except Exception:
+            return {}
+
+    def _settle_colours(self) -> bool:
+        """Every group drawn with others gets one colour for the whole figure (the project's when it has met the
+        group before, else the palette's next), so a condition is the same colour in every panel. True when a
+        group was given one."""
+        s = self.spec.style
+        known = self._known_colours()
+        seen: dict[str, list] = {}                   # group -> the panels that draw it (with other groups)
+        for d in self._drawn:
+            if d.prepared is None:
+                continue
+            src = d.prepared.points if len(d.prepared.points) else d.prepared.rows
+            groups = render.ordered([g for g in dict.fromkeys(src.group) if g and g != "all"], d.recipe)
+            if len(groups) >= 2:
+                for g in groups:
+                    seen.setdefault(g, []).append((d, groups))
+        new = False
+        for g, where in seen.items():
+            # one colour for the figure once a group is in two panels, or the project has met it before
+            if g in s.group_colours or not (len(where) > 1 or g in known):
+                continue
+            d, groups = where[0]
+            s.group_colours = {**s.group_colours, g: known.get(g) or render.looks(d.recipe, s, groups)[g].colour}
+            new = True
+        if new:
+            self._remember_colours()
+        return new
 
     def clear_data(self) -> None:
         """This panel without its table (its look kept); undo brings the table back."""
@@ -1653,7 +2777,9 @@ class Builder(QtWidgets.QMainWindow):
         nums = fdata.numeric_columns(frame)
         r.cell, r.animal, r.group = g["cell"], g["animal"], g["group"]
         r.x = g["x"] if r.question in ("time", "pulses", "relationship", "example") else ""
-        r.y = r.y if r.y in frame.columns else next((c for c in nums if c not in (r.x, r.cell, r.animal)), "")
+        # what is measured: a numeric column that is not the time (or x), the cell or the animal
+        r.y = r.y if r.y in frame.columns else next(
+            (c for c in nums if c not in (r.x, g["x"], r.cell, r.animal)), next(iter(nums), ""))
         r.filters = [f for f in r.filters if f[0] in frame.columns]
         self._load_controls()
         self._changed()
@@ -1704,7 +2830,8 @@ class Builder(QtWidgets.QMainWindow):
             return
         self.set_table(frame, src)
 
-    def open_figure(self, path: str | None = None) -> None:
+    def open_figure(self, path: str | None = None, append: bool = False) -> None:
+        """A figure saved by Clampwise opened in place of this one; ``append``: its panels added to this one."""
         if not path:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "A figure saved by Clampwise", "", "Clampwise figures "
                                                             "(*.cwfig *.pdf *.svg *.eps *.png *.tif *.tiff)")
@@ -1715,7 +2842,20 @@ class Builder(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.information(self, "Not a Clampwise figure", str(exc))
             return
-        self.spec, self.current = spec, 0
+        if append:
+            room = self.MOST - len(self.spec.panels)
+            base = len(self.spec.panels)
+            for r in spec.panels[:max(room, 0)]:
+                r.rect, r.letter, r.letter_offset = [], "", []
+                r.inset_of = r.inset_of + base if r.inset_of >= 0 else -1
+                self.spec.panels.append(r)
+            self.current = min(base, len(self.spec.panels) - 1)
+            if len(spec.panels) > room:
+                self.statusBar().showMessage(f"{room} of its {len(spec.panels)} panels added: a figure holds "
+                                             f"{self.MOST} at most.", 6000)
+        else:
+            self.spec, self.current = spec, 0
+        self.canvas.select(None)
         self._load_controls()
         self._changed()
 
@@ -1824,12 +2964,14 @@ class Builder(QtWidgets.QMainWindow):
                                               "around the chosen point (no such stimulus pulse).")
             return
         r = self.recipe
+        fresh = r.question != "example" or r.source.get("kind") != "traces"
         if r.question != "example":                 # a new example panel starts with scale bars
             r.scale_bars = True
         r.data, r.source = pack(frame), traces.source(sets, win, table, overlay)
         r.question, r.plot, r.level = "example", "trace", "row"
         r.x, r.y, r.group, r.cell = frame.columns[0], frame.columns[1], "Trace", "Sweep"
         r.notes, r.markers, r.filters = notes, markers, []
+        layouts.dress(r, frame, traces.extras(sets, self._load, win), fresh)
         self._load_controls()
         self._changed()
 
@@ -1869,6 +3011,16 @@ class Builder(QtWidgets.QMainWindow):
         sel.results = {**(run.results if run is not None else {}), **(cell.results if cell is not None else {})}
         sel.path, sel.name = str(path), Path(path).name
         sel.files = {r.name: str(r.path) for r in project.recordings()}
+
+        def results_of(name: str) -> dict:           # another file of the cell, by its name
+            other = sel.files.get(name)
+            try:
+                found = project.last_run(other) if other else None
+            except Exception:
+                found = None
+            return found.results if found is not None else {}
+
+        sel.results_of = results_of
         if sel.table is None and run is not None:
             name = f"Recordings: {registry.TYPE_WORDS.get(run.recording_type, run.recording_type)}"
             tables = fdata.project_tables(project)
@@ -1882,8 +3034,9 @@ class Builder(QtWidgets.QMainWindow):
         """The figure becomes preset ``key`` filled from the selection; the look is kept, undo brings back the
         figure before."""
         spec = presets.fill(presets.PRESETS[key], self.selection())
-        spec.style = self.spec.style
+        spec.style, spec.journal = self.spec.style, self.spec.journal      # the look and the journal stay
         self.spec, self.current = spec, 0
+        self._fill_sizes()
         self._load_controls()
         self._changed()
 
@@ -1981,15 +3134,35 @@ class Builder(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- drawing and saving
     def redraw(self) -> None:
+        self.canvas.look = render.rc(self.spec.style)
         try:
             self.fig, self._drawn = render.build(self.spec, self.fig)
+            if self._settle_colours():               # a group met for the first time: its colour, then once more
+                self.fig, self._drawn = render.build(self.spec, self.fig)
         except Exception as exc:                     # a combination that cannot be drawn says why
             self.fig.clear()
             self.fig.text(0.5, 0.5, f"Cannot draw this: {exc}", ha="center", va="center", wrap=True)
             self._drawn = []
         self._fit_canvas()
+        self.canvas.set_drawn(self._drawn)
         self._describe()
         self._refresh_series()              # the Groups tab follows the groups the panel now draws
+        self.inspector.refresh()
+        if self.side.currentIndex() == 1:
+            self.dataview.refresh()
+        any_data = any(r.frame() is not None for r in self.spec.panels)
+        full = len(self.spec.panels) >= self.MOST and all(r.frame() is not None for r in self.spec.panels)
+        self.add_button.setEnabled(not full)
+        self.add_button.setToolTip(f"A figure holds {self.MOST} panels at most: remove one first." if full else
+                                   "A new panel: choose what it shows (traces, a graph, a kept measurement, a "
+                                   "table, a file), then how it is drawn" + ("" if any_data else
+                                                                            ". The page is empty: start here."))
+
+    def redraw_now(self) -> None:
+        """Drawn at once (not after the short pause a typed change waits), so what was just added can be
+        selected."""
+        self.timer.stop()
+        self.redraw()
 
     def _fit_canvas(self) -> None:
         """The figure as large as the area allows (or at its printed size, zoomed), its proportions as it will
@@ -2005,7 +3178,9 @@ class Builder(QtWidgets.QMainWindow):
             dpi = float(min(max(dpi, 60.0), 220.0))
         wmm, hmm = self.spec.size_mm()
         n = len(self.spec.panels)
-        self.size_note.setText(f"· {wmm:.0f} × {hmm:.0f} mm, {n} panel{'s' if n > 1 else ''}")
+        j = journals.JOURNALS.get(self.spec.journal)
+        self.size_note.setText(f"· {wmm:.0f} × {hmm:.0f} mm, {n} panel{'s' if n > 1 else ''}"
+                               + (f" · {j.name}" if j else ""))
         self.fig.set_dpi(dpi)
         self.canvas.setFixedSize(int(w * dpi), int(h * dpi))
         self.canvas.draw_idle()
@@ -2018,8 +3193,12 @@ class Builder(QtWidgets.QMainWindow):
     def _describe(self) -> None:
         parts, warns = [], []
         many = len(self._drawn) > 1
+        last = ""
         for k, d in enumerate(self._drawn):
-            tag = f"({chr(ord('A') + k)}) " if many else ""
+            # a panel with no letter of its own belongs to the lettered one before it
+            last = d.letter or last
+            tag = (f"({d.letter}) " if d.letter else f"({last}, continued) " if last else
+                   f"({chr(ord('A') + k)}) ") if many else ""
             if d.prepared is None:
                 continue
             parts.append(f"<p>{html.escape(tag + d.prepared.caption)}</p>")
@@ -2035,6 +3214,11 @@ class Builder(QtWidgets.QMainWindow):
             item = lay.takeAt(0)
             if item.widget():
                 item.widget().setParent(None)        # gone now, not at the next event loop
+        try:                                         # the page against the journal's rules (or plain legibility)
+            self.findings = render.check(self.spec, built=(self.fig, self._drawn))
+        except Exception:
+            self.findings = []
+        warns += [(f"Panel {f.where}: " if f.where else "") + f.text for f in self.findings if f.serious]
         for w in warns:
             b = widgets.Badge("warn", w, w)
             b.setWordWrap(True)
@@ -2046,20 +3230,35 @@ class Builder(QtWidgets.QMainWindow):
     def copy_caption(self) -> None:
         QtWidgets.QApplication.clipboard().setText(self.caption_text())
 
-    def export(self, path: str | None = None, dpi: int | None = None) -> Path | None:
+    def export(self, path: str | None = None, dpi: int | None = None, outline: bool = False) -> Path | None:
+        """The figure written to a file. With no ``path``: the export dialog first (what the check found, the
+        format, the resolution, text as shapes), then where to save."""
         if not path:
-            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export the figure", "figure.pdf",
-                                                            "PDF (*.pdf);;SVG (*.svg);;EPS (*.eps);;PNG (*.png);;"
-                                                            "TIFF (*.tif *.tiff)")
-        if not path:
-            return None
-        if dpi is None and Path(path).suffix.lower() in (".png", ".tif", ".tiff"):
-            dpi, ok = QtWidgets.QInputDialog.getInt(self, "Resolution", "Dots per inch (300 to 600 for print):", 600,
-                                                    72, 1200)
-            if not ok:
+            try:
+                found = render.check(self.spec, built=(self.fig, self._drawn))
+            except Exception:
+                found = []
+            dlg = ExportDialog(self, self.spec, found)
+            if dlg.exec_() != QtWidgets.QDialog.Accepted:
                 return None
-        out = render.export(self.spec, path, dpi or 600)
-        self.statusBar().showMessage(f"Saved {out.name}; it opens here again, editable (Open data, a saved figure).")
+            ext = dlg.format.currentData()
+            dpi = dlg.dpi.value() if ext in ("tiff", "png") else None
+            outline = dlg.outline.isChecked() and dlg.outline.isEnabled()
+            filt = {"pdf": "PDF (*.pdf)", "svg": "SVG (*.svg)", "eps": "EPS (*.eps)", "tiff": "TIFF (*.tif *.tiff)",
+                    "png": "PNG (*.png)"}[ext]
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Export the figure", f"figure.{ext}", filt)
+            if not path:
+                return None
+            if not Path(path).suffix:
+                path = f"{path}.{ext}"
+        try:
+            out = render.export(self.spec, path, dpi, outline)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "Could not export", f"{Path(path).name}: {exc}")
+            return None
+        w, h = self.spec.size_mm()
+        self.statusBar().showMessage(f"Saved {out.name} at {w:.1f} × {h:.1f} mm; it opens here again, editable "
+                                     "(Open, a saved figure).")
         return out
 
     def save_figure(self, path: str | None = None) -> Path | None:

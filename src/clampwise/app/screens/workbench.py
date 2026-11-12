@@ -91,8 +91,20 @@ class WorkbenchScreen(Screen):
         self._click_mode = ""                 # "", "onset", "peak", "threshold", "exclude"
         self._pending = None
         self._quiet = False
+        self._browse: int | None = None       # the sweep stepped to (its number from 0), None: none singled out
+        self._cursors: list[float] | None = None      # the two cursors' times (s), kept while the file is open
+        self._cursor_items: list = []
         self.keep_button = widgets.primary("Keep this measurement", self.keep)
         self.template_button = widgets.button("Save as template...", self.save_template)
+        self.send_button = QtWidgets.QToolButton()
+        self.send_button.setText("Send to a figure")
+        self.send_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        send = QtWidgets.QMenu(self.send_button)
+        send.setToolTipsVisible(True)
+        self.send_traces_action = send.addAction("The traces shown, as a panel of example traces", self.send_traces)
+        self.send_table_action = send.addAction("This measurement's table, as a graph", self.send_table)
+        self.send_button.setMenu(send)
+        self.add_action(self.send_button)
         self.add_action(self.keep_button)
         self.add_action(self.template_button)
         # ---- the body: the trace, the table and plot under it
@@ -129,10 +141,35 @@ class WorkbenchScreen(Screen):
         self.click_label = label("", "muted")
         bar.addWidget(self.click_label)
         tl.addLayout(bar)
+        # the second line: one sweep at a time, and the cursors
+        row2 = box("h", "s")
+        self.prev_button = widgets.button("◀ Sweep", lambda: self.step_sweep(-1), quiet=True)
+        self.next_button = widgets.button("Sweep ▶", lambda: self.step_sweep(1), quiet=True)
+        self.prev_button.setAccessibleName("Previous sweep")
+        self.next_button.setAccessibleName("Next sweep")
+        self.alone = QtWidgets.QCheckBox("Alone")
+        self.alone.setAccessibleName("Show the sweep alone")
+        self.alone.toggled.connect(lambda _on: self._draw())
+        self.all_button = widgets.button("All sweeps", lambda: self.browse(None), quiet=True)
+        self.browse_label = label("", "muted")
+        self.cursors_box = QtWidgets.QCheckBox("Cursors")
+        self.cursors_box.toggled.connect(self._cursors_toggled)
+        self.cursors_to_region = widgets.button("Region to the cursors", self._region_to_cursors, quiet=True)
+        self.cursor_label = label("", "muted")
+        self.cursor_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.cursor_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        for w in (self.prev_button, self.next_button, self.alone, self.all_button, self.browse_label,
+                  self.cursors_box, self.cursors_to_region):
+            row2.addWidget(w)
+        row2.addStretch(1)
+        tl.addLayout(row2)
+        tl.addWidget(self.cursor_label)           # the cursors' readout, on a line of its own
+        self.cursor_label.setVisible(False)
         self.plot = pg.PlotWidget()
         self.plot.setMinimumHeight(220)
         self.plot.showGrid(x=True, y=True, alpha=0.15)
         self.plot.scene().sigMouseClicked.connect(self._clicked)
+        self.plot.setFocusPolicy(QtCore.Qt.StrongFocus)          # a click on the trace, then the keys act on it
         tl.addWidget(self.plot, 1)
         top.setLayout(tl)
         split.addWidget(top)
@@ -187,6 +224,18 @@ class WorkbenchScreen(Screen):
         QtWidgets.QShortcut(QtGui.QKeySequence("Ctrl+S"), self, self.keep, context=QtCore.Qt.WidgetWithChildrenShortcut)
         QtWidgets.QShortcut(QtGui.QKeySequence("Escape"), self, lambda: self._set_click_mode(""),
                             context=QtCore.Qt.WidgetWithChildrenShortcut)
+        # the keys, with the trace clicked: the arrows move the selected region (0.1 ms; with Shift, 1 ms; with
+        # Alt, its end alone), Page Up and Page Down step through the sweeps
+        self.keys = {}
+        for keys, slot in (("Left", lambda: self.nudge_region(-1e-4)), ("Right", lambda: self.nudge_region(1e-4)),
+                           ("Shift+Left", lambda: self.nudge_region(-1e-3)),
+                           ("Shift+Right", lambda: self.nudge_region(1e-3)),
+                           ("Alt+Left", lambda: self.nudge_region(-1e-4, end_only=True)),
+                           ("Alt+Right", lambda: self.nudge_region(1e-4, end_only=True)),
+                           ("PgUp", lambda: self.step_sweep(-1)), ("PgDown", lambda: self.step_sweep(1))):
+            self.keys[keys] = QtWidgets.QShortcut(QtGui.QKeySequence(keys), self.plot, slot,
+                                                  context=QtCore.Qt.WidgetWithChildrenShortcut)
+        self.table.clicked.connect(self._row_clicked)
 
     @staticmethod
     def _scrolled(widget) -> QtWidgets.QScrollArea:
@@ -397,6 +446,38 @@ class WorkbenchScreen(Screen):
              "scaled to fit", no_rec if not has else "This recording has no command channel to draw.")
         able(self.add_region_button, has, "A new region over the middle of the view; drag its edges, or type its "
              "times", no_rec)
+        each = has and m.selection.mode == "each"
+        several = each and len(m.selection.sweeps) > 1
+        not_each = no_rec if not has else ("The sweeps are measured as one trace (their average, median or the "
+                                           "typical one): choose 'Every sweep' to step through them." if not each
+                                           else "Only one sweep is chosen.")
+        able(self.prev_button, several, "Step to the sweep before (Page Up): it is drawn in bold, its row selected "
+             "in the table, and the cursors read it", not_each)
+        able(self.next_button, several, "Step to the next sweep (Page Down)", not_each)
+        on_one = several and self._browse is not None
+        able(self.alone, on_one, "Draw the sweep stepped to without the others",
+             not_each if not several else "Step to a sweep first (Sweep ▶).")
+        able(self.all_button, on_one, "Back to every sweep drawn alike",
+             not_each if not several else "No sweep is singled out.")
+        able(self.cursors_box, has, "Two lines to drag over the trace: the time and the value under each, the "
+             "difference between them, the slope and the mean between them", no_rec)
+        cur = has and self.cursors_box.isChecked() and self._current_region() is not None
+        able(self.cursors_to_region, cur, "The selected region is set to span from cursor 1 to cursor 2 (Undo "
+             "puts it back)", no_rec if not has else "Tick Cursors first." if not self.cursors_box.isChecked()
+             else "Select a region in the list first.")
+        shown = has and self._result is not None and bool(self._result.get("traces"))
+        self.send_button.setEnabled(has)
+        self.send_button.setToolTip("Open the figure builder with what is on this screen as a new panel" if has
+                                    else no_rec)
+        self.send_traces_action.setEnabled(shown)
+        self.send_traces_action.setToolTip("The sweeps chosen, over the stretch of time now in view, drawn as "
+                                           "example traces with scale bars (as recorded: filters and other "
+                                           "transforms are not applied)" if shown else no_rec)
+        rows = has and self._result is not None and bool(self._result.get("rows"))
+        self.send_table_action.setEnabled(rows)
+        self.send_table_action.setToolTip("Every measure, sweep by sweep, as a table in the builder: the first "
+                                          "measure against the sweep to start with" if rows else
+                                          no_rec if not has else "Nothing is measured yet: tick a measure.")
         region = self._current_region()
         able(self.remove_region_button, region is not None, "Remove the selected region (Undo brings it back)",
              "No region is selected.")
@@ -489,6 +570,7 @@ class WorkbenchScreen(Screen):
         m.overrides, m.exclusions = [], []
         if not m.regions:
             m.regions = self._default_regions()
+        self._browse, self._cursors = None, None
         self._apply_state(m.to_dict(), push=False)
         self._fill_kept()
         self._fill_templates()
@@ -940,9 +1022,17 @@ class WorkbenchScreen(Screen):
         singles = [x for x in tr if x[1] is not None and not x[0].startswith("typical")]
         combined = [x for x in tr if x[1] is None or x[0].startswith("typical")]
         step = max(1, len(singles) // MAX_DRAWN)
+        if self._browse is not None and not any(k == self._browse for _lab, k, _y in singles):
+            self._browse = None                      # the sweep stepped to is no longer among those chosen
+        one = self._browse
         for lab, k, y in singles[::step]:
-            colour = pal.sweep if combined else theme.series(pal)[k % 8]
+            if one is not None and (k == one or self.alone.isChecked()):
+                continue
+            colour = pal.sweep if (combined or one is not None) else theme.series(pal)[k % 8]
             self.plot.plot(t, y, pen=pg.mkPen(colour, width=1), name=lab)
+        for lab, k, y in singles:
+            if one is not None and k == one:         # the sweep stepped to, over the others
+                self.plot.plot(t, y, pen=pg.mkPen(pal.accent, width=2), name=lab)
         for lab, k, y in combined:
             self.plot.plot(t, y, pen=pg.mkPen(pal.average, width=2), name=lab)
         ch = wb.channel_named(rec, self._m.selection.channel)
@@ -992,6 +1082,228 @@ class WorkbenchScreen(Screen):
         for o in self._m.overrides:
             self.plot.addItem(pg.InfiniteLine(o.time_s, pen=pg.mkPen(pal.bad, width=1)))
         self._highlight_region()
+        self._draw_cursors()
+        self._say_browse()
+
+    # ---- one sweep at a time
+    def _singles(self) -> list[int]:
+        """The sweeps drawn each on its own, in order."""
+        if self._result is None:
+            return []
+        return [k for lab, k, _y in self._result["traces"] if k is not None and not lab.startswith("typical")]
+
+    def browse(self, sweep: int | None) -> None:
+        """Single out ``sweep`` (None: none): drawn in bold, its row selected, read by the cursors."""
+        self._browse = sweep if sweep in self._singles() else None
+        if self._browse is None:
+            self.alone.blockSignals(True)
+            self.alone.setChecked(False)
+            self.alone.blockSignals(False)
+        self._draw()
+        self._select_row(self._browse)
+        self._enable()
+
+    def step_sweep(self, by: int) -> None:
+        sweeps = self._singles()
+        if len(sweeps) < 2:
+            return
+        if self._browse in sweeps:
+            k = sweeps[(sweeps.index(self._browse) + by) % len(sweeps)]
+        else:
+            k = sweeps[0] if by > 0 else sweeps[-1]
+        self.browse(k)
+
+    def _say_browse(self) -> None:
+        sweeps = self._singles()
+        if self._browse is None or self._browse not in sweeps:
+            self.browse_label.setText("")
+            return
+        self.browse_label.setText(f"sweep {self._browse + 1} ({sweeps.index(self._browse) + 1} of {len(sweeps)})")
+
+    def _select_row(self, sweep: int | None) -> None:
+        rows = (self._result or {}).get("rows") or []
+        row = next((i for i, r in enumerate(rows) if r.get("sweep") == sweep), None) if sweep is not None else None
+        self.table.blockSignals(True)
+        if row is None:
+            self.table.clearSelection()
+        else:
+            self.table.selectRow(row)
+            self.table.scrollTo(self.rows_model.index(row, 0))
+        self.table.blockSignals(False)
+
+    def _row_clicked(self, index) -> None:
+        rows = (self._result or {}).get("rows") or []
+        if index.isValid() and 0 <= index.row() < len(rows) and rows[index.row()].get("sweep") in self._singles():
+            self.browse(rows[index.row()]["sweep"])
+
+    # ---- the cursors
+    def _cursors_toggled(self, _on: bool) -> None:
+        self._draw()
+        self._enable()
+
+    def _cursor_trace(self):
+        """(its name, its samples): the trace the cursors read: the sweep stepped to, else the one trace made of
+        the sweeps, else the first drawn."""
+        tr = (self._result or {}).get("traces") or []
+        if self._browse is not None:
+            hit = next(((lab, y) for lab, k, y in tr if k == self._browse), None)
+            if hit is not None:
+                return hit
+        combined = next(((lab, y) for lab, k, y in tr if k is None or lab.startswith("typical")), None)
+        if combined is not None:
+            return combined
+        return (tr[0][0], tr[0][2]) if tr else ("", None)
+
+    def _draw_cursors(self) -> None:
+        self._cursor_items = []
+        if not self.cursors_box.isChecked() or self._recording is None:
+            self.cursor_label.setText("")
+            self.cursor_label.setVisible(False)
+            return
+        (x0, x1), _ = self.plot.viewRange()
+        t = self._recording.time_s
+        if self._cursors is None:                    # a third and two thirds across what is in view
+            lo, hi = max(x0, float(t[0])), min(x1, float(t[-1]))
+            self._cursors = [lo + (hi - lo) / 3, lo + 2 * (hi - lo) / 3]
+        pal = self.window.palette
+        for i, at in enumerate(self._cursors):
+            line = pg.InfiniteLine(at, angle=90, movable=True, pen=pg.mkPen(pal.text, width=1.4),
+                                   hoverPen=pg.mkPen(pal.accent, width=2), label=str(i + 1),
+                                   labelOpts={"position": 0.04, "color": pal.text, "movable": False,
+                                              "fill": pg.mkBrush(QtGui.QColor(pal.plot_background))})
+            line.setZValue(20)
+            line.sigPositionChanged.connect(lambda _l, i=i: self._cursor_moved(i))
+            self.plot.addItem(line)
+            self._cursor_items.append(line)
+        self._read_cursors()
+
+    def _cursor_moved(self, i: int) -> None:
+        if i < len(self._cursor_items) and self._cursors is not None:
+            self._cursors[i] = float(self._cursor_items[i].value())
+            self._read_cursors()
+
+    def set_cursor(self, i: int, at_s: float) -> None:
+        """Cursor ``i`` (0 or 1) put at ``at_s`` (as dragging it there would)."""
+        if self._cursors is None:
+            return
+        self._cursors[i] = float(at_s)
+        if i < len(self._cursor_items):
+            self._cursor_items[i].setValue(float(at_s))
+        self._read_cursors()
+
+    def cursor_values(self) -> dict:
+        """What the cursors read: each one's time (s) and value, the differences, the slope (per ms) and the mean
+        between them; {} when they are off."""
+        name, y = self._cursor_trace()
+        if self._cursors is None or y is None or not self.cursors_box.isChecked():
+            return {}
+        t = self._recording.time_s
+        fs = self._recording.sample_rate_hz
+        i1, i2 = (int(np.clip(round((at - float(t[0])) * fs), 0, t.size - 1)) for at in self._cursors)
+        t1, t2, v1, v2 = float(t[i1]), float(t[i2]), float(y[i1]), float(y[i2])
+        a, b = sorted((i1, i2))
+        between = np.asarray(y[a:b + 1], float)
+        dt_ms = (t2 - t1) * 1e3
+        return {"trace": name, "t1": t1, "t2": t2, "v1": v1, "v2": v2, "dt_ms": dt_ms, "dv": v2 - v1,
+                "slope": (v2 - v1) / dt_ms if dt_ms else float("nan"),
+                "mean": float(np.nanmean(between)) if between.size else float("nan")}
+
+    def _read_cursors(self) -> None:
+        c = self.cursor_values()
+        self.cursor_label.setVisible(bool(c))
+        if not c:
+            self.cursor_label.setText("")
+            return
+        u = self._units()
+        text = (f"1: {c['t1'] * 1e3:.2f} ms, {c['v1']:.2f} {u} · 2: {c['t2'] * 1e3:.2f} ms, {c['v2']:.2f} {u} · "
+                f"Δt {c['dt_ms']:.2f} ms · Δ {c['dv']:.2f} {u} · slope {c['slope']:.3g} {u}/ms · mean between "
+                f"{c['mean']:.2f} {u} · on {c['trace']}")
+        self.cursor_label.setText(text)
+        self.cursor_label.setToolTip(text)
+
+    def _region_to_cursors(self) -> None:
+        r = self._current_region()
+        if r is None or self._cursors is None or self._recording is None:
+            return
+        before = self._snapshot()
+        a, b = sorted(self._cursors)
+        if r.per_pulse:                              # such a region is kept from the pulse, not the sweep's start
+            on = self._first_pulse_s()
+            a, b = a - on, b - on
+        r.start_s, r.end_s = float(a), float(b)
+        self._commit(before, "region to the cursors")
+        self._fill_controls()
+        self._measure()
+
+    # ---- the selected region moved by the keys
+    def nudge_region(self, by_s: float, end_only: bool = False) -> None:
+        r = self._current_region()
+        if r is None or self._recording is None:
+            return
+        before = self._snapshot()
+        least = 2.0 / self._recording.sample_rate_hz
+        if end_only:
+            r.end_s = max(r.end_s + by_s, r.start_s + least)
+        else:
+            r.start_s, r.end_s = r.start_s + by_s, r.end_s + by_s
+        self._commit(before, "move region")
+        self._fill_controls()
+        self._measure()
+
+    # ---- what is here, sent to a figure
+    def _builder(self):
+        return self.window.screens["figures"].open_builder()
+
+    def send_traces(self) -> None:
+        """The sweeps chosen, over the time in view, as a panel of example traces in the figure builder."""
+        from ...figure import traces
+
+        rec, m = self._recording, self._m
+        if rec is None or self._path is None or not m.selection.sweeps:
+            return
+        (x0, x1), _ = self.plot.viewRange()
+        t = rec.time_s
+        x0, x1 = max(float(x0), float(t[0])), min(float(x1), float(t[-1]))
+        if x1 <= x0:
+            x0, x1 = float(t[0]), float(t[-1])
+        sweeps = [self._browse] if (self._browse is not None and self.alone.isChecked()) else list(m.selection.sweeps)
+        mode = {"each": "each", "average": "average"}.get(m.selection.mode, "typical") if len(sweeps) > 1 else "average"
+        name = (f"sweep {sweeps[0] + 1}" if len(sweeps) == 1 else
+                {"each": "sweeps", "average": f"average of {len(sweeps)}"}.get(m.selection.mode, "typical sweep"))
+        sets = [traces.TraceSet(name, mode, [[str(self._path), int(k), 0, x0] for k in sweeps])]
+        b = self._builder()
+        b.current = b._target(None)
+        if b.current < 0:
+            return
+        b._load_controls()
+        b.set_traces(sets, traces.Window(0.0, (x1 - x0) * 1e3, False, 0.0), f"{self._path.name}: from the Workbench")
+        b.redraw_now()
+        b.select_panel_on_figure(b.current)
+        said = f"{len(sweeps)} sweep{'s' if len(sweeps) != 1 else ''} of {self._path.name}, {x0 * 1e3:.0f} to " \
+               f"{x1 * 1e3:.0f} ms, sent to the figure as panel {b.letter_of(b.current) or b.current + 1}"
+        if m.transforms:
+            said += " (as recorded: the Workbench's transforms are not applied to a figure's traces)"
+        self.window.say(said + ".")
+        b.statusBar().showMessage("From the Workbench: " + said + ".", 12000)
+
+    def send_table(self) -> None:
+        """The measurement as it stands (kept or not) as a table and a graph in the figure builder."""
+        if self._recording is None or self._path is None or self._result is None:
+            return
+        self._m.name = self.name_box.text().strip() or self._m.name or "by hand"
+        hand = {"name": self._m.name, "measurement": self._m.to_dict()}
+        b = self._builder()
+        b.current = b._target(None)
+        if b.current < 0:
+            return
+        b._load_controls()
+        b.use_hand(self._path, hand)
+        b.redraw_now()
+        b.select_panel_on_figure(b.current)
+        said = f"“{self._m.name}” of {self._path.name} sent to the figure as panel " \
+               f"{b.letter_of(b.current) or b.current + 1}: its table is under Data and statistics"
+        self.window.say(said + ".")
+        b.statusBar().showMessage("From the Workbench: " + said + ".", 12000)
 
     def _highlight_region(self) -> None:
         r = self._current_region()

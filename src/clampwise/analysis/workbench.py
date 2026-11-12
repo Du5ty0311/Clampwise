@@ -55,6 +55,8 @@ MEASURES = {
                                "the last crossings before the peak"),
     "decay_time": ("Decay time", "from the upper to the lower decay percentage of the peak after it (90-10% "
                                  "unless set)"),
+    "decay_tau": ("Decay tau", "one exponential fitted from the peak to the region's end, falling to the "
+                               "baseline: its time constant, for every sweep and pulse"),
     "max_rise_slope": ("Max rise slope", "the steepest rise in the region, per ms"),
     "time_of_max_rise": ("Time of max rise", "when the rise is steepest"),
     "max_decay_slope": ("Max decay slope", "the steepest fall in the region, per ms"),
@@ -72,7 +74,7 @@ MEASURES = {
 # each measure's units: "u" stands for the measured channel's own (mV, pA)
 MEASURE_UNITS = {"mean": "u", "sd": "u", "min": "u", "max": "u", "peak": "u", "antipeak": "u", "peak_to_peak": "u",
                  "time_of_peak": "ms", "time_of_antipeak": "ms", "area": "u·ms", "half_width": "ms", "rise_time": "ms",
-                 "decay_time": "ms", "max_rise_slope": "u/ms", "time_of_max_rise": "ms", "max_decay_slope": "u/ms",
+                 "decay_time": "ms", "decay_tau": "ms", "max_rise_slope": "u/ms", "time_of_max_rise": "ms", "max_decay_slope": "u/ms",
                  "time_of_max_decay": "ms", "onset_latency": "ms", "slope": "u/ms", "value_at": "u",
                  "threshold_crossings": "", "spike_count": "", "instantaneous_frequency": "Hz"}
 FIT_MODELS = {
@@ -426,10 +428,11 @@ def _spikes_in(y: np.ndarray, fs: float) -> list[int]:
 
 def statistics(t: np.ndarray, y: np.ndarray, start_s: float, end_s: float, fs: float, *, baseline: float = 0.0,
                noise_sd: float = NAN, options: Options | None = None, origin_s: float | None = None,
-               override: dict[str, float] | None = None) -> dict[str, float]:
+               override: dict[str, float] | None = None, want=None) -> dict[str, float]:
     """Clampfit's Statistics on the stretch [start_s, end_s) of ``y`` (NaN where blanked), less ``baseline``.
     Times are from ``origin_s`` (the region's start unless given: a pulse's time for a region per pulse).
-    ``override``: a time (s) set by a click for 'onset' or 'peak', used instead of the search."""
+    ``override``: a time (s) set by a click for 'onset' or 'peak', used instead of the search. ``want``: the
+    measures asked for (None: all); a measure that needs a fit (the decay's tau) is made only when asked."""
     o = options or Options()
     override = override or {}
     a, b = np.searchsorted(t, [start_s, end_s])
@@ -458,12 +461,12 @@ def statistics(t: np.ndarray, y: np.ndarray, start_s: float, end_s: float, fs: f
         j = int(np.clip(np.searchsorted(tt, override["peak"]), 0, tt.size - 1))
         if np.isfinite(sm[j]):
             i_pk = j
-    peak = float(sign * sm[i_pk])
+    peak = float(sm[i_pk])                       # as recorded: negative for a downward response (Clampfit's way)
     out["peak"] = peak
     out["time_of_peak"] = (float(tt[i_pk]) - org) * 1e3
     anti = np.where(ok, -sign * sm, -np.inf)
     i_an = int(np.argmax(anti))
-    out["antipeak"] = float(sign * sm[i_an])
+    out["antipeak"] = float(sm[i_an])
     out["time_of_antipeak"] = (float(tt[i_an]) - org) * 1e3
     good = np.where(ok, seg, 0.0)
     out["area"] = float(np.trapezoid(good, tt)) * 1e3
@@ -486,6 +489,15 @@ def statistics(t: np.ndarray, y: np.ndarray, start_s: float, end_s: float, fs: f
             h, l = i_pk + int(i_hi[0]), i_pk + int(i_lo[0])
             out["decay_time"] = (kinetics.interp_crossing(tt, devp, l - 1, l, lo_d * pk)
                                  - kinetics.interp_crossing(tt, devp, h - 1, h, hi_d * pk)) * 1e3
+        if (want is None or "decay_tau" in want) and devp.size - i_pk >= 8:
+            # the decay's time constant: one exponential from the peak to the region's end, to the baseline
+            tail = np.asarray(sign * seg[i_pk:], float)
+            fine = np.isfinite(tail)
+            if fine.sum() >= 8:
+                f = fits.exp_decay(((tt[i_pk:] - tt[i_pk]) * 1e3)[fine], tail[fine], offset=0.0,
+                                   purpose="workbench decay tau")
+                if f.ok and np.isfinite(f.params.get("tau", NAN)) and f.r2 > 0:
+                    out["decay_tau"] = float(f.params["tau"])
         # the onset
         if "onset" in override and np.isfinite(override["onset"]):
             out["onset_latency"] = (override["onset"] - org) * 1e3
@@ -678,7 +690,7 @@ def measure(recording: Recording, m: HandMeasurement, aux: dict[str, np.ndarray]
                 origin = start_s if not r.per_pulse else start_s - r.start_s
                 ov = {w: tm for (sw, rg, w), tm in overrides.items() if sw == k and rg in ("", r.name)}
                 stats = statistics(t, y, start_s, end_s, fs, baseline=base if np.isfinite(base) else 0.0,
-                                   noise_sd=noise, options=m.options, origin_s=origin, override=ov)
+                                   noise_sd=noise, options=m.options, origin_s=origin, override=ov, want=set(m.measures))
                 row = {"trace": label, "sweep": k, "region": r.name, "pulse": pulse or NAN,
                        "time_s": float(recording.sweep_start_times_s[k]) if k is not None and k < recording.sweep_start_times_s.size else NAN,
                        "command": command_level(recording, sweep_for_windows, start_s), "baseline": base,

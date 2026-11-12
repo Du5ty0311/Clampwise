@@ -190,6 +190,19 @@ def connectivity() -> list[Row]:
             rows.append(Row("connectivity", case, "latency median (ms)", 3.0, c["latency_median"], 0.4,
                             "a threshold crossing lags the true onset"))
             rows.append(Row("connectivity", case, "jitter (ms)", 0.4, c["jitter"], 0.25))
+            # one pulse a sweep: the pulse's own jitter is the recording's
+            pulse = r.results["connectivity"].tables["pulses"][0]
+            rows.append(Row("connectivity", case, "pulse 1 jitter (ms)", c["jitter"], pulse["jitter_ms"], 1e-9))
+        # the sham windows are kept, and the success threshold is their 95% quantile: a window is a success when
+        # it is over 1 times that threshold
+        tables = r.results["connectivity"].tables
+        sham_z = np.array([s["z"] for s in tables["shams"]])
+        rows.append(Row("connectivity", case, "sham windows kept", float(c["n_sham_windows"]), float(sham_z.size), 0.0))
+        rows.append(Row("connectivity", case, "threshold: the 95% quantile of the sham windows",
+                        float(np.quantile(sham_z, 0.95)), c["threshold_z"], 1e-9))
+        over = sum(1 for w in tables["windows"] if w["over_threshold"] > 1 or w["spiked"])
+        rows.append(Row("connectivity", case, "windows over the threshold are the successes", float(c["successes"]),
+                        float(over), 0.0))
     # the recorded cell answering the light itself: no connection can be read, and the evoked analysis says so
     sim = simulate.photostim_steps(seed=2, direct=True)
     r = pipeline.analyze(sim.recording)

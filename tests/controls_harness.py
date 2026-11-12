@@ -169,6 +169,15 @@ class Patched:
         sys.excepthook = self._hook
 
 
+def _kind_words() -> dict:
+    from clampwise.figure.elements import KIND_WORDS as words
+
+    return dict(words)
+
+
+KIND_WORDS = _kind_words()          # what each kind of thing on a figure is called
+
+
 # ---------------------------------------------------------------- finding the controls
 
 STACKS = (QtWidgets.QStackedWidget,)
@@ -266,7 +275,8 @@ def find_controls(roots: dict[str, QtWidgets.QWidget], pick_lists: bool = True) 
             tab = _owner_words(w, root)
             place = f"{where} / {tab}" if tab else where
             if isinstance(w, QtWidgets.QAbstractButton):
-                if isinstance(w.parentWidget(), (QtWidgets.QAbstractSpinBox, QtWidgets.QTabBar, QtWidgets.QScrollBar)):
+                if isinstance(w.parentWidget(), (QtWidgets.QAbstractSpinBox, QtWidgets.QTabBar, QtWidgets.QScrollBar,
+                                                 QtWidgets.QAbstractItemView)):      # (a table's corner: select all)
                     continue
                 name = label_of(w)
                 if isinstance(w, QtWidgets.QToolButton) and w.menu() is not None:
@@ -307,7 +317,8 @@ def find_widget(roots: dict[str, QtWidgets.QWidget], control: Control):
             tab = _owner_words(w, root)
             place = f"{where} / {tab}" if tab else where
             if isinstance(w, QtWidgets.QAbstractButton):
-                if isinstance(w.parentWidget(), (QtWidgets.QAbstractSpinBox, QtWidgets.QTabBar, QtWidgets.QScrollBar)):
+                if isinstance(w.parentWidget(), (QtWidgets.QAbstractSpinBox, QtWidgets.QTabBar, QtWidgets.QScrollBar,
+                                                 QtWidgets.QAbstractItemView)):      # (a table's corner: select all)
                     continue
                 name = label_of(w)
                 if isinstance(w, QtWidgets.QToolButton) and w.menu() is not None:
@@ -440,6 +451,61 @@ def clipboard_state() -> list:
     return [cb.text(), cb.pixmap().cacheKey() if not cb.pixmap().isNull() else 0]
 
 
+# ---------------------------------------------------------------- the mouse
+
+def mouse(widget, kind, pos: QtCore.QPoint, button=QtCore.Qt.LeftButton, held=None) -> None:
+    """One mouse event sent to ``widget`` (press, move, release or double-click), as the window system would."""
+    held = button if held is None else held
+    if kind == QtCore.QEvent.MouseButtonRelease:
+        held = QtCore.Qt.NoButton
+    event = QtGui.QMouseEvent(kind, QtCore.QPointF(pos), QtCore.QPointF(widget.mapToGlobal(pos)),
+                              QtCore.Qt.NoButton if kind == QtCore.QEvent.MouseMove else button, held,
+                              QtCore.Qt.NoModifier)
+    QtWidgets.QApplication.sendEvent(widget, event)
+
+
+def click(widget, pos: QtCore.QPoint, button=QtCore.Qt.LeftButton) -> None:
+    mouse(widget, QtCore.QEvent.MouseButtonPress, pos, button)
+    mouse(widget, QtCore.QEvent.MouseButtonRelease, pos, button)
+
+
+def double_click(widget, pos: QtCore.QPoint) -> None:
+    click(widget, pos)
+    mouse(widget, QtCore.QEvent.MouseButtonDblClick, pos)
+    mouse(widget, QtCore.QEvent.MouseButtonRelease, pos)
+
+
+def drag(widget, start: QtCore.QPoint, dx: int, dy: int) -> None:
+    """Press at ``start``, move by (dx, dy) in three steps, release."""
+    mouse(widget, QtCore.QEvent.MouseButtonPress, start)
+    for f in (0.3, 0.7, 1.0):
+        mouse(widget, QtCore.QEvent.MouseMove, start + QtCore.QPoint(int(dx * f), int(dy * f)), held=QtCore.Qt.LeftButton)
+    mouse(widget, QtCore.QEvent.MouseButtonRelease, start + QtCore.QPoint(dx, dy))
+
+
+def key(widget, which, modifiers=QtCore.Qt.NoModifier) -> None:
+    """One key pressed and let go in ``widget``."""
+    for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
+        QtWidgets.QApplication.sendEvent(widget, QtGui.QKeyEvent(kind, which, modifiers))
+
+
+def point_on(canvas, tag) -> QtCore.QPoint | None:
+    """A point of the figure's canvas where a click lands on the thing ``tag`` (nearest its middle); None when
+    no point of its outline is its own (it is covered, or not drawn)."""
+    o = canvas.outline(tag)
+    if o is None:
+        return None
+    n = 15
+    cells = sorted(((i, j) for i in range(n) for j in range(n)), key=lambda c: abs(c[0] - n // 2) + abs(c[1] - n // 2))
+    for i, j in cells:
+        p = canvas.to_widget(o[0] + (o[2] - o[0]) * (i + 0.5) / n, o[1] + (o[3] - o[1]) * (j + 0.5) / n)
+        q = QtCore.QPoint(int(round(p.x())), int(round(p.y())))
+        found = canvas.hit(q)
+        if found is not None and (found.kind, found.panel, str(found.key)) == (tag.kind, tag.panel, str(tag.key)):
+            return q
+    return None
+
+
 # ---------------------------------------------------------------- pressing
 
 def flush(app) -> None:
@@ -466,6 +532,7 @@ class Session:
 
     name = ""
     has_undo = True               # False: what changes here is a view or a dialog's picks, not an edit to undo
+    pressing: Control | None = None       # the control being pressed now
 
     def __init__(self, patched: Patched) -> None:
         self.patched = patched
@@ -496,6 +563,51 @@ class Session:
     def extra_windows(self) -> list[QtWidgets.QWidget]:
         return []
 
+    def controls(self) -> list[Control]:
+        """Every control of the screen as it now is."""
+        return find_controls(self.roots())
+
+    def act(self, control: Control, state: str, do: Callable[[], str | None], ready: Callable | None = None,
+            ignore: tuple = ()) -> Outcome:
+        """Something a person does that is not a press of a widget (a click or a drag on a figure, a key), judged
+        as a press is: from the starting state (then ``ready()``), ``do()`` is called (it returns what was wrong,
+        or nothing), what changed is noted (but for ``ignore``), and an edit is undone."""
+        out = Outcome(control, state)
+        log = self.patched.log
+        n_err = len(log.errors)
+        self.pressing = control
+        try:
+            self.reset()
+            self.settle()
+            if ready is not None:
+                ready()
+                self.settle()
+            if len(log.errors) > n_err:
+                out.error = "putting the screen back raised: " + log.errors[-1]
+                return out
+            before = self.snapshot()
+            n_dlg = len(log.dialogs)
+            wrong = do()
+            self.settle()
+            after = self.snapshot()
+            out.effects = [self.WORDS[k] for k in before if before[k] != after[k] and k not in ignore]
+            out.detail = "; ".join(log.dialogs[n_dlg:])[:300]
+            if len(log.errors) > n_err:
+                out.error = log.errors[n_err]
+            elif wrong:
+                out.error = str(wrong)
+            elif before["model"] != after["model"] and self.has_undo:
+                self.undo()
+                self.settle()
+                out.undo = "restored" if self.model() == before["model"] else "NOT restored"
+                if len(log.errors) > n_err:
+                    out.error = "Undo raised: " + log.errors[n_err]
+        except Exception:
+            out.error = traceback.format_exc()
+        finally:
+            self.patched.answers.pick_action = None
+        return out
+
     # -- the pressing
     def snapshot(self, skip=None) -> dict:
         log, a = self.patched.log, self.patched.answers
@@ -514,6 +626,7 @@ class Session:
         out = Outcome(control, state)
         log, answers = self.patched.log, self.patched.answers
         n_err = len(log.errors)
+        self.pressing = control
         try:
             self.reset()
             self.settle()
@@ -606,7 +719,7 @@ class Session:
         """Every control of the screen pressed from the starting state."""
         self.reset()
         self.settle()
-        found = find_controls(self.roots())
+        found = self.controls()
         outs: list[Outcome] = []
         for c in found:
             if only is not None and not only(c):
@@ -669,6 +782,13 @@ def doc_name(c: Control) -> str:
     label = re.sub(r"“[^”]*”", "(a saved style)", label)
     label = re.sub(r" panel [A-F]\b", " this panel", label)
     label = re.sub(r"^Presets > ([^:]+):.*$", r"Presets > \1", label)
+    # the panel's own settings name its plot on a button: one control, whatever the plot
+    label = re.sub(r"^Panel: Plot: .*$", "Panel: Plot: (how the panel is drawn)...", label)
+    if label.startswith("Starters > "):          # a starter by its name (not its line, nor why it is off)
+        from clampwise.figure import presets
+
+        name = next((p.name for p in presets.PRESETS.values() if label.startswith(f"Starters > {p.name}:")), "")
+        label = f"Starters > {name}" if name else label
     screen = c.where.split(" / ")[0]
     return f"{screen} | {label} | {c.kind}"
 
@@ -719,7 +839,10 @@ class DialogSession(Session):
         d = self.d
         return _digest([[asdict(s) if is_dataclass(s) else s for s in getattr(d, "sets", [])],
                         getattr(d, "clicks", None), getattr(d, "points", None), getattr(d, "mode", None),
-                        d.result(), d.isVisible()])
+                        getattr(d, "plot", None), str(getattr(d, "choice", None))[:80], d.result(), d.isVisible(),
+                        # a dialog's picks are what it edits: what it gives back when it is accepted
+                        [c.currentIndex() for c in d.findChildren(QtWidgets.QComboBox)],
+                        [c.isChecked() for c in d.findChildren(QtWidgets.QCheckBox)]])
 
     def said(self) -> str:
         say = getattr(self.d, "say", None)
@@ -743,6 +866,14 @@ def picker_ready(d) -> None:
     d._add()
     d.list.selectRow(1)
     d._select_rows(list(range(min(2, n))))
+
+
+def picker_first_trace(d) -> None:
+    """The trace picker as ``picker_ready`` leaves it, but with the first trace selected (it can go down) and
+    sweeps of that trace selected in the table (they can be removed from it)."""
+    picker_ready(d)
+    d.list.selectRow(0)
+    d._select_rows(list(range(min(2, d.table.rowCount()))))
 
 
 def digitizer_ready(d) -> None:
@@ -817,26 +948,68 @@ def open_window(folder: Path, recordings: dict[str, object], analyze: bool = Tru
 # ---------------------------------------------------------------- the three screens
 
 class BuilderSession(Session):
-    name = "Figure builder"
+    """The figure builder. ``select``: the thing selected on the figure in the starting state (None: nothing, the
+    figure's own settings show); ``side``: which tab beside the figure is in front (0 Selected, 1 Data and
+    statistics, 2 All settings); ``prepare(builder)``: called last, to leave something for every control to act
+    on."""
 
-    def __init__(self, patched: Patched, builder) -> None:
+    name = "Figure builder"
+    ON_FIGURE = "Figure builder / On the figure"
+
+    def __init__(self, patched: Patched, builder, select=None, side: int = 0, prepare: Callable | None = None) -> None:
         super().__init__(patched)
         self.b = builder
+        self.select, self.side, self.prepare = select, side, prepare
         self.baseline = builder.spec.to_json()
+        self._pictures: dict[str, str] = {}       # the figure drawn from a Spec, by the Spec: drawn once
 
     def roots(self):
         return {"Figure builder": self.b.centralWidget()}
+
+    def controls(self) -> list[Control]:
+        """The controls, those of the Selected tab named after what is selected (the tab shows another form for
+        each kind of thing)."""
+        form = self.form()
+        found = find_controls(self.roots())
+        for c in found:
+            if c.where.endswith(" / Selected"):
+                c.label = f"{form}: {c.label}"
+        return found
+
+    def form(self) -> str:
+        import re
+
+        return re.sub(r"( of panel| ) ?[A-L]$", "", self.b.inspector.heading.text()).strip()
 
     def reset(self) -> None:
         b = self.b
         b.typing.stop()
         b.timer.stop()
+        b.canvas._commit_editor(keep=False)
+        b.canvas._press = None
+        b.canvas.select(None, tell=False)
+        b.inspector.tag = None
         b.current = 0
-        b._history, b._future = [], []
-        b._restore(self.baseline)
-        b._snapshot()
+        if b.spec.to_json() == self.baseline and b._drawn:
+            # the figure is the starting one already (nothing was changed, or Undo put it back): its history is
+            # emptied, and it is not drawn again
+            b._history, b._future = [self.baseline], []
+            b._load_controls()
+            b._undo_buttons()
+        else:
+            b._history, b._future = [], []
+            b._restore(self.baseline)
+            b._snapshot()
         b.sections.setCurrentIndex(0)
         b.zoom.setCurrentIndex(0)
+        b.inspector.show_for(None)
+        b.how.setText(b._how_words(None))
+        if self.select is not None:
+            b.canvas.select(self.select)
+        b.side.setCurrentIndex(self.side)
+        b.dataview.refresh()
+        if self.prepare is not None:
+            self.prepare(b)
         b.statusBar().clearMessage()
         # one saved style, unlike the figure's look, for Styles > Use and Delete to act on
         from dataclasses import asdict
@@ -861,13 +1034,155 @@ class BuilderSession(Session):
         return self.b.spec.to_json()
 
     def picture(self) -> str:
-        return canvas_hash(self.b.fig)
+        key = self.b.spec.to_json()               # the picture follows from the Spec: each Spec is drawn once
+        if key not in self._pictures:
+            self._pictures[key] = canvas_hash(self.b.fig)
+        c = self.b.canvas                         # and from how large it is shown (the zoom)
+        return f"{self._pictures[key]} at {c.width()} x {c.height()}"
 
     def said(self) -> str:
         return self.b.statusBar().currentMessage()
 
     def undo(self) -> None:
-        self.b.undo()
+        label = self.pressing.label if self.pressing is not None else ""
+        if label == "Undo":                 # the Undo button's own press is put back by Redo
+            self.b.redo()
+        else:
+            self.b.undo()
+
+    # -- the figure itself: the mouse and the keys on each kind of thing drawn
+    def things(self) -> dict:
+        """{kind: the first thing of that kind on the figure, as its tag}, panels and axes among them."""
+        from clampwise.figure import render
+        from clampwise.figure.elements import Tag
+
+        out: dict = {}
+        for t_, _a in render.things(self.b.fig):
+            if t_.kind in render.ORDER:
+                out.setdefault(t_.kind, Tag(t_.kind, t_.panel, t_.key))
+        for d in self.b.canvas.drawn:
+            if d.axes and d.axes[0].axison and d.prepared is not None:
+                k = getattr(d.axes[0], "_cw_panel", 0)
+                out.setdefault("xaxis", Tag("xaxis", k))
+                out.setdefault("yaxis", Tag("yaxis", k))
+        # a panel that can move either way: the second of several
+        panels = self.b.spec.panels
+        out["panel"] = Tag("panel", 1 if len(panels) > 2 and not panels[1].inset_of >= 0 else 0)
+        return out
+
+    def _at(self, tag):
+        p = point_on(self.b.canvas, tag)
+        if p is None:
+            raise AssertionError(f"no point of the figure is the {tag.kind}'s own")
+        return p
+
+    def gestures(self, state: str, seen: set | None = None) -> list[Outcome]:
+        """Each kind of thing on the figure clicked, dragged, double-clicked, moved with an arrow key, deleted and
+        right-clicked (each entry of its menu chosen), each from the starting state. ``seen``: the kinds already
+        done in an earlier state (added to)."""
+        from clampwise.figure.elements import KIND_WORDS
+
+        b, c, log, answers = self.b, self.b.canvas, self.patched.log, self.patched.answers
+        was = self.select
+        self.select = None
+        self.reset()
+        self.settle()
+        outs: list[Outcome] = []
+        seen = set() if seen is None else seen
+        for kind, tag in self.things().items():
+            if kind in seen:
+                continue
+            seen.add(kind)
+            words = KIND_WORDS.get(kind, kind)
+            same = lambda t_, tag=tag: t_ is not None and (t_.kind, t_.panel, str(t_.key)) == (tag.kind, tag.panel,  # noqa: E731
+                                                                                               str(tag.key))
+
+            def made(gesture: str, label: str = "") -> Control:
+                return Control(f"{self.ON_FIGURE}|{gesture}|{kind}|{label}", gesture, label or words, self.ON_FIGURE)
+
+            def click_it(tag=tag, same=same):
+                click(c, self._at(tag))
+                return "" if same(c.selection) else f"the click selected {c.selection}, not the {tag.kind}"
+
+            outs.append(self.act(made("click"), state, click_it))
+            movable = b._can_move(tag)
+            if movable:
+                def drag_it(tag=tag):
+                    drag(c, self._at(tag), 14, -11)
+
+                outs.append(self.act(made("drag"), state, drag_it))
+
+                def nudge(tag=tag):
+                    c.select(tag)
+                    key(c, QtCore.Qt.Key_Up)
+
+                outs.append(self.act(made("arrow key"), state, nudge))
+            has_words = b.words_of(tag) is not None
+
+            def twice(tag=tag, has_words=has_words):
+                double_click(c, self._at(tag))
+                if not has_words:
+                    return ""
+                if c._editor is None:
+                    return "the double-click opened no box to rewrite it in"
+                c._editor.setText("Z" if tag.kind == "letter" else c._editor.text() + " rewritten")
+                c._editor.returnPressed.emit()
+                return ""
+
+            outs.append(self.act(made("double-click"), state, twice))
+
+            def delete(tag=tag):
+                c.select(tag)
+                key(c, QtCore.Qt.Key_Delete)
+
+            outs.append(self.act(made("Delete key"), state, delete))
+            # the right-click menu: read once, then each entry chosen from the starting state
+            self.reset()
+            self.settle()
+            n = len(log.menus)
+            answers.pick_action = None
+            click(c, self._at(tag), QtCore.Qt.RightButton)
+            entries = log.menus[-1] if len(log.menus) > n else []
+            if not entries:
+                o = Outcome(made("right-click"), state)
+                o.error = "the right-click showed no menu"
+                outs.append(o)
+            for i, (text, enabled, tip, ticked) in enumerate(entries):
+                ctl = Control(f"{self.ON_FIGURE}|right-click action|{kind}|{i}", "right-click action",
+                              f"{words} > {text}", self.ON_FIGURE, enabled, tip, ticked=ticked)
+                if not enabled:
+                    outs.append(Outcome(ctl, state))
+                    continue
+
+                def choose(tag=tag, i=i):
+                    answers.pick_action = i
+                    click(c, self._at(tag), QtCore.Qt.RightButton)
+                    answers.pick_action = None
+
+                # the menu's being shown, and the selection the right-click makes, are not the entry's doing
+                outs.append(self.act(ctl, state, choose, ready=lambda tag=tag: c.select(tag), ignore=("menus",)))
+        self.select = was
+        self.reset()
+        return outs
+
+    def resize_handles(self, state: str, tag) -> list[Outcome]:
+        """A freely placed panel (or an inset) resized by each of its eight handles."""
+        b, c = self.b, self.b.canvas
+        outs = []
+        for name in ("nw", "n", "ne", "e", "se", "s", "sw", "w"):
+            def pull(name=name):
+                c.select(tag)
+                h = c._handles().get(name)
+                if h is None:
+                    return "the selected panel shows no handle to resize it by"
+                dx = 9 if "w" in name else -9 if "e" in name else 0
+                dy = 9 if "n" in name else -9 if "s" in name else 0
+                drag(c, h.center().toPoint(), dx, dy)
+                return ""
+
+            outs.append(self.act(Control(f"{self.ON_FIGURE}|drag|handle {name}", "drag", f"Panel's handle ({name})",
+                                         self.ON_FIGURE), state, pull))
+        return outs
 
 
 class FiguresSession(Session):
@@ -961,6 +1276,7 @@ class WorkbenchSession(Session):
         self.app.processEvents()
         if prepare is not None:
             prepare(self.s)
+        self.in_use = prepare is not None         # then a sweep is stepped to and the cursors are on
         self.baseline = self.s._m.to_dict()
         self.region_row = self.s.region_list.currentRow()
         self.kept = [(h["measurement"], h["summary"]) for h in window.project.hands(path)]
@@ -973,6 +1289,11 @@ class WorkbenchSession(Session):
         from clampwise.analysis import workbench as wb
 
         s, w, p = self.s, self.w, self.w.project
+        fig = w.screens["figures"]
+        if fig.builder is not None:               # a figure a press sent something to
+            fig.builder.close()
+            fig.builder.deleteLater()
+            fig.builder = None
         w.go("workbench")
         for h in p.hands(self.path):
             p.remove_hand(h["id"])
@@ -986,8 +1307,16 @@ class WorkbenchSession(Session):
         for section in s.details.findChildren(QtWidgets.QToolButton):      # the folded Options open, to be pressed
             if section.isCheckable() and section.arrowType() != QtCore.Qt.NoArrow:
                 section.setChecked(True)
+        s._browse, s._cursors = None, None
+        for box_, on in ((s.alone, False), (s.cursors_box, self.in_use)):
+            box_.blockSignals(True)
+            box_.setChecked(on)
+            box_.blockSignals(False)
         s._apply_state(self.baseline)
         s.region_list.setCurrentRow(self.region_row)
+        if self.in_use and len(s._singles()) > 1:
+            s.browse(s._singles()[0])
+        s._enable()
         w.undo.clear()
         s._fill_kept()
         s._fill_templates()

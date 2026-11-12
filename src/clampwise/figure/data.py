@@ -120,6 +120,52 @@ def project_tables(project) -> dict[str, Callable[[], pd.DataFrame]]:
 # --------------------------------------------------------------------------- files
 
 
+HAND_KEYS = ("Trace", "Sweep", "Region", "Pulse", "Sweep starts at (s)", "Command", "Baseline", "Left out")
+
+
+def project_hands(project) -> list[tuple[str, tuple]]:
+    """Every measurement kept in the Workbench, over the project's recordings: (its words, (the recording's path,
+    the kept measurement)), the newest first."""
+    out = []
+    for row in project.recordings():
+        try:
+            for h in project.hands(row.path):
+                out.append((h.get("made_at", ""), f"{h['name']}: {row.name} ({h.get('made_at', '')[:16].replace('T', ' ')})",
+                            (row.path, h)))
+        except Exception:
+            continue
+    return [(words, use) for _when, words, use in sorted(out, key=lambda x: x[0], reverse=True)]
+
+
+def hand_table(recording, hand: dict) -> pd.DataFrame:
+    """A kept Workbench measurement as a table, made again from its description: one row per sweep and region
+    (and pulse), each measure a column named with its units; sweeps counted from 1; rows left out by hand in
+    the Workbench are not in it."""
+    from ..analysis import workbench as wb
+    from ..analysis.stimulus import find_stimulus
+    from ..core.recording import Role
+
+    if not recording.stimulus.times_s:
+        recording.stimulus = find_stimulus(recording)
+    m = wb.HandMeasurement.from_dict(hand["measurement"])
+    result = wb.measure(recording, m)
+    cmd = recording.channel(Role.COMMAND)
+    try:
+        units = wb.channel_named(recording, m.selection.channel).units
+    except Exception:
+        units = ""
+    names = wb.headings(m.measures, units, cmd.units if cmd is not None else "")
+    rows = []
+    for r in result["rows"]:
+        if r.get("excluded"):
+            continue
+        row = {names.get(k, k): v for k, v in r.items() if k not in ("start_ms", "end_ms", "excluded")}
+        row["Sweep"] = (r["sweep"] + 1) if r.get("sweep") is not None else np.nan
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    return frame.dropna(axis=1, how="all") if len(frame) else frame
+
+
 def sheets(path: str | Path) -> list[str]:
     path = Path(path)
     if path.suffix.lower() in (".xlsx", ".xlsm", ".xls"):
