@@ -9,7 +9,8 @@
   plot. Every text colour is checked against the WCAG AA contrast ratios, as before.
 - Fixed: a figure's logarithmic axis wrote its labels as 4 × 10⁻¹ (now 0.4, 2, 10); a panel of traces was
   wrongly warned that its rows "look like a spreadsheet's summaries" (a trace named "average"); in the Workbench a
-  click on overlapping sweeps could take the sample after the click, and so another sweep.
+  click on overlapping sweeps could take the sample after the click, and so another sweep; in a short builder
+  window a warning could be drawn over the figure's legend.
 - **The Workbench works the way Clampfit is used.**
   - **Cursors.** Tick Cursors for two lines to drag over the trace; the line above the trace reads each one's
     time and value, Δt, the difference, the slope and the mean between them, on the sweep stepped to (else the

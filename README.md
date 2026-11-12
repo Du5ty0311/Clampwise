@@ -20,14 +20,21 @@ number with how it was measured. On a rig it can also watch the experiment live,
   literature, and a flag where something looks wrong. Flags never change or exclude a value.
 - **Check, correct and review**: drag a measured point to remeasure it, accept or reject events one at a time, mark
   files good or bad. Every decision is kept in the project and can be undone.
-- **Figures**: standard graphs for each analysis, heat maps, comparisons across recordings and groups with statistics,
-  and a figure builder with presets. **Export** to an Excel workbook (each column's definition attached) or CSV.
+- **Figures**: standard graphs for each analysis (a light experiment opens on its sweeps, the test of a connection
+  against sham windows and the cell's health), heat maps, and comparisons across recordings and groups with
+  statistics. **The figure builder**: click, drag and rewrite anything on the figure; the table each panel is drawn
+  from and its statistics beside it; exported at its exact size with the text kept as text, ready for Illustrator.
+- **Workbench**: measure anything by hand, as in Clampfit: regions, cursors, Clampfit's statistics, fits and
+  transforms. A measurement is kept with how it was made, and can run on every file of a protocol.
+- **Export** to an Excel workbook (each column's definition attached) or CSV.
 - **Projects**: the analysis is saved beside the recordings, so work resumes where it was left; cells, slices and
   conditions are read from folder names or entered by hand.
 
 ![Results: every measurement with its definition](docs/images/results.png)
 
 ![Figures: four graphs at a time](docs/images/figures.png)
+
+![The figure builder: the figure, its legend, and the settings of what is selected](docs/images/builder.png)
 
 ## Install
 

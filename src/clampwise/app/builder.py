@@ -1256,12 +1256,19 @@ class Builder(QtWidgets.QMainWindow):
         bl.addWidget(self.caption, 1)
         self.warnings = QtWidgets.QWidget()
         self.warnings.setLayout(box("v", "xs"))
-        bl.addWidget(self.warnings)
+        # in a scrolling area of their own: wrapped lines under-report their height, and a short pane would
+        # otherwise draw them over the legend
+        self.warnings_area = QtWidgets.QScrollArea()
+        self.warnings_area.setWidget(self.warnings)
+        self.warnings_area.setWidgetResizable(True)
+        self.warnings_area.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.warnings_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        bl.addWidget(self.warnings_area, 1)
         bottom.setLayout(bl)
         right.addWidget(bottom)
         right.setStretchFactor(0, 4)
         right.setStretchFactor(1, 1)
-        right.setSizes([640, 150])
+        right.setSizes([600, 200])                    # the legend, its heading and a warning line all in view
         return right
 
     def _f(self, key: str, control: QtWidgets.QWidget, into) -> QtWidgets.QWidget:
@@ -3223,6 +3230,8 @@ class Builder(QtWidgets.QMainWindow):
             b = widgets.Badge("warn", w, w)
             b.setWordWrap(True)
             lay.addWidget(b)
+        lay.addStretch(1)
+        self.warnings_area.setVisible(bool(warns))     # no empty band under the legend when nothing is wrong
 
     def caption_text(self) -> str:
         return self.caption.toPlainText()
