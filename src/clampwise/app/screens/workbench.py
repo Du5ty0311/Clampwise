@@ -938,7 +938,9 @@ class WorkbenchScreen(Screen):
         x, y = float(p.x()), float(p.y())
         # the sweep under the mouse: the drawn trace nearest the click
         t = self._recording.time_s
-        i = int(np.clip(np.searchsorted(t, x), 0, t.size - 1))
+        # the sample nearest the click (not the one after it: a hair to the right of a sample would pick the next
+        # one, and between near-identical sweeps the next sample can belong to another sweep's noise)
+        i = int(np.clip(np.round((x - float(t[0])) * self._recording.sample_rate_hz), 0, t.size - 1))
         nearest, best = None, np.inf
         for lab, k, yy in self._result["traces"]:
             if k is None:

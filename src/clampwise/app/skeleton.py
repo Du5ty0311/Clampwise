@@ -74,6 +74,7 @@ class Sidebar(QtWidgets.QWidget):
         b = QtWidgets.QPushButton(d.title)
         b.setObjectName("nav")
         b.setCheckable(True)
+        b.setFocusPolicy(QtCore.Qt.NoFocus)           # reached by its shortcut (Ctrl+1...); the selection shows
         b.setToolTip(f"{d.tip} ({d.shortcut})")
         b.setAccessibleName(d.title)
         b.clicked.connect(lambda _=False, k=d.key: self.chosen.emit(k))

@@ -169,8 +169,11 @@ def prepare(frame: pd.DataFrame, r: Recipe) -> Prepared:
     if kept:
         said.append("Rows kept where " + " and ".join(kept) + ".")
     texts = frame.select_dtypes(exclude="number")
-    summary_rows = texts.apply(lambda c: c.astype(str).str.match(SUMMARY_WORDS)).any(axis=1) if len(texts.columns) \
-        else pd.Series(False, index=frame.index)
+    # a spreadsheet's own summary rows: only in a table someone typed (a file, a pasted table); a trace named
+    # "average" or a pattern named "n" in a table Clampwise made is not one
+    typed = (r.source or {}).get("kind", "") in ("", "file", "digitized") and r.question != "example"
+    summary_rows = texts.apply(lambda c: c.astype(str).str.match(SUMMARY_WORDS)).any(axis=1) \
+        if typed and len(texts.columns) else pd.Series(False, index=frame.index)
     if summary_rows.any():                          # a spreadsheet's own AVERAGE, SEM, n rows
         warn.append(f"{int(summary_rows.sum())} row(s) look like a spreadsheet's summaries (AVERAGE, STDEV, SEM, "
                     "n...), not measurements: leave them out with 'Keep only rows where' (a column that names the "

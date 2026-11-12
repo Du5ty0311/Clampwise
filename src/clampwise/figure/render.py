@@ -34,6 +34,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
+from matplotlib.ticker import LogFormatter
 
 from . import elements, journals, page
 from . import stats as fstats
@@ -1185,20 +1186,27 @@ def _raster(ax, lower, r, p, style) -> None:
     lower.set_ylim(bottom=0)
 
 
+class _PlainLog(LogFormatter):
+    """A log axis's labels as numbers are written (0.4, 2, 10, 300), never 4 × 10⁻¹; matplotlib's own rule
+    decides which minor ticks get one (all of them on a narrow range, none on a wide one)."""
+
+    def _num_to_string(self, x, vmin, vmax):
+        return f"{x:g}"
+
+
 def _axes(ax, r: Recipe, p: Prepared, style: Style) -> None:
     k = getattr(ax, "_cw_panel", -1)
     small = style.size_of("annotation")
     if r.question == "counts" and r.plot in ("pie", "donut"):
         return
-    from matplotlib.ticker import FuncFormatter
-
-    plain = FuncFormatter(lambda v, _pos: f"{v:g}")          # 0.1, 1, 10: numbers as a person writes them
     if r.x_log:
         ax.set_xscale("log")
-        ax.xaxis.set_major_formatter(plain)
+        ax.xaxis.set_major_formatter(_PlainLog(labelOnlyBase=False))
+        ax.xaxis.set_minor_formatter(_PlainLog(labelOnlyBase=False))
     if r.y_log:
         ax.set_yscale("log")
-        ax.yaxis.set_major_formatter(plain)
+        ax.yaxis.set_major_formatter(_PlainLog(labelOnlyBase=False))
+        ax.yaxis.set_minor_formatter(_PlainLog(labelOnlyBase=False))
     if len(r.x_range) == 2:
         ax.set_xlim(*r.x_range)
     if len(r.y_range) == 2 and r.plot != "raster":
