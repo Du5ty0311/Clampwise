@@ -12,7 +12,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from ..figure import thumbs
 from ..figure.recipe import PLOTS
-from . import widgets
+from . import theme, widgets
 from .widgets import box, label
 
 # (key, what it is, what happens next)
@@ -137,7 +137,7 @@ class PlotChooser(QtWidgets.QDialog):
         for _key, words, plots in thumbs.catalogue():
             inner.addWidget(label(words, "section"))
             grid = QtWidgets.QGridLayout()
-            grid.setSpacing(6)
+            grid.setSpacing(theme.SPACE["xs"])
             for i, (plot, name, what) in enumerate(plots):
                 b = QtWidgets.QToolButton()
                 b.setCheckable(True)

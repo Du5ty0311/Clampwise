@@ -22,6 +22,7 @@ from . import traces
 from .recipe import Recipe, Spec, pack
 
 BEFORE_MS, AFTER_MS = 5.0, 60.0
+SWEEP_GREY = "#9A9A9A"         # single sweeps drawn under their average
 closest_to_mean = traces.closest_to_mean
 
 

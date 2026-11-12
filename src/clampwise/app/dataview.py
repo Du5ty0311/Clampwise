@@ -76,8 +76,8 @@ class FrameModel(QtCore.QAbstractTableModel):
             f = theme.numeric_font() if numeric else QtGui.QFont()
             f.setStrikeOut(out)
             return f
-        if role == QtCore.Qt.ForegroundRole and out:
-            return QtGui.QBrush(QtGui.QColor("#999999"))
+        if role == QtCore.Qt.ForegroundRole and out:           # greyed, as the theme greys what is off
+            return QtGui.QBrush(QtWidgets.QApplication.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text))
         if role == QtCore.Qt.ToolTipRole and out:
             return "Left out of the figure by hand (right-click to put it back)"
         return None
@@ -89,7 +89,6 @@ class DataView(QtWidgets.QWidget):
         self.b = builder
         self._filling = False
         lay = box("v", "s")
-        lay.setContentsMargins(0, 0, 0, 0)
         self.heading = label("The panel's data", "heading")
         lay.addWidget(self.heading)
         self.where = label("", "muted", wrap=True)
@@ -132,7 +131,8 @@ class DataView(QtWidgets.QWidget):
         lay.addWidget(self.stats_head)
         self.stats_box = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
+        none = 0
+        form.setContentsMargins(none, none, none, none)
         form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self.test = self._combo({k: f"{name}" + (f" ({what})" if k else "") for k, (name, what, _p) in
                                  fstats.TESTS.items()}, "Test")

@@ -13,6 +13,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from ..figure import elements, render
+from . import theme
 
 HANDLE = 7                   # a resize handle's side, in screen pixels
 TEXT_KINDS = ("title", "xlabel", "ylabel", "annotation", "letter", "bracket", "stimbar", "figtext", "series",
@@ -36,7 +37,7 @@ class FigureCanvas(FigureCanvasQTAgg):
         self.setMouseTracking(True)
         self.drawn: list = []
         self.selection = None                         # a Tag
-        self.accent = QtGui.QColor("#2d6a4f")
+        self.accent = QtGui.QColor(theme.LIGHT.accent)        # (the builder sets the window's own)
         self.can_move = lambda tag: False             # set by the builder: whether a thing may be dragged
         self.can_resize = lambda tag: False
         self.words_of = lambda tag: None              # a thing's words (None: it has none to edit)
@@ -307,7 +308,7 @@ class FigureCanvas(FigureCanvasQTAgg):
             p.drawRect(moved.normalized())
         if tag.kind == "panel" and self.can_resize(tag):
             p.setPen(QtGui.QPen(self.accent, 1.0))
-            p.setBrush(QtGui.QColor("#ffffff"))
+            p.setBrush(QtGui.QColor(QtCore.Qt.white))
             for rect_h in self._handles().values():
                 p.drawRect(rect_h)
         p.end()

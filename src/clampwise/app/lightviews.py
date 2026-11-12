@@ -131,7 +131,8 @@ def example(run) -> list:
             traces.TraceSet("average" if len(items) > 1 else "sweep", "average", items)]
         r = layouts.example_recipe(sets, w, lambda _f: rec, f"Sweeps around the {what}", title="")
         if len(items) > 1:
-            r.series = {"sweeps": {"colour": "#9A9A9A", "width": 0.5, "legend": False}, "average": {"legend": False}}
+            r.series = {"sweeps": {"colour": layouts.SWEEP_GREY, "width": 0.5, "legend": False},
+                        "average": {"legend": False}}
         r.source["recording"] = source
         return Spec(panels=[r])
 

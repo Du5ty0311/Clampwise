@@ -37,14 +37,14 @@ class Inspector(QtWidgets.QWidget):
         self.tag = None
         self._filling = False
         outer = box("v", "s")
-        outer.setContentsMargins(0, 0, 0, 0)
         self.heading = label("Figure", "heading")
         outer.addWidget(self.heading)
         self.hint = label("", "hint", wrap=True)
         outer.addWidget(self.hint)
         self.form_holder = QtWidgets.QWidget()
         self.form = QtWidgets.QFormLayout()
-        self.form.setContentsMargins(0, 0, 0, 0)
+        none = 0
+        self.form.setContentsMargins(none, none, none, none)
         self.form.setLabelAlignment(QtCore.Qt.AlignLeft)
         self.form.setRowWrapPolicy(QtWidgets.QFormLayout.WrapLongRows)
         self.form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)

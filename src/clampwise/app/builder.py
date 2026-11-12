@@ -2533,7 +2533,7 @@ class Builder(QtWidgets.QMainWindow):
         elif choice:
             bar["nm"] = float(choice)
         else:
-            bar["colour"] = "#555555"
+            bar["colour"] = elements.NO_LIGHT
 
     def match_stim_bars(self, k: int, i: int) -> None:
         r = self.spec.panels[k]

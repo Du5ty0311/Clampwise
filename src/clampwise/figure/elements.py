@@ -83,6 +83,7 @@ def wavelength_colour(nm: float) -> str:
 LIGHTS = {"blue (470 nm)": 470, "cyan (505 nm)": 505, "green (530 nm)": 530, "amber (590 nm)": 590,
           "red (630 nm)": 630, "far red (660 nm)": 660, "infrared (1040 nm, two-photon)": 1040}
 ELECTRICAL = "#000000"
+NO_LIGHT = "#555555"           # a bar that stands for no light in particular (a puff, a drug's time)
 
 
 def stim_colour(bar: dict) -> str:
