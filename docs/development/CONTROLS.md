@@ -9,7 +9,8 @@ it (a panel, a letter, a title, an axis and its title, the legend, a group, the 
 command, a text, a bracket, a reference line, a mark along x, a potential label, a text on the page) is clicked,
 dragged, moved with an arrow key, double-clicked (and rewritten), deleted and right-clicked (each entry of its
 menu chosen). All of it on a simulated recording
-of every recording type (cc_evoked, cc_ramp, cc_short_square, cc_steps, dsi, membrane_test, vc_evoked, vc_spontaneous, vc_steps) and, when `E:\Daniel` is on the machine, on copies of three of his files. It
+of every recording type (cc_evoked, cc_ramp, cc_short_square, cc_steps, dsi, membrane_test, vc_evoked, vc_spontaneous, vc_steps) and, when the lab's own recordings are named on the machine
+(`tests/labdata.py`), on copies of three of them. It
 fails when a control raises, changes nothing, makes an edit that Undo does not put back, or is disabled without
 saying why. A control found on a screen and missing from this list fails the test too.
 
@@ -19,7 +20,7 @@ name** is what the test asserts for that control beyond a change. **Undo** says 
 (a dash: the control edits nothing, so there is nothing to undo). **Off when** is what a disabled control's
 tooltip said.
 
-535 controls, pressed 2210 times in 74 states. Last written from the simulated recordings and copies of Daniel's files.
+535 controls, pressed 2210 times in 74 states. Last written from the simulated recordings and copies of the lab's own files.
 
 
 ## Workbench

@@ -7,3 +7,4 @@ dist/
 *.lnk
 clampwise-error.log
 .claude/
+tests/lab_files.local.json

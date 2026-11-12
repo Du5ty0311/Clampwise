@@ -5,7 +5,8 @@ their dialogs, with the effect that was checked.
     python tools/audit/controls_doc.py runs.jsonl # writes the list from a run already recorded
 
 The list is made from the runs themselves: ``tests/test_every_control.py`` presses each control on a simulated
-recording of every type (and on copies of Daniel's files when they are on the machine) and records what changed;
+recording of every type (and on copies of the lab's own files when they are named on the machine) and records
+what changed;
 this file turns those records into the table. ``CHECKED`` adds, for the controls the test also checks by name
 (``test_..._does_what_its_labels_say`` and the regression tests), what was asserted. A control the test finds that
 is not in the list fails the test, so the list cannot fall behind the screens.
@@ -115,7 +116,8 @@ it (a panel, a letter, a title, an axis and its title, the legend, a group, the 
 command, a text, a bracket, a reference line, a mark along x, a potential label, a text on the page) is clicked,
 dragged, moved with an arrow key, double-clicked (and rewritten), deleted and right-clicked (each entry of its
 menu chosen). All of it on a simulated recording
-of every recording type ({types}) and, when `E:\\Daniel` is on the machine, on copies of three of his files. It
+of every recording type ({types}) and, when the lab's own recordings are named on the machine
+(`tests/labdata.py`), on copies of three of them. It
 fails when a control raises, changes nothing, makes an edit that Undo does not put back, or is disabled without
 saying why. A control found on a screen and missing from this list fails the test too.
 
@@ -181,7 +183,7 @@ def main() -> int:
     records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
     his = any(r["state"].startswith("his ") for r in records)
     DOC.parent.mkdir(parents=True, exist_ok=True)
-    DOC.write_text(write(records, "the simulated recordings" + (" and copies of Daniel's files" if his else "")),
+    DOC.write_text(write(records, "the simulated recordings" + (" and copies of the lab's own files" if his else "")),
                    encoding="utf-8", newline="\n")
     bad = sorted({r["name"] for r in records if r["error"]})
     print(f"{DOC}: {len({r['name'] for r in records})} controls" + (f"; RAISED: {bad}" if bad else ""))
