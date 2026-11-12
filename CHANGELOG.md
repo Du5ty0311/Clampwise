@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.1 — not released yet
+## 1.8.1 — 2026-11-12
 
 - **A cleaner look, light and dark.** The light theme is white panels on a light grey page (it was warm beige);
   the dark theme a neutral charcoal (it was brown). Drop-down lists show their arrow, spin boxes have clean up and
